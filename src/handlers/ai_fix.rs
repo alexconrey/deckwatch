@@ -29,7 +29,7 @@ const AI_FIX_AGENT_LABEL_KEY: &str = "deckwatch.io/ai-fix-agent";
 const APP_CM_DATA_KEY: &str = "application";
 const APP_LABEL: &str = "deckwatch.io/application";
 
-const DEFAULT_CLAUDE_IMAGE: &str = "ghcr.io/anthropics/claude-code:latest";
+const DEFAULT_CLAUDE_IMAGE: &str = "node:24-slim";
 const DEFAULT_CODEX_IMAGE: &str = "ghcr.io/openai/codex:latest";
 const DEFAULT_CLAUDE_SECRET: &str = "deckwatch-anthropic-api-key";
 const DEFAULT_CODEX_SECRET: &str = "deckwatch-openai-api-key";
@@ -479,19 +479,58 @@ async fn create_ai_fix_job(
     //   - egress is normal outbound HTTPS (whatever NetPol the cluster has).
     // Operators who want stricter isolation should attach a NetworkPolicy
     // to the diagnostic/ai-fix Job pods. See docs/AI_SAFETY.md.
-    let (cli, cli_flags): (&str, String) = match agent {
-        DiagAgent::Claude => ("claude", "-p --dangerously-skip-permissions".to_string()),
-        DiagAgent::Codex => ("codex", "exec --sandbox workspace-write --".to_string()),
-    };
-
     // Clone URL construction matches watcher::trigger_build: strip scheme,
     // then re-inject via `https://x-token:$GIT_TOKEN@host/path` when a token
     // is present. Anonymous clone otherwise.
     //
     // The prompt is read from a file, never interpolated into the shell —
     // the fenced/sanitized prompt lands verbatim on the CLI's stdin.
-    let clone_script = format!(
-        r#"set -eu
+    //
+    // Claude: installed on-the-fly via `npx` from a Node.js base image
+    // (the ghcr.io/anthropics/claude-code image is not publicly pullable).
+    // The node:24-slim image doesn't ship git, so we install it first.
+    // Codex: expected to be pre-installed in the image.
+    let clone_script = match agent {
+        DiagAgent::Claude => format!(
+            r#"set -eu
+
+# node:24-slim doesn't include git; install it for the clone step.
+apt-get update -qq && apt-get install -y -qq git >/dev/null 2>&1
+
+if ! command -v npx >/dev/null 2>&1; then
+  echo "error: npx not found in image PATH — is this a Node.js base image?" >&2
+  exit 127
+fi
+
+REPO="$DECKWATCH_AIFIX_REPO"
+BRANCH="$DECKWATCH_AIFIX_BRANCH"
+
+if [ -n "${{GIT_TOKEN:-}}" ]; then
+  CLONE_URL="$(printf '%s' "$REPO" | sed -E 's#^https?://#&x-token:'"$GIT_TOKEN"'@#')"
+else
+  CLONE_URL="$REPO"
+fi
+
+mkdir -p {WORKDIR}
+cd {WORKDIR}
+git clone --depth 50 --branch "$BRANCH" "$CLONE_URL" repo 2>&1 | sed "s#${{GIT_TOKEN:-__no_token__}}#***#g" || true
+cd repo
+
+echo "=== Deckwatch AI Fix ==="
+echo "Application: $DECKWATCH_AIFIX_APP"
+echo "Repository:  $REPO"
+echo "Branch:      $BRANCH"
+echo "Agent:       claude (via npx)"
+echo
+
+cat "$DECKWATCH_AIFIX_CONTEXT_PATH" | npx -y @anthropic-ai/claude-code@latest --print --dangerously-skip-permissions
+"#
+        ),
+        DiagAgent::Codex => {
+            let cli = "codex";
+            let cli_flags = "exec --sandbox workspace-write --";
+            format!(
+                r#"set -eu
 if ! command -v git >/dev/null 2>&1; then
   echo "error: git not found in agent image PATH" >&2
   exit 127
@@ -505,8 +544,6 @@ REPO="$DECKWATCH_AIFIX_REPO"
 BRANCH="$DECKWATCH_AIFIX_BRANCH"
 
 if [ -n "${{GIT_TOKEN:-}}" ]; then
-  # Rewrite https://host/path -> https://x-token:$GIT_TOKEN@host/path so
-  # the credential goes through without landing in `ps` output.
   CLONE_URL="$(printf '%s' "$REPO" | sed -E 's#^https?://#&x-token:'"$GIT_TOKEN"'@#')"
 else
   CLONE_URL="$REPO"
@@ -526,7 +563,9 @@ echo
 
 cat "$DECKWATCH_AIFIX_CONTEXT_PATH" | {cli} {cli_flags}
 "#
-    );
+            )
+        }
+    };
 
     let container_spec = Container {
         name: "agent".to_string(),

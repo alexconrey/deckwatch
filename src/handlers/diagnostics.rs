@@ -34,7 +34,7 @@ const DIAG_LABEL_KEY: &str = "deckwatch.io/diagnostic";
 const DIAG_POD_LABEL_KEY: &str = "deckwatch.io/diagnostic-source-pod";
 const DIAG_AGENT_LABEL_KEY: &str = "deckwatch.io/diagnostic-agent";
 
-const DEFAULT_CLAUDE_IMAGE: &str = "ghcr.io/anthropics/claude-code:latest";
+const DEFAULT_CLAUDE_IMAGE: &str = "node:24-slim";
 const DEFAULT_CODEX_IMAGE: &str = "ghcr.io/openai/codex:latest";
 const DEFAULT_CLAUDE_SECRET: &str = "deckwatch-anthropic-api-key";
 const DEFAULT_CODEX_SECRET: &str = "deckwatch-openai-api-key";
@@ -788,32 +788,37 @@ async fn create_diag_job(
     // reads logs and prints back a diagnosis, the default (no tool use)
     // is strictly safer against prompt-injection payloads. See
     // docs/AI_SAFETY.md for the discussion.
-    let (cli, extra_flags): (&str, Vec<String>) = match agent {
-        DiagAgent::Claude => ("claude", vec!["-p".to_string()]),
-        DiagAgent::Codex => (
-            "codex",
-            vec![
-                "exec".to_string(),
-                "--sandbox".to_string(),
-                "read-only".to_string(),
-                "--".to_string(),
-            ],
-        ),
-    };
-
-    let cli_flags = extra_flags.join(" ");
     // The prompt is piped in from a file, never interpolated into the
     // shell command. That's why the script here just cats and pipes —
     // no `printf "$VAR"` with prompt content.
-    let shell_script = format!(
-        r#"set -eu
+    //
+    // Claude: installed on-the-fly via `npx` from a Node.js base image
+    // (the ghcr.io/anthropics/claude-code image is not publicly pullable).
+    // Codex: expected to be pre-installed in the image.
+    let shell_script = match agent {
+        DiagAgent::Claude => format!(
+            r#"set -eu
+if ! command -v npx >/dev/null 2>&1; then
+  echo "error: npx not found in image PATH — is this a Node.js base image?" >&2
+  exit 127
+fi
+cat "$DECKWATCH_DIAG_PROMPT_PATH" | npx -y @anthropic-ai/claude-code@latest --print
+"#
+        ),
+        DiagAgent::Codex => {
+            let cli = "codex";
+            let cli_flags = "exec --sandbox read-only --";
+            format!(
+                r#"set -eu
 if ! command -v {cli} >/dev/null 2>&1; then
   echo "error: {cli} CLI not found in image PATH" >&2
   exit 127
 fi
 cat "$DECKWATCH_DIAG_PROMPT_PATH" | {cli} {cli_flags}
 "#
-    );
+            )
+        }
+    };
 
     let container_spec = Container {
         name: "agent".to_string(),
