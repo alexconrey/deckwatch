@@ -72,3 +72,62 @@ async fn kube_api_error_invalid_code_falls_back_to_502() {
     let (status, _body) = body_json(err.into_response()).await;
     assert_eq!(status, StatusCode::BAD_GATEWAY);
 }
+
+// ---- friendly_kube_message ----
+
+#[test]
+fn friendly_forbidden() {
+    let msg = friendly_kube_message("pods is forbidden: User lacks permission");
+    assert_eq!(msg, "You don't have permission to perform this action.");
+}
+
+#[test]
+fn friendly_already_exists() {
+    let msg = friendly_kube_message("deployments.apps \"web\" already exists");
+    assert!(
+        msg.starts_with("That name is already taken."),
+        "unexpected: {msg}"
+    );
+    // The trailing portion should include the text after the last colon.
+    assert!(msg.contains("already exists"), "unexpected: {msg}");
+}
+
+#[test]
+fn friendly_namespace_not_found() {
+    let msg = friendly_kube_message("namespaces \"foo\" not found");
+    assert_eq!(msg, "The namespace doesn't exist.");
+}
+
+#[test]
+fn friendly_image_pull_backoff() {
+    let msg = friendly_kube_message("Back-off pulling image: ImagePullBackOff");
+    assert_eq!(
+        msg,
+        "The container image couldn't be pulled. Check the image name and tag."
+    );
+}
+
+#[test]
+fn friendly_err_image_pull() {
+    let msg = friendly_kube_message("ErrImagePull: repository not found");
+    assert_eq!(
+        msg,
+        "The container image couldn't be pulled. Check the image name and tag."
+    );
+}
+
+#[test]
+fn friendly_exceeded_quota() {
+    let msg = friendly_kube_message("exceeded quota: cpu limit reached");
+    assert_eq!(
+        msg,
+        "Resource quota exceeded. Ask your cluster admin to increase limits."
+    );
+}
+
+#[test]
+fn friendly_unknown_passthrough() {
+    let raw = "some totally unknown kube error";
+    let msg = friendly_kube_message(raw);
+    assert_eq!(msg, raw, "unknown messages should pass through unchanged");
+}

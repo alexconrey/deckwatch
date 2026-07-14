@@ -938,6 +938,279 @@ fn node_summary_uses_kubernetes_io_role_when_no_prefixed_label() {
     assert_eq!(s.roles, vec!["gpu".to_string()]);
 }
 
+// ---- ingress_summary multi-host ----
+
+#[test]
+fn ingress_summary_multi_host() {
+    let ing = Ingress {
+        metadata: meta("multi", "prod"),
+        spec: Some(IngressSpec {
+            ingress_class_name: Some("alb".to_string()),
+            rules: Some(vec![
+                IngressRule {
+                    host: Some("app.example.com".to_string()),
+                    http: None,
+                },
+                IngressRule {
+                    host: Some("api.example.com".to_string()),
+                    http: None,
+                },
+                IngressRule {
+                    host: None, // wildcard rule, should be skipped in hosts
+                    http: None,
+                },
+            ]),
+            ..Default::default()
+        }),
+        status: None,
+    };
+    let s = ingress_summary(&ing);
+    assert_eq!(
+        s.hosts,
+        vec!["app.example.com".to_string(), "api.example.com".to_string()]
+    );
+    assert_eq!(s.ingress_class.as_deref(), Some("alb"));
+    assert!(s.addresses.is_empty(), "no status means no addresses");
+}
+
+// ---- extract_probe standalone ----
+
+#[test]
+fn extract_probe_http_get() {
+    let probe = Probe {
+        http_get: Some(HTTPGetAction {
+            path: Some("/ready".to_string()),
+            port: IntOrString::Int(3000),
+            ..Default::default()
+        }),
+        initial_delay_seconds: Some(5),
+        period_seconds: Some(10),
+        timeout_seconds: Some(2),
+        failure_threshold: Some(3),
+        success_threshold: Some(1),
+        ..Default::default()
+    };
+    let out = extract_probe(&probe);
+    assert_eq!(out.probe_type, "httpGet");
+    assert_eq!(out.path.as_deref(), Some("/ready"));
+    assert_eq!(out.port, Some(3000));
+    assert_eq!(out.command, None);
+    assert_eq!(out.initial_delay_seconds, Some(5));
+    assert_eq!(out.period_seconds, Some(10));
+    assert_eq!(out.timeout_seconds, Some(2));
+    assert_eq!(out.failure_threshold, Some(3));
+    assert_eq!(out.success_threshold, Some(1));
+}
+
+#[test]
+fn extract_probe_tcp_socket() {
+    let probe = Probe {
+        tcp_socket: Some(TCPSocketAction {
+            port: IntOrString::Int(5432),
+            ..Default::default()
+        }),
+        period_seconds: Some(15),
+        ..Default::default()
+    };
+    let out = extract_probe(&probe);
+    assert_eq!(out.probe_type, "tcpSocket");
+    assert_eq!(out.port, Some(5432));
+    assert_eq!(out.path, None);
+    assert_eq!(out.command, None);
+    assert_eq!(out.period_seconds, Some(15));
+}
+
+#[test]
+fn extract_probe_exec() {
+    let probe = Probe {
+        exec: Some(ExecAction {
+            command: Some(vec![
+                "/bin/sh".to_string(),
+                "-c".to_string(),
+                "pg_isready".to_string(),
+            ]),
+        }),
+        failure_threshold: Some(5),
+        ..Default::default()
+    };
+    let out = extract_probe(&probe);
+    assert_eq!(out.probe_type, "exec");
+    assert_eq!(out.path, None);
+    assert_eq!(out.port, None);
+    assert_eq!(
+        out.command.as_deref(),
+        Some(
+            &[
+                "/bin/sh".to_string(),
+                "-c".to_string(),
+                "pg_isready".to_string()
+            ][..]
+        )
+    );
+    assert_eq!(out.failure_threshold, Some(5));
+}
+
+#[test]
+fn extract_probe_unknown_when_empty() {
+    let probe = Probe {
+        ..Default::default()
+    };
+    let out = extract_probe(&probe);
+    assert_eq!(out.probe_type, "unknown");
+    assert_eq!(out.path, None);
+    assert_eq!(out.port, None);
+    assert_eq!(out.command, None);
+}
+
+// ---- deployment_phase ScaledToZero edge cases ----
+
+#[test]
+fn deployment_phase_scaled_to_zero_ignores_conditions() {
+    // Even with non-matching conditions, desired=0 should yield ScaledToZero
+    // when no failure/available-false conditions override it.
+    let dep = dep_with(
+        0,
+        0,
+        0,
+        0,
+        vec![dep_condition(
+            "Progressing",
+            "False",
+            Some("DeploymentPaused"),
+        )],
+    );
+    assert!(matches!(
+        deployment_phase(&dep),
+        DeploymentPhase::ScaledToZero
+    ));
+}
+
+// ---- pod_summary with conditions ----
+
+#[test]
+fn pod_summary_multiple_conditions() {
+    let pod = Pod {
+        metadata: meta("p2", "staging"),
+        spec: Some(PodSpec {
+            containers: vec![Container {
+                name: "app".to_string(),
+                image: Some("myimg:v1".to_string()),
+                ..Default::default()
+            }],
+            node_name: Some("node-b".to_string()),
+            ..Default::default()
+        }),
+        status: Some(PodStatus {
+            phase: Some("Running".to_string()),
+            conditions: Some(vec![
+                PodCondition {
+                    type_: "Initialized".to_string(),
+                    status: "True".to_string(),
+                    reason: None,
+                    message: None,
+                    last_probe_time: None,
+                    last_transition_time: None,
+                },
+                PodCondition {
+                    type_: "Ready".to_string(),
+                    status: "False".to_string(),
+                    reason: Some("ContainersNotReady".to_string()),
+                    message: Some("container app is not ready".to_string()),
+                    last_probe_time: None,
+                    last_transition_time: None,
+                },
+                PodCondition {
+                    type_: "PodScheduled".to_string(),
+                    status: "True".to_string(),
+                    reason: None,
+                    message: None,
+                    last_probe_time: None,
+                    last_transition_time: None,
+                },
+            ]),
+            container_statuses: Some(vec![container_status(
+                "app",
+                false,
+                0,
+                ContainerState {
+                    waiting: Some(ContainerStateWaiting {
+                        reason: Some("ContainerCreating".to_string()),
+                        message: None,
+                    }),
+                    ..Default::default()
+                },
+            )]),
+            ..Default::default()
+        }),
+    };
+    let sum = pod_summary(&pod);
+    assert_eq!(sum.conditions.len(), 3);
+    // Initialized = True
+    assert!(sum.conditions[0].status);
+    assert_eq!(sum.conditions[0].condition_type, "Initialized");
+    // Ready = False
+    assert!(!sum.conditions[1].status);
+    assert_eq!(sum.conditions[1].condition_type, "Ready");
+    assert_eq!(
+        sum.conditions[1].reason.as_deref(),
+        Some("ContainersNotReady")
+    );
+    assert_eq!(
+        sum.conditions[1].message.as_deref(),
+        Some("container app is not ready")
+    );
+    // PodScheduled = True
+    assert!(sum.conditions[2].status);
+    assert!(
+        !sum.ready,
+        "pod should not be ready when container is waiting"
+    );
+    assert_eq!(sum.container_statuses[0].state, "waiting");
+    assert_eq!(
+        sum.container_statuses[0].state_reason.as_deref(),
+        Some("ContainerCreating")
+    );
+}
+
+#[test]
+fn pod_summary_spec_containers_without_runtime_status() {
+    // Spec defines containers but no runtime container_statuses yet (early startup).
+    let pod = Pod {
+        metadata: meta("p3", "default"),
+        spec: Some(PodSpec {
+            containers: vec![
+                Container {
+                    name: "init-app".to_string(),
+                    image: Some("busybox:1".to_string()),
+                    ..Default::default()
+                },
+                Container {
+                    name: "sidecar".to_string(),
+                    image: Some("envoy:latest".to_string()),
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        }),
+        status: Some(PodStatus {
+            phase: Some("Pending".to_string()),
+            container_statuses: None,
+            ..Default::default()
+        }),
+    };
+    let sum = pod_summary(&pod);
+    assert_eq!(sum.container_statuses.len(), 2);
+    assert_eq!(sum.container_statuses[0].name, "init-app");
+    assert_eq!(sum.container_statuses[0].state, "pending");
+    assert_eq!(
+        sum.container_statuses[0].state_reason.as_deref(),
+        Some("NotStartedYet")
+    );
+    assert!(!sum.container_statuses[0].ready);
+    assert_eq!(sum.container_statuses[1].name, "sidecar");
+    assert!(!sum.ready);
+}
+
 // Silence unused warning if Condition import isn't strictly needed.
 #[allow(dead_code)]
 fn _condition_used(_: Condition) {}
