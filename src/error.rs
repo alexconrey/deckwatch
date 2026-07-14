@@ -21,7 +21,7 @@ pub enum AppError {
 
 /// Map common Kubernetes API error strings to human-friendly messages.
 /// The raw message is preserved in debug logs for troubleshooting.
-fn friendly_kube_message(raw: &str) -> String {
+pub(crate) fn friendly_kube_message(raw: &str) -> String {
     if raw.contains("is forbidden") {
         return "You don't have permission to perform this action.".to_string();
     }
