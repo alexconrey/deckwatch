@@ -14,6 +14,7 @@ import { registryApi } from "@/api/registry";
 import type { RepositorySummary, TagSummary } from "@/api/registry";
 import { settingsApi } from "@/api/settings";
 import { ApiError } from "@/api/client";
+import { formatAge } from "@/utils/format";
 
 const props = defineProps<{
   modelValue: boolean;
@@ -68,17 +69,8 @@ const shortDigest = (d: string): string => {
   return `sha256:${hex.slice(0, 12)}`;
 };
 
-const relativeAge = (iso: string | null): string => {
-  if (!iso) return "-";
-  const diff = Date.now() - new Date(iso).getTime();
-  const min = Math.floor(diff / 60000);
-  if (min < 1) return "just now";
-  if (min < 60) return `${min}m ago`;
-  const hr = Math.floor(min / 60);
-  if (hr < 24) return `${hr}h ago`;
-  const d = Math.floor(hr / 24);
-  return `${d}d ago`;
-};
+const relativeAge = (iso: string | null): string =>
+  formatAge(iso, { suffix: " ago" });
 
 // Strip protocol so `registry.example.com/repo:tag` looks like a normal
 // image reference. Callers pasting into a Kubernetes image field don't want

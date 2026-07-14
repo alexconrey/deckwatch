@@ -19,7 +19,9 @@ use kube::api::{DeleteParams, ListParams, Patch, PatchParams, PostParams};
 use serde::{Deserialize, Serialize};
 
 use crate::error::AppError;
-use crate::handlers::deployments::{CreateDeploymentRequest, DeploymentDetailResponse, UpdateDeploymentRequest};
+use crate::handlers::deployments::{
+    CreateDeploymentRequest, DeploymentDetailResponse, UpdateDeploymentRequest,
+};
 use crate::kube_ext::deployment_detail;
 use crate::state::AppState;
 
@@ -102,10 +104,7 @@ pub async fn history(
     Ok(Json(HistoryResponse { revisions }))
 }
 
-fn replica_set_to_revision(
-    rs: &ReplicaSet,
-    current_hash: Option<&str>,
-) -> Option<RevisionSummary> {
+fn replica_set_to_revision(rs: &ReplicaSet, current_hash: Option<&str>) -> Option<RevisionSummary> {
     let annotations = rs.metadata.annotations.as_ref()?;
     let revision: i64 = annotations.get(REVISION_ANNOTATION)?.parse().ok()?;
 
@@ -119,7 +118,9 @@ fn replica_set_to_revision(
         .unwrap_or_default();
 
     let is_current = match (current_hash, rs.metadata.labels.as_ref()) {
-        (Some(hash), Some(labels)) => labels.get("pod-template-hash").map(|s| s.as_str()) == Some(hash),
+        (Some(hash), Some(labels)) => {
+            labels.get("pod-template-hash").map(|s| s.as_str()) == Some(hash)
+        }
         _ => false,
     };
 
@@ -128,7 +129,11 @@ fn replica_set_to_revision(
         replica_set_name: rs.metadata.name.clone().unwrap_or_default(),
         image,
         replicas: rs.spec.as_ref().and_then(|s| s.replicas).unwrap_or(0),
-        ready_replicas: rs.status.as_ref().and_then(|s| s.ready_replicas).unwrap_or(0),
+        ready_replicas: rs
+            .status
+            .as_ref()
+            .and_then(|s| s.ready_replicas)
+            .unwrap_or(0),
         created_at: rs
             .metadata
             .creation_timestamp
@@ -339,10 +344,8 @@ pub async fn clone(
     let source = src_api.get(&name).await?;
 
     let mut cloned = source.clone();
-    let selector_labels: BTreeMap<String, String> = BTreeMap::from([(
-        "app".to_string(),
-        target_name.clone(),
-    )]);
+    let selector_labels: BTreeMap<String, String> =
+        BTreeMap::from([("app".to_string(), target_name.clone())]);
 
     // Rewrite identity + strip all cluster-managed metadata so `create()`
     // is accepted. We also rewrite the selector to key on the new name —
@@ -376,9 +379,7 @@ pub async fn clone(
         let _ = dst_api.delete(&target_name, &DeleteParams::default()).await;
     }
 
-    let created = dst_api
-        .create(&PostParams::default(), &cloned)
-        .await?;
+    let created = dst_api.create(&PostParams::default(), &cloned).await?;
 
     Ok((
         StatusCode::CREATED,
@@ -549,10 +550,7 @@ fn build_deployment_from_request(
         spec: Some(DeploymentSpec {
             replicas: Some(req.replicas.unwrap_or(1)),
             selector: LabelSelector {
-                match_labels: Some(BTreeMap::from([(
-                    "app".to_string(),
-                    req.name.clone(),
-                )])),
+                match_labels: Some(BTreeMap::from([("app".to_string(), req.name.clone())])),
                 ..Default::default()
             },
             template: PodTemplateSpec {
@@ -641,11 +639,7 @@ pub async fn revision_yaml(
         .spec
         .as_ref()
         .and_then(|s| s.template.as_ref())
-        .ok_or_else(|| {
-            AppError::BadRequest(format!(
-                "revision {revision} has no pod template"
-            ))
-        })?;
+        .ok_or_else(|| AppError::BadRequest(format!("revision {revision} has no pod template")))?;
 
     let yaml = serde_yaml::to_string(template).map_err(|e| {
         AppError::BadRequest(format!(
@@ -666,8 +660,6 @@ pub async fn revision_yaml(
 // This file is intended to be appended to
 // `src/handlers/deployments_ux.rs`. It re-uses `ValidateResponse` and
 // `split_admission_errors` from that module.
-
-
 
 /// `POST /api/namespaces/{ns}/deployments/{name}/validate`
 ///
@@ -811,8 +803,6 @@ fn apply_update(mut dep: Deployment, req: UpdateDeploymentRequest) -> Deployment
 //
 // This file is intended to be appended to `src/handlers/deployments_ux.rs`.
 
-
-
 /// Same annotation key the watcher's `auto_rollback` module reads.
 /// Duplicated as a string here (rather than importing) so the handler stays
 /// self-contained; the watcher is the source of truth for the *behaviour*,
@@ -872,7 +862,9 @@ pub async fn set_auto_rollback(
     api.patch(&name, &PatchParams::default(), &Patch::Merge(patch))
         .await?;
 
-    Ok(Json(AutoRollbackResponse { enabled: req.enabled }))
+    Ok(Json(AutoRollbackResponse {
+        enabled: req.enabled,
+    }))
 }
 
 // ============================================================
@@ -889,4 +881,3 @@ pub async fn set_auto_rollback(
 // The frontend reads the current state directly from the Deployment's
 // `annotations` map (already surfaced in DeploymentDetail via
 // `kube_ext::deployment_detail`) — no separate GET endpoint is needed.
-

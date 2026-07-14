@@ -27,9 +27,7 @@ pub fn init() {
 
     let handle = PrometheusBuilder::new()
         .set_buckets_for_metric(
-            metrics_exporter_prometheus::Matcher::Suffix(
-                "_duration_seconds".to_string(),
-            ),
+            metrics_exporter_prometheus::Matcher::Suffix("_duration_seconds".to_string()),
             latency_buckets,
         )
         .expect("configure latency buckets")
@@ -48,7 +46,7 @@ pub fn render() -> String {
         .get()
         .map(|h| h.render())
         .unwrap_or_else(|| String::from("# metrics recorder not initialized\n"))
-    }
+}
 
 /// GET /metrics — Prometheus scrape endpoint. No auth, no state.
 pub async fn metrics_handler() -> impl IntoResponse {
@@ -63,8 +61,8 @@ pub async fn metrics_handler() -> impl IntoResponse {
     )
 }
 
-/// Axum middleware that records `http_requests_total` and
-/// `http_request_duration_seconds` for every request.
+/// Axum middleware that records `deckwatch_http_requests_total` and
+/// `deckwatch_http_request_duration_seconds` for every request.
 ///
 /// Uses `MatchedPath` (e.g. `/api/namespaces/{ns}/deployments/{name}`) as the
 /// `path` label so cardinality stays bounded — raw request URIs would explode.
@@ -84,15 +82,15 @@ pub async fn track_http(req: Request, next: Next) -> Response {
     let status = response.status().as_u16().to_string();
 
     counter!(
-        "http_requests_total",
+        "deckwatch_http_requests_total",
         "method" => method.clone(),
         "path" => path.clone(),
-        "status" => status,
+        "status_code" => status,
     )
     .increment(1);
 
     histogram!(
-        "http_request_duration_seconds",
+        "deckwatch_http_request_duration_seconds",
         "method" => method,
         "path" => path,
     )
@@ -108,17 +106,17 @@ pub async fn track_http(req: Request, next: Next) -> Response {
 /// - `status` is `ok` or `err`
 pub fn record_k8s_call(resource: &str, operation: &str, status: &str, duration_s: f64) {
     counter!(
-        "k8s_api_requests_total",
+        "deckwatch_kube_api_requests_total",
         "resource" => resource.to_owned(),
-        "operation" => operation.to_owned(),
+        "verb" => operation.to_owned(),
         "status" => status.to_owned(),
     )
     .increment(1);
 
     histogram!(
-        "k8s_api_request_duration_seconds",
+        "deckwatch_kube_api_request_duration_seconds",
         "resource" => resource.to_owned(),
-        "operation" => operation.to_owned(),
+        "verb" => operation.to_owned(),
     )
     .record(duration_s);
 }
@@ -176,27 +174,72 @@ impl Drop for K8sTimer {
 }
 
 /// Update the gauge tracking how many deployments deckwatch is managing in
-/// each namespace. Call from list handlers or a periodic reconciler.
-pub fn set_deployments_managed(namespace: &str, count: f64) {
-    gauge!("deployments_managed_total", "namespace" => namespace.to_owned())
-        .set(count);
+/// each namespace, broken down by status. Call from the watcher poll cycle.
+pub fn set_deployments_managed(namespace: &str, status: &str, count: f64) {
+    gauge!(
+        "deckwatch_deployments_managed_total",
+        "namespace" => namespace.to_owned(),
+        "status" => status.to_owned(),
+    )
+    .set(count);
+}
+
+/// Update the gauge tracking the number of active gitops configurations in
+/// the database. Call from the watcher poll cycle.
+pub fn set_gitops_watchers(count: f64) {
+    gauge!("deckwatch_gitops_watchers_total").set(count);
+}
+
+/// Update the gauge tracking how many ingresses deckwatch is managing per
+/// namespace. Call from the watcher poll cycle.
+pub fn set_ingresses_managed(namespace: &str, count: f64) {
+    gauge!(
+        "deckwatch_ingresses_managed_total",
+        "namespace" => namespace.to_owned(),
+    )
+    .set(count);
+}
+
+/// Record an audit event. Call from `audit::log_action`.
+pub fn record_audit_event(action: &str, resource_type: &str) {
+    counter!(
+        "deckwatch_audit_events_total",
+        "action" => action.to_owned(),
+        "resource_type" => resource_type.to_owned(),
+    )
+    .increment(1);
+}
+
+/// Record an application error. Call from the `AppError` response path.
+pub fn record_error(handler: &str, error_type: &str) {
+    counter!(
+        "deckwatch_errors_total",
+        "handler" => handler.to_owned(),
+        "error_type" => error_type.to_owned(),
+    )
+    .increment(1);
+}
+
+/// Record how long a single gitops poll cycle took.
+pub fn record_gitops_poll_duration(duration_s: f64) {
+    histogram!("deckwatch_gitops_poll_duration_seconds").record(duration_s);
 }
 
 /// Increment/decrement the active SSE connection gauge. Pair `sse_opened`
 /// with `sse_closed` — one on stream start, one on stream end (including
 /// error paths).
 pub fn sse_opened() {
-    gauge!("active_sse_connections").increment(1.0);
+    gauge!("deckwatch_active_sse_connections").increment(1.0);
 }
 
 pub fn sse_closed() {
-    gauge!("active_sse_connections").decrement(1.0);
+    gauge!("deckwatch_active_sse_connections").decrement(1.0);
 }
 
 /// Record a gitops build result. Call once per build completion.
 pub fn record_gitops_build(namespace: &str, status: &str) {
     counter!(
-        "gitops_builds_total",
+        "deckwatch_gitops_builds_total",
         "namespace" => namespace.to_owned(),
         "status" => status.to_owned(),
     )
@@ -269,7 +312,9 @@ pub struct NavigationTiming {
     pub load_time_ms: f64,
 }
 
-fn one() -> u64 { 1 }
+fn one() -> u64 {
+    1
+}
 
 /// POST /api/frontend-metrics — accepts a batch, records into the same
 /// prometheus recorder as the backend. Silently drops malformed batches
@@ -283,14 +328,13 @@ pub async fn ingest_frontend_metrics(
     };
 
     for pv in metrics.page_views {
-        counter!("frontend_page_views_total", "route" => pv.route)
-            .increment(pv.count);
+        counter!("deckwatch_frontend_page_views_total", "route" => pv.route).increment(pv.count);
     }
 
     for call in metrics.api_calls {
         let status_class = format!("{}xx", call.status / 100);
         counter!(
-            "frontend_api_calls_total",
+            "deckwatch_frontend_api_calls_total",
             "path" => call.path.clone(),
             "method" => call.method.clone(),
             "status" => status_class,
@@ -298,7 +342,7 @@ pub async fn ingest_frontend_metrics(
         .increment(1);
 
         histogram!(
-            "frontend_api_call_duration_seconds",
+            "deckwatch_frontend_api_call_duration_seconds",
             "path" => call.path,
             "method" => call.method,
         )
@@ -307,7 +351,7 @@ pub async fn ingest_frontend_metrics(
 
     for err in metrics.errors {
         counter!(
-            "frontend_errors_total",
+            "deckwatch_frontend_errors_total",
             "kind" => err.kind,
             "route" => err.route,
         )
@@ -316,7 +360,7 @@ pub async fn ingest_frontend_metrics(
 
     if let Some(nav) = metrics.navigation_timing {
         histogram!(
-            "frontend_page_load_seconds",
+            "deckwatch_frontend_page_load_seconds",
             "route" => nav.route,
         )
         .record(nav.load_time_ms / 1000.0);
@@ -331,7 +375,7 @@ pub async fn ingest_frontend_metrics(
             _ => vital.value / 1000.0,
         };
         histogram!(
-            "frontend_web_vital",
+            "deckwatch_frontend_web_vital",
             "name" => vital.name,
             "route" => vital.route,
         )

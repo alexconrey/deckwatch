@@ -46,3 +46,74 @@ export function formatTimestamp(iso: string | null): string {
   if (!iso) return "-";
   return new Date(iso).toLocaleString();
 }
+
+/**
+ * Human-friendly formatter for Kubernetes memory quantity strings.
+ *
+ * Handles IEC suffixes (`Ki`, `Mi`, `Gi`, `Ti`), SI suffixes (`K`, `M`, `G`, `T`),
+ * plain byte counts, and already-formatted strings (pass-through).
+ *
+ * Examples:
+ *   "8123456Ki"  -> "7.7 GiB"
+ *   "256Mi"      -> "256 MiB"
+ *   "2Gi"        -> "2.0 GiB"
+ *   "1Ti"        -> "1.0 TiB"
+ *   "500M"       -> "500 MB"
+ *   "1073741824" -> "1.0 GiB"
+ *   "128974848"  -> "123 MiB"
+ *   null         -> "-"
+ */
+export function formatMemory(raw: string | null | undefined): string {
+  if (!raw) return "-";
+  const s = raw.trim();
+  if (!s) return "-";
+
+  // IEC binary suffixes (Ki, Mi, Gi, Ti)
+  const iecMatch = s.match(/^(\d+(?:\.\d+)?)(Ki|Mi|Gi|Ti)$/);
+  if (iecMatch) {
+    const val = parseFloat(iecMatch[1]);
+    const unit = iecMatch[2];
+    if (unit === "Ti") return `${val.toFixed(1)} TiB`;
+    if (unit === "Gi") return `${val.toFixed(1)} GiB`;
+    if (unit === "Mi") {
+      if (val >= 1024) return `${(val / 1024).toFixed(1)} GiB`;
+      return `${Math.round(val)} MiB`;
+    }
+    if (unit === "Ki") {
+      const gib = val / (1024 * 1024);
+      if (gib >= 1) return `${gib.toFixed(1)} GiB`;
+      const mib = val / 1024;
+      if (mib >= 1) return `${Math.round(mib)} MiB`;
+      return `${Math.round(val)} KiB`;
+    }
+  }
+
+  // SI decimal suffixes (K, M, G, T — not followed by 'i')
+  const siMatch = s.match(/^(\d+(?:\.\d+)?)(K|M|G|T)$/);
+  if (siMatch) {
+    const val = parseFloat(siMatch[1]);
+    const unit = siMatch[2];
+    if (unit === "T") return `${val.toFixed(1)} TB`;
+    if (unit === "G") return `${val.toFixed(1)} GB`;
+    if (unit === "M") return `${Math.round(val)} MB`;
+    if (unit === "K") return `${Math.round(val)} KB`;
+  }
+
+  // Plain number (bytes)
+  const plainMatch = s.match(/^(\d+(?:\.\d+)?)$/);
+  if (plainMatch) {
+    const bytes = parseFloat(plainMatch[1]);
+    const tib = bytes / (1024 ** 4);
+    if (tib >= 1) return `${tib.toFixed(1)} TiB`;
+    const gib = bytes / (1024 ** 3);
+    if (gib >= 1) return `${gib.toFixed(1)} GiB`;
+    const mib = bytes / (1024 ** 2);
+    if (mib >= 1) return `${Math.round(mib)} MiB`;
+    const kib = bytes / 1024;
+    if (kib >= 1) return `${Math.round(kib)} KiB`;
+    return `${Math.round(bytes)} B`;
+  }
+
+  // Already formatted or unrecognized — pass through
+  return s;
+}

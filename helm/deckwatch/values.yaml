@@ -132,6 +132,28 @@ registry:
     hosts: []
     tls: []
 
+webhook:
+  enabled: false
+
+prometheus:
+  enabled: true
+
+tracing:
+  enabled: false
+
+database:
+  # Database URL. SQLite for dev, Postgres/MySQL for production.
+  # Examples:
+  #   sqlite:///data/deckwatch.db?mode=rwc
+  #   postgres://user:pass@host:5432/deckwatch
+  url: "sqlite:///data/deckwatch.db?mode=rwc"
+  # PVC for SQLite persistence. Only used when url starts with "sqlite://".
+  persistence:
+    enabled: true
+    size: 1Gi
+    storageClass: ""
+    accessMode: ReadWriteOnce
+
 templates:
   configMapName: "deckwatch-templates"
   overrides: []

@@ -2,10 +2,10 @@ use k8s_openapi::api::apps::v1::Deployment;
 use k8s_openapi::api::autoscaling::v2::HorizontalPodAutoscaler;
 use k8s_openapi::api::batch::v1::{CronJob, Job};
 use k8s_openapi::api::core::v1::{ConfigMap, Event, Namespace, Node, Pod, Secret, Service};
-use k8s_openapi::api::networking::v1::Ingress;
-use kube::Api;
+use k8s_openapi::api::networking::v1::{Ingress, IngressClass};
 use kube::api::{ApiResource, DynamicObject, GroupVersionKind};
 use kube::discovery;
+use kube::Api;
 
 use crate::error::AppError;
 use crate::rate_limit::RateLimiter;
@@ -28,6 +28,9 @@ pub struct AppState {
     /// no matter which handler task runs the check. See `rate_limit.rs`
     /// for the semantics and docs/AI_SAFETY.md for the rationale.
     pub ai_rate_limiter: RateLimiter,
+    /// Database connection (SQLite, PostgreSQL, or MySQL). Tables are
+    /// created automatically via SeaORM migrations at startup.
+    pub db: sea_orm::DatabaseConnection,
 }
 
 impl AppState {
@@ -96,10 +99,7 @@ impl AppState {
         Ok(Api::namespaced(self.kube_client.clone(), ns))
     }
 
-    pub async fn podmonitors_api(
-        &self,
-        ns: &str,
-    ) -> Result<Api<DynamicObject>, String> {
+    pub async fn podmonitors_api(&self, ns: &str) -> Result<Api<DynamicObject>, String> {
         self.check_namespace(ns).map_err(|e| e.to_string())?;
         let gvk = GroupVersionKind::gvk("monitoring.coreos.com", "v1", "PodMonitor");
         let (ar, _caps) = discovery::pinned_kind(&self.kube_client, &gvk).await.map_err(|e| {
@@ -110,11 +110,7 @@ impl AppState {
         Ok(Self::dynamic_namespaced(&self.kube_client, ns, &ar))
     }
 
-    fn dynamic_namespaced(
-        client: &kube::Client,
-        ns: &str,
-        ar: &ApiResource,
-    ) -> Api<DynamicObject> {
+    fn dynamic_namespaced(client: &kube::Client, ns: &str, ar: &ApiResource) -> Api<DynamicObject> {
         Api::namespaced_with(client.clone(), ns, ar)
     }
 
@@ -123,6 +119,10 @@ impl AppState {
     }
 
     pub fn nodes_api(&self) -> Api<Node> {
+        Api::all(self.kube_client.clone())
+    }
+
+    pub fn ingressclasses_api(&self) -> Api<IngressClass> {
         Api::all(self.kube_client.clone())
     }
 }

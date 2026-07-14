@@ -1,6 +1,8 @@
 import { defineStore } from "pinia";
-import { ref } from "vue";
+import { ref, watch } from "vue";
 import { namespacesApi } from "@/api/namespaces";
+
+const STORAGE_KEY = "deckwatch-namespace";
 
 export const useNamespaceStore = defineStore("namespace", () => {
   const namespaces = ref<string[]>([]);
@@ -15,7 +17,12 @@ export const useNamespaceStore = defineStore("namespace", () => {
       const response = await namespacesApi.list();
       namespaces.value = response.namespaces;
       if (!selected.value && namespaces.value.length > 0) {
-        selected.value = namespaces.value[0];
+        const stored = localStorage.getItem(STORAGE_KEY);
+        if (stored && namespaces.value.includes(stored)) {
+          selected.value = stored;
+        } else {
+          selected.value = namespaces.value[0];
+        }
       }
     } catch (e) {
       error.value =
@@ -24,6 +31,12 @@ export const useNamespaceStore = defineStore("namespace", () => {
       loading.value = false;
     }
   };
+
+  watch(selected, (ns) => {
+    if (ns) {
+      localStorage.setItem(STORAGE_KEY, ns);
+    }
+  });
 
   return { namespaces, selected, loading, error, fetchNamespaces };
 });

@@ -68,7 +68,7 @@ Open [http://localhost:9090](http://localhost:9090).
 helm install deckwatch helm/deckwatch \
   --namespace deckwatch --create-namespace \
   --set image.repository=ghcr.io/alexconrey/deckwatch \
-  --set image.tag=0.1.0
+  --set image.tag=0.0.2
 ```
 
 ## Configuration

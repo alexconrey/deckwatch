@@ -5,7 +5,13 @@ metadata:
   labels:
     {{- include "deckwatch.labels" . | nindent 4 }}
 spec:
+  {{- if and .Values.database.persistence.enabled (hasPrefix "sqlite" .Values.database.url) }}
+  replicas: 1
+  strategy:
+    type: Recreate
+  {{- else }}
   replicas: {{ .Values.replicaCount }}
+  {{- end }}
   selector:
     matchLabels:
       {{- include "deckwatch.selectorLabels" . | nindent 6 }}
@@ -47,6 +53,8 @@ spec:
                   fieldPath: metadata.namespace
             - name: DECKWATCH_SETTINGS_CONFIGMAP
               value: {{ .Values.settings.configMapName | default "deckwatch-config" | quote }}
+            - name: DECKWATCH_DATABASE_URL
+              value: {{ .Values.database.url | quote }}
             {{- if .Values.registry.enabled }}
             - name: DECKWATCH_REGISTRY_ENABLED
               value: "true"
@@ -90,16 +98,31 @@ spec:
             periodSeconds: 10
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
-          {{- if and .Values.registry.enabled (or (eq (default "filesystem" .Values.registry.storage) "filesystem") (not .Values.registry.storage)) }}
+          {{- $needsRegistryVol := and .Values.registry.enabled (or (eq (default "filesystem" .Values.registry.storage) "filesystem") (not .Values.registry.storage)) }}
+          {{- $needsDbVol := and .Values.database.persistence.enabled (hasPrefix "sqlite" .Values.database.url) }}
+          {{- if or $needsRegistryVol $needsDbVol }}
           volumeMounts:
+            {{- if $needsRegistryVol }}
             - name: registry-storage
               mountPath: /data/registry
+            {{- end }}
+            {{- if $needsDbVol }}
+            - name: db-storage
+              mountPath: /data
+            {{- end }}
           {{- end }}
-      {{- if and .Values.registry.enabled (or (eq (default "filesystem" .Values.registry.storage) "filesystem") (not .Values.registry.storage)) }}
+      {{- if or $needsRegistryVol $needsDbVol }}
       volumes:
+        {{- if $needsRegistryVol }}
         - name: registry-storage
           persistentVolumeClaim:
             claimName: {{ include "deckwatch.fullname" . }}-registry
+        {{- end }}
+        {{- if $needsDbVol }}
+        - name: db-storage
+          persistentVolumeClaim:
+            claimName: {{ include "deckwatch.fullname" . }}-db
+        {{- end }}
       {{- end }}
       {{- with .Values.nodeSelector }}
       nodeSelector:

@@ -101,11 +101,7 @@ pub async fn auto_rollback_cycle(state: &AppState) -> anyhow::Result<()> {
 /// 2. Unhealthy for the first time: stamp `unhealthy-since=now`, return.
 /// 3. Unhealthy but under the grace window: nothing to do.
 /// 4. Unhealthy for > grace window: roll back and clear the marker.
-async fn evaluate_deployment(
-    state: &AppState,
-    ns: &str,
-    dep: &Deployment,
-) -> anyhow::Result<()> {
+async fn evaluate_deployment(state: &AppState, ns: &str, dep: &Deployment) -> anyhow::Result<()> {
     let phase = deployment_phase(dep);
     let name = dep.name_any();
 
@@ -309,9 +305,7 @@ async fn perform_rollback(
         .and_then(|s| s.template.as_ref())
         .and_then(|t| t.spec.as_ref())
         .ok_or_else(|| {
-            anyhow::anyhow!(
-                "auto_rollback: target revision {target_revision} has no pod spec"
-            )
+            anyhow::anyhow!("auto_rollback: target revision {target_revision} has no pod spec")
         })?;
 
     let now = jiff::Timestamp::now().to_string();
@@ -368,11 +362,7 @@ async fn stamp_unhealthy_since(
     Ok(())
 }
 
-async fn clear_unhealthy_marker(
-    state: &AppState,
-    ns: &str,
-    dep_name: &str,
-) -> anyhow::Result<()> {
+async fn clear_unhealthy_marker(state: &AppState, ns: &str, dep_name: &str) -> anyhow::Result<()> {
     let dep_api: Api<Deployment> = Api::namespaced(state.kube_client.clone(), ns);
     // Empty string on a merge patch is Kubernetes' idiomatic way to remove
     // an annotation. `null` would also work but requires a strategic-merge

@@ -116,7 +116,10 @@ pub fn detect_provider(repo_url: &str) -> Box<dyn GitProvider> {
 /// Extract the host from a repo URL. Handles both `https://host/path` and
 /// `git@host:path` forms; returns lowercase host.
 fn url_host(url: &str) -> Option<String> {
-    if let Some(rest) = url.strip_prefix("https://").or_else(|| url.strip_prefix("http://")) {
+    if let Some(rest) = url
+        .strip_prefix("https://")
+        .or_else(|| url.strip_prefix("http://"))
+    {
         let host = rest.split('/').next()?;
         // Strip user@ prefix and port suffix.
         let host = host.rsplit('@').next().unwrap_or(host);
@@ -163,12 +166,7 @@ async fn smart_http_head(
         request = request.header("Authorization", format!("Basic {creds}"));
     }
 
-    let resp = request
-        .send()
-        .await?
-        .error_for_status()?
-        .text()
-        .await?;
+    let resp = request.send().await?.error_for_status()?.text().await?;
 
     let target_ref = format!("refs/heads/{branch}");
     for line in resp.lines() {
@@ -255,8 +253,8 @@ fn verify_hmac_sha256(secret: &str, body: &[u8], expected_hex: &str) -> Result<(
     if secret.is_empty() {
         return Err(WebhookError::InvalidSignature);
     }
-    let mut mac =
-        Hmac::<Sha256>::new_from_slice(secret.as_bytes()).map_err(|_| WebhookError::InvalidSignature)?;
+    let mut mac = Hmac::<Sha256>::new_from_slice(secret.as_bytes())
+        .map_err(|_| WebhookError::InvalidSignature)?;
     mac.update(body);
     let computed = mac.finalize().into_bytes();
 
@@ -605,12 +603,7 @@ impl GitProvider for Bitbucket {
             .push
             .changes
             .into_iter()
-            .find(|c| {
-                c.new
-                    .as_ref()
-                    .map(|r| r.kind == "branch")
-                    .unwrap_or(false)
-            })
+            .find(|c| c.new.as_ref().map(|r| r.kind == "branch").unwrap_or(false))
             .and_then(|c| c.new)
             .ok_or_else(|| WebhookError::UnsupportedEvent("no branch change".to_string()))?;
 
@@ -677,14 +670,26 @@ mod tests {
 
     #[test]
     fn detect_provider_github() {
-        assert_eq!(detect_provider("https://github.com/foo/bar").name(), "github");
-        assert_eq!(detect_provider("https://GitHub.com/foo/bar.git").name(), "github");
-        assert_eq!(detect_provider("git@github.com:foo/bar.git").name(), "github");
+        assert_eq!(
+            detect_provider("https://github.com/foo/bar").name(),
+            "github"
+        );
+        assert_eq!(
+            detect_provider("https://GitHub.com/foo/bar.git").name(),
+            "github"
+        );
+        assert_eq!(
+            detect_provider("git@github.com:foo/bar.git").name(),
+            "github"
+        );
     }
 
     #[test]
     fn detect_provider_gitlab() {
-        assert_eq!(detect_provider("https://gitlab.com/foo/bar").name(), "gitlab");
+        assert_eq!(
+            detect_provider("https://gitlab.com/foo/bar").name(),
+            "gitlab"
+        );
         assert_eq!(
             detect_provider("https://gitlab.example.com/foo/bar").name(),
             "gitlab"
@@ -801,7 +806,12 @@ mod tests {
         let body = b"{}";
         let mut mac = Hmac::<Sha256>::new_from_slice(secret.as_bytes()).unwrap();
         mac.update(body);
-        let hex_sig: String = mac.finalize().into_bytes().iter().map(|b| format!("{:02x}", b)).collect();
+        let hex_sig: String = mac
+            .finalize()
+            .into_bytes()
+            .iter()
+            .map(|b| format!("{:02x}", b))
+            .collect();
         let mut headers = HeaderMap::new();
         headers.insert(
             "x-hub-signature-256",

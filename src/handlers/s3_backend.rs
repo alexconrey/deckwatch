@@ -26,7 +26,6 @@
 
 use std::sync::Arc;
 
-use async_trait::async_trait;
 use bytes::Bytes;
 use object_store::aws::{AmazonS3, AmazonS3Builder};
 use object_store::path::Path as OPath;
@@ -80,10 +79,7 @@ impl S3Backend {
         // Normalize the prefix: strip leading and trailing slashes so we
         // don't produce keys like `//blobs/...`. An empty prefix stays
         // empty; `key_for` handles both cases.
-        let prefix = cfg
-            .prefix
-            .trim_matches('/')
-            .to_string();
+        let prefix = cfg.prefix.trim_matches('/').to_string();
 
         let mut builder = AmazonS3Builder::from_env()
             .with_bucket_name(&cfg.bucket)
@@ -173,14 +169,10 @@ impl S3Backend {
     /// layers. Large-layer streaming is a follow-up — see design doc's
     /// "signed URLs for pulls" open question; for now we buffer.
     pub async fn get_blob(&self, digest: &str) -> std::io::Result<Bytes> {
-        let key = self
-            .blob_key(digest)
-            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "invalid digest"))?;
-        let get = self
-            .store
-            .get(&key)
-            .await
-            .map_err(io_from_object_store)?;
+        let key = self.blob_key(digest).ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::InvalidInput, "invalid digest")
+        })?;
+        let get = self.store.get(&key).await.map_err(io_from_object_store)?;
         let bytes = get.bytes().await.map_err(io_from_object_store)?;
         Ok(bytes)
     }
@@ -197,9 +189,9 @@ impl S3Backend {
                 format!("digest mismatch: expected {digest}, got {actual}"),
             ));
         }
-        let key = self
-            .blob_key(digest)
-            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "invalid digest"))?;
+        let key = self.blob_key(digest).ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::InvalidInput, "invalid digest")
+        })?;
 
         // put_opts (rather than plain put) so we can request "put if not
         // present" for CAS blobs in a follow-up — for now the default
@@ -217,7 +209,10 @@ impl S3Backend {
     /// so retries are idempotent).
     pub async fn delete_blob(&self, digest: &str) -> std::io::Result<()> {
         let Some(key) = self.blob_key(digest) else {
-            return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "invalid digest"));
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "invalid digest",
+            ));
         };
         match self.store.delete(&key).await {
             Ok(()) => Ok(()),
@@ -322,11 +317,7 @@ impl S3Backend {
     /// Delete a manifest and its sidecar. Returns true if the manifest
     /// existed before the call. The sidecar delete is best-effort — if
     /// it's already gone the tag is still effectively deleted.
-    pub async fn delete_manifest(
-        &self,
-        name: &str,
-        reference: &str,
-    ) -> std::io::Result<bool> {
+    pub async fn delete_manifest(&self, name: &str, reference: &str) -> std::io::Result<bool> {
         let key = self.manifest_key(name, reference);
         let existed = match self.store.delete(&key).await {
             Ok(()) => true,
@@ -441,7 +432,10 @@ impl S3Backend {
 
         let Some(blob_key) = self.blob_key(digest) else {
             let _ = self.store.delete(&upload).await;
-            return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "invalid digest"));
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "invalid digest",
+            ));
         };
 
         // S3 supports server-side copy; object_store exposes it as a
@@ -496,10 +490,7 @@ impl S3Backend {
             // (contains at least one tag manifest).
             let mut has_manifest = false;
             for obj in listing.objects {
-                let name = obj
-                    .location
-                    .filename()
-                    .unwrap_or("");
+                let name = obj.location.filename().unwrap_or("");
                 if name.is_empty() || name == "_meta" {
                     continue;
                 }

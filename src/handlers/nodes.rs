@@ -12,9 +12,7 @@ pub struct NodeListResponse {
     pub nodes: Vec<NodeSummary>,
 }
 
-pub async fn list_nodes(
-    State(state): State<AppState>,
-) -> Result<Json<NodeListResponse>, AppError> {
+pub async fn list_nodes(State(state): State<AppState>) -> Result<Json<NodeListResponse>, AppError> {
     let api = state.nodes_api();
     let t = K8sTimer::new("nodes", "list");
     let list = api.list(&ListParams::default()).await;

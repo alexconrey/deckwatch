@@ -49,10 +49,10 @@ pub async fn get(
 ) -> Result<Json<serde_json::Value>, AppError> {
     let api = state.hpa_api(&ns)?;
     match api.get(&name).await {
-        Ok(hpa) => Ok(Json(serde_json::to_value(to_response(&hpa, &ns, &name)).unwrap())),
-        Err(kube::Error::Api(ref e)) if e.code == 404 => {
-            Ok(Json(serde_json::json!(null)))
-        }
+        Ok(hpa) => Ok(Json(
+            serde_json::to_value(to_response(&hpa, &ns, &name)).unwrap(),
+        )),
+        Err(kube::Error::Api(ref e)) if e.code == 404 => Ok(Json(serde_json::json!(null))),
         Err(e) => Err(AppError::Kube(e)),
     }
 }
@@ -63,7 +63,9 @@ pub async fn upsert(
     Json(req): Json<HpaConfigRequest>,
 ) -> Result<Json<HpaResponse>, AppError> {
     if req.max_replicas < 1 {
-        return Err(AppError::BadRequest("max_replicas must be >= 1".to_string()));
+        return Err(AppError::BadRequest(
+            "max_replicas must be >= 1".to_string(),
+        ));
     }
     if req.min_replicas < 1 || req.min_replicas > req.max_replicas {
         return Err(AppError::BadRequest(
@@ -72,7 +74,8 @@ pub async fn upsert(
     }
     if req.target_cpu_utilization.is_none() && req.target_memory_utilization.is_none() {
         return Err(AppError::BadRequest(
-            "at least one of target_cpu_utilization or target_memory_utilization is required".to_string(),
+            "at least one of target_cpu_utilization or target_memory_utilization is required"
+                .to_string(),
         ));
     }
     if let Some(cpu) = req.target_cpu_utilization {
@@ -120,7 +123,8 @@ pub async fn upsert(
     let hpa = match api.get(&name).await {
         Ok(mut existing) => {
             existing.spec = Some(spec);
-            api.replace(&name, &PostParams::default(), &existing).await?
+            api.replace(&name, &PostParams::default(), &existing)
+                .await?
         }
         Err(kube::Error::Api(e)) if e.code == 404 => {
             let hpa = HorizontalPodAutoscaler {
@@ -179,8 +183,16 @@ fn to_response(hpa: &HorizontalPodAutoscaler, ns: &str, name: &str) -> HpaRespon
         .unwrap_or((None, None));
 
     HpaResponse {
-        name: hpa.metadata.name.clone().unwrap_or_else(|| name.to_string()),
-        namespace: hpa.metadata.namespace.clone().unwrap_or_else(|| ns.to_string()),
+        name: hpa
+            .metadata
+            .name
+            .clone()
+            .unwrap_or_else(|| name.to_string()),
+        namespace: hpa
+            .metadata
+            .namespace
+            .clone()
+            .unwrap_or_else(|| ns.to_string()),
         min_replicas: spec.and_then(|s| s.min_replicas),
         max_replicas: spec.map(|s| s.max_replicas).unwrap_or(0),
         target_cpu_utilization: target_cpu,

@@ -21,8 +21,8 @@
 use std::collections::HashMap;
 
 use axum::extract::{Path, Query, State};
-use axum::Json;
 use axum::http::Request;
+use axum::Json;
 use kube::api::ListParams;
 use serde::{Deserialize, Serialize};
 
@@ -231,7 +231,9 @@ async fn fetch_pod_restart_counts(
 
     let mut out: HashMap<String, i32> = HashMap::with_capacity(pods.items.len());
     for pod in &pods.items {
-        let Some(name) = pod.metadata.name.clone() else { continue };
+        let Some(name) = pod.metadata.name.clone() else {
+            continue;
+        };
         let total: i32 = pod
             .status
             .as_ref()

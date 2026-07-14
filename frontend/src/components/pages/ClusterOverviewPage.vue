@@ -6,7 +6,7 @@ import { useNodeMetrics } from "@/composables/useResourceMetrics";
 import EventsFeed from "@/components/common/EventsFeed.vue";
 import MetricSparkline from "@/components/common/MetricSparkline.vue";
 import type { NodeSummary } from "@/types/api";
-import { formatAge } from "@/utils/format";
+import { formatAge, formatMemory } from "@/utils/format";
 
 const nodes = ref<NodeSummary[]>([]);
 const loading = ref(false);
@@ -118,17 +118,6 @@ const headers = [
   { title: "Age", key: "created_at", width: "100px" },
 ];
 
-
-const formatMemory = (raw: string | null): string => {
-  if (!raw) return "-";
-  const match = raw.match(/^(\d+)Ki$/);
-  if (!match) return raw;
-  const kib = Number.parseInt(match[1], 10);
-  const gib = kib / (1024 * 1024);
-  if (gib >= 1) return `${gib.toFixed(1)} GiB`;
-  const mib = kib / 1024;
-  return `${mib.toFixed(0)} MiB`;
-};
 
 const statusColor = (status: string): string => {
   if (status === "Ready") return "success";

@@ -75,10 +75,9 @@ fn default_catalog() -> Vec<DeploymentTemplate> {
         DeploymentTemplate {
             id: "web-app".to_string(),
             name: "Web App".to_string(),
-            description:
-                "HTTP service listening on port 80 with a readiness probe on '/'. \
+            description: "HTTP service listening on port 80 with a readiness probe on '/'. \
                  One replica. Good starting point for a stateless web service."
-                    .to_string(),
+                .to_string(),
             icon: "mdi-web".to_string(),
             category: TemplateCategory::WebApp,
             payload: serde_json::json!({
@@ -99,10 +98,9 @@ fn default_catalog() -> Vec<DeploymentTemplate> {
         DeploymentTemplate {
             id: "worker".to_string(),
             name: "Worker".to_string(),
-            description:
-                "Background worker with no exposed port and no ingress. \
+            description: "Background worker with no exposed port and no ingress. \
                  One replica."
-                    .to_string(),
+                .to_string(),
             icon: "mdi-cog-transfer".to_string(),
             category: TemplateCategory::Worker,
             payload: serde_json::json!({
@@ -115,12 +113,11 @@ fn default_catalog() -> Vec<DeploymentTemplate> {
         DeploymentTemplate {
             id: "cron-job".to_string(),
             name: "Cron Job".to_string(),
-            description:
-                "One-shot container intended to be wrapped by a CronJob resource. \
+            description: "One-shot container intended to be wrapped by a CronJob resource. \
                  Deckwatch currently deploys this as a scale-to-zero Deployment so \
                  you can iterate on the container; convert to a CronJob when the \
                  command line is stable."
-                    .to_string(),
+                .to_string(),
             icon: "mdi-clock-outline".to_string(),
             category: TemplateCategory::CronJob,
             payload: serde_json::json!({
@@ -135,11 +132,10 @@ fn default_catalog() -> Vec<DeploymentTemplate> {
         DeploymentTemplate {
             id: "static-site".to_string(),
             name: "Static Site".to_string(),
-            description:
-                "Nginx serving static assets on port 80 with a readiness probe. \
+            description: "Nginx serving static assets on port 80 with a readiness probe. \
                  Pair with an Ingress from the deployment detail page for public \
                  exposure."
-                    .to_string(),
+                .to_string(),
             icon: "mdi-file-document-outline".to_string(),
             category: TemplateCategory::StaticSite,
             payload: serde_json::json!({
@@ -223,9 +219,7 @@ fn merge_catalog(
     merged
 }
 
-pub async fn list(
-    State(state): State<AppState>,
-) -> Result<Json<TemplateListResponse>, AppError> {
+pub async fn list(State(state): State<AppState>) -> Result<Json<TemplateListResponse>, AppError> {
     let overrides = load_overrides(&state).await;
     let merged = merge_catalog(default_catalog(), overrides);
     Ok(Json(TemplateListResponse { templates: merged }))

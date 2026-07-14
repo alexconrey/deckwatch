@@ -46,7 +46,8 @@ const enabledLevels = ref<Set<LogLevel>>(
 );
 let source: EventSource | null = null;
 let reconnectTimer: number | null = null;
-let lastTimestamp: string | null = null;
+let lastHistoryLine: string | null = null;
+let firstSseReceived = false;
 
 const isPending = computed(() => props.podPhase === "Pending");
 
@@ -137,7 +138,8 @@ function highlightSearch(text: string): string {
 async function loadLogs() {
   disconnect();
   lines.value = [];
-  lastTimestamp = null;
+  lastHistoryLine = null;
+  firstSseReceived = false;
   error.value = null;
 
   // A Pending pod has no running container yet — fetching logs would 400.
@@ -153,12 +155,14 @@ async function loadLogs() {
     const data = await res.json();
     const parsed: ParsedLine[] = (data.lines as string[]).map(parseLine);
     lines.value = parsed;
-    for (let i = parsed.length - 1; i >= 0; i--) {
-      if (parsed[i].timestamp) {
-        lastTimestamp = parsed[i].timestamp;
-        break;
-      }
+    // Save the last history line for dedup against the first SSE event.
+    // The stream is opened with tail_lines=1 which replays the newest
+    // history line — comparing by raw text avoids dropping real lines
+    // that happen to share a timestamp.
+    if (parsed.length > 0) {
+      lastHistoryLine = parsed[parsed.length - 1].raw;
     }
+    firstSseReceived = false;
     await scrollToBottom();
     connectStream();
   } catch (e) {
@@ -178,17 +182,16 @@ function connectStream() {
     const data = JSON.parse(event.data) as { line: string };
     const parsed = parseLine(data.line);
 
-    // Timestamp-based dedup: the tail_lines=1 seed replays the newest history line.
-    // If we can compare timestamps, drop lines <= the last history timestamp.
-    // Falls back to appending when either side lacks a timestamp — no first-line drop.
-    if (
-      parsed.timestamp &&
-      lastTimestamp &&
-      parsed.timestamp <= lastTimestamp
-    ) {
-      return;
+    // Dedup: the stream is opened with tail_lines=1 which replays the newest
+    // history line. On the first SSE event only, compare against the last
+    // history line — if it matches, skip it. All subsequent events are kept
+    // unconditionally so no real log lines are ever dropped.
+    if (!firstSseReceived) {
+      firstSseReceived = true;
+      if (lastHistoryLine !== null && data.line === lastHistoryLine) {
+        return;
+      }
     }
-    if (parsed.timestamp) lastTimestamp = parsed.timestamp;
 
     lines.value.push(parsed);
     if (lines.value.length > MAX_LINES) {
@@ -240,7 +243,8 @@ async function scrollToBottom() {
 
 function clear() {
   lines.value = [];
-  lastTimestamp = null;
+  lastHistoryLine = null;
+  firstSseReceived = false;
 }
 
 function toggleLevel(level: LogLevel) {
@@ -402,6 +406,10 @@ onUnmounted(disconnect);
         v-for="(line, i) in visibleLines"
         :key="i"
         class="log-line"
+        :class="{
+          'log-error': line.level === 'ERROR' || line.level === 'FATAL',
+          'log-warn': line.level === 'WARN',
+        }"
         :style="{ color: LEVEL_COLORS[line.level] }"
       >
         <span v-html="highlightSearch(line.raw)" />
@@ -443,6 +451,14 @@ onUnmounted(disconnect);
   overflow-y: auto;
   white-space: pre-wrap;
   word-break: break-all;
+}
+
+.log-error {
+  background: rgba(248, 81, 73, 0.1);
+}
+
+.log-warn {
+  background: rgba(210, 153, 34, 0.1);
 }
 
 .log-line:hover {

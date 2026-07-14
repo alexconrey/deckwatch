@@ -15,6 +15,7 @@ use k8s_openapi::apimachinery::pkg::util::intstr::IntOrString;
 use kube::api::{ListParams, Patch, PatchParams, PostParams};
 use serde::Deserialize;
 
+use crate::audit;
 use crate::error::AppError;
 use crate::kube_ext::{
     deployment_detail, deployment_summary, ingress_summary, pod_summary, DeploymentDetail,
@@ -162,8 +163,9 @@ pub async fn get_yaml(
     let dep = api.get(&name).await;
     t.finish(dep.is_ok());
     let dep = dep?;
-    let yaml = serde_yaml::to_string(&dep)
-        .map_err(|e| AppError::BadRequest(format!("failed to serialize deployment as YAML: {e}")))?;
+    let yaml = serde_yaml::to_string(&dep).map_err(|e| {
+        AppError::BadRequest(format!("failed to serialize deployment as YAML: {e}"))
+    })?;
     Ok(([(header::CONTENT_TYPE, "text/yaml; charset=utf-8")], yaml).into_response())
 }
 
@@ -172,8 +174,19 @@ pub async fn update_yaml(
     Path((ns, name)): Path<(String, String)>,
     body: String,
 ) -> Result<Json<DeploymentDetailResponse>, AppError> {
-    let mut dep: Deployment = serde_yaml::from_str(&body)
-        .map_err(|e| AppError::BadRequest(format!("invalid YAML: {e}")))?;
+    let mut dep: Deployment = serde_yaml::from_str(&body).map_err(|e| {
+        let friendly = if let Some(loc) = e.location() {
+            format!(
+                "YAML parse error at line {}, column {}: {}",
+                loc.line(),
+                loc.column(),
+                e
+            )
+        } else {
+            format!("invalid YAML: {e}")
+        };
+        AppError::BadRequest(friendly)
+    })?;
 
     // Ensure the resource identity matches the URL path — refuse mismatches so users
     // don't accidentally rename or move a Deployment via the YAML editor.
@@ -306,6 +319,19 @@ pub async fn create(
     let created = created?;
     let detail = deployment_detail(&created);
 
+    if let Err(e) = audit::log_action(
+        &state.db,
+        "create",
+        "deployment",
+        &req.name,
+        &ns,
+        &format!("created deployment with image {}", detail.image),
+    )
+    .await
+    {
+        tracing::warn!(error = %e, "failed to write audit log");
+    }
+
     Ok((
         StatusCode::CREATED,
         Json(DeploymentDetailResponse {
@@ -368,8 +394,7 @@ pub async fn update(
                 if ports_specified {
                     container.ports = resolved_ports;
                 }
-                container.resources =
-                    build_resources(req.resource_requests, req.resource_limits);
+                container.resources = build_resources(req.resource_requests, req.resource_limits);
                 if let Some(probe) = req.liveness_probe {
                     container.liveness_probe = Some(build_probe(probe));
                 }
@@ -391,6 +416,19 @@ pub async fn update(
     let pods = list_pods_for_deployment(&state, &ns, &updated).await?;
     let ingresses = list_ingresses_for_service(&state, &ns, &name).await?;
 
+    if let Err(e) = audit::log_action(
+        &state.db,
+        "update",
+        "deployment",
+        &name,
+        &ns,
+        &format!("updated deployment (image: {})", detail.image),
+    )
+    .await
+    {
+        tracing::warn!(error = %e, "failed to write audit log");
+    }
+
     Ok(Json(DeploymentDetailResponse {
         detail,
         pods,
@@ -407,6 +445,20 @@ pub async fn delete(
     let res = api.delete(&name, &Default::default()).await;
     t.finish(res.is_ok());
     res?;
+
+    if let Err(e) = audit::log_action(
+        &state.db,
+        "delete",
+        "deployment",
+        &name,
+        &ns,
+        "deleted deployment",
+    )
+    .await
+    {
+        tracing::warn!(error = %e, "failed to write audit log");
+    }
+
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -433,6 +485,20 @@ pub async fn restart(
         .await;
     t.finish(res.is_ok());
     res?;
+
+    if let Err(e) = audit::log_action(
+        &state.db,
+        "restart",
+        "deployment",
+        &name,
+        &ns,
+        "initiated rolling restart",
+    )
+    .await
+    {
+        tracing::warn!(error = %e, "failed to write audit log");
+    }
+
     Ok(Json(
         serde_json::json!({"message": "rolling restart initiated"}),
     ))
@@ -458,6 +524,20 @@ pub async fn scale(
     let detail = deployment_detail(&dep);
     let pods = list_pods_for_deployment(&state, &ns, &dep).await?;
     let ingresses = list_ingresses_for_service(&state, &ns, &name).await?;
+
+    if let Err(e) = audit::log_action(
+        &state.db,
+        "scale",
+        "deployment",
+        &name,
+        &ns,
+        &format!("scaled to {} replicas", req.replicas),
+    )
+    .await
+    {
+        tracing::warn!(error = %e, "failed to write audit log");
+    }
+
     Ok(Json(DeploymentDetailResponse {
         detail,
         pods,
@@ -674,7 +754,8 @@ pub async fn update_probes(
     t.finish(existing.is_ok());
     let existing = existing?;
     let container_name = existing
-        .spec.as_ref()
+        .spec
+        .as_ref()
         .and_then(|s| s.template.spec.as_ref())
         .and_then(|s| s.containers.first())
         .map(|c| c.name.clone())
@@ -683,22 +764,34 @@ pub async fn update_probes(
     let mut container_patch = serde_json::json!({ "name": container_name });
     let obj = container_patch.as_object_mut().unwrap();
     if let Some(v) = req.liveness_probe {
-        obj.insert("livenessProbe".to_string(), match v {
-            Some(p) => serde_json::to_value(build_probe(p)).map_err(|e| AppError::BadRequest(e.to_string()))?,
-            None => serde_json::Value::Null,
-        });
+        obj.insert(
+            "livenessProbe".to_string(),
+            match v {
+                Some(p) => serde_json::to_value(build_probe(p))
+                    .map_err(|e| AppError::BadRequest(e.to_string()))?,
+                None => serde_json::Value::Null,
+            },
+        );
     }
     if let Some(v) = req.readiness_probe {
-        obj.insert("readinessProbe".to_string(), match v {
-            Some(p) => serde_json::to_value(build_probe(p)).map_err(|e| AppError::BadRequest(e.to_string()))?,
-            None => serde_json::Value::Null,
-        });
+        obj.insert(
+            "readinessProbe".to_string(),
+            match v {
+                Some(p) => serde_json::to_value(build_probe(p))
+                    .map_err(|e| AppError::BadRequest(e.to_string()))?,
+                None => serde_json::Value::Null,
+            },
+        );
     }
     if let Some(v) = req.startup_probe {
-        obj.insert("startupProbe".to_string(), match v {
-            Some(p) => serde_json::to_value(build_probe(p)).map_err(|e| AppError::BadRequest(e.to_string()))?,
-            None => serde_json::Value::Null,
-        });
+        obj.insert(
+            "startupProbe".to_string(),
+            match v {
+                Some(p) => serde_json::to_value(build_probe(p))
+                    .map_err(|e| AppError::BadRequest(e.to_string()))?,
+                None => serde_json::Value::Null,
+            },
+        );
     }
 
     let patch = serde_json::json!({
@@ -706,13 +799,19 @@ pub async fn update_probes(
     });
 
     let t = K8sTimer::new("deployments", "patch");
-    let updated = api.patch(&name, &PatchParams::default(), &Patch::Strategic(patch)).await;
+    let updated = api
+        .patch(&name, &PatchParams::default(), &Patch::Strategic(patch))
+        .await;
     t.finish(updated.is_ok());
     let updated = updated?;
     let detail = deployment_detail(&updated);
     let pods = list_pods_for_deployment(&state, &ns, &updated).await?;
     let ingresses = list_ingresses_for_service(&state, &ns, &name).await?;
-    Ok(Json(DeploymentDetailResponse { detail, pods, ingresses }))
+    Ok(Json(DeploymentDetailResponse {
+        detail,
+        pods,
+        ingresses,
+    }))
 }
 
 // ============================================================
@@ -737,10 +836,14 @@ pub async fn add_container(
     Json(req): Json<AddContainerRequest>,
 ) -> Result<(StatusCode, Json<DeploymentDetailResponse>), AppError> {
     if req.name.is_empty() {
-        return Err(AppError::BadRequest("container name is required".to_string()));
+        return Err(AppError::BadRequest(
+            "container name is required".to_string(),
+        ));
     }
     if req.image.is_empty() {
-        return Err(AppError::BadRequest("container image is required".to_string()));
+        return Err(AppError::BadRequest(
+            "container image is required".to_string(),
+        ));
     }
     let api = state.deployments_api(&ns)?;
     let t = K8sTimer::new("deployments", "get");
@@ -748,21 +851,39 @@ pub async fn add_container(
     t.finish(existing.is_ok());
     let existing = existing?;
     let mut dep = existing.clone();
-    let pod_spec = dep.spec.as_mut()
+    let pod_spec = dep
+        .spec
+        .as_mut()
         .and_then(|s| s.template.spec.as_mut())
         .ok_or_else(|| AppError::BadRequest("deployment has no pod spec".to_string()))?;
     if pod_spec.containers.iter().any(|c| c.name == req.name) {
-        return Err(AppError::BadRequest(format!("container '{}' already exists", req.name)));
+        return Err(AppError::BadRequest(format!(
+            "container '{}' already exists",
+            req.name
+        )));
     }
     let env_vars: Option<Vec<EnvVar>> = req.env.map(|vars| {
-        vars.into_iter().map(|v| EnvVar { name: v.name, value: Some(v.value), ..Default::default() }).collect()
+        vars.into_iter()
+            .map(|v| EnvVar {
+                name: v.name,
+                value: Some(v.value),
+                ..Default::default()
+            })
+            .collect()
     });
     let ports: Option<Vec<ContainerPort>> = req.port.map(|p| {
-        vec![ContainerPort { container_port: p, ..Default::default() }]
+        vec![ContainerPort {
+            container_port: p,
+            ..Default::default()
+        }]
     });
     pod_spec.containers.push(Container {
-        name: req.name, image: Some(req.image), ports, env: env_vars,
-        command: req.command, args: req.args,
+        name: req.name,
+        image: Some(req.image),
+        ports,
+        env: env_vars,
+        command: req.command,
+        args: req.args,
         resources: build_resources(req.resource_requests, req.resource_limits),
         ..Default::default()
     });
@@ -773,7 +894,14 @@ pub async fn add_container(
     let detail = deployment_detail(&updated);
     let pods = list_pods_for_deployment(&state, &ns, &updated).await?;
     let ingresses = list_ingresses_for_service(&state, &ns, &name).await?;
-    Ok((StatusCode::CREATED, Json(DeploymentDetailResponse { detail, pods, ingresses })))
+    Ok((
+        StatusCode::CREATED,
+        Json(DeploymentDetailResponse {
+            detail,
+            pods,
+            ingresses,
+        }),
+    ))
 }
 
 pub async fn remove_container(
@@ -786,21 +914,29 @@ pub async fn remove_container(
     t.finish(existing.is_ok());
     let existing = existing?;
     let mut dep = existing.clone();
-    let pod_spec = dep.spec.as_mut()
+    let pod_spec = dep
+        .spec
+        .as_mut()
         .and_then(|s| s.template.spec.as_mut())
         .ok_or_else(|| AppError::BadRequest("deployment has no pod spec".to_string()))?;
     if pod_spec.containers.is_empty() {
         return Err(AppError::BadRequest("no containers to remove".to_string()));
     }
     if pod_spec.containers[0].name == container_name {
-        return Err(AppError::BadRequest("cannot remove primary container".to_string()));
+        return Err(AppError::BadRequest(
+            "cannot remove primary container".to_string(),
+        ));
     }
     let before = pod_spec.containers.len();
     pod_spec.containers.retain(|c| c.name != container_name);
     if pod_spec.containers.len() == before {
-        return Err(AppError::NotFound(format!("container '{container_name}' not found")));
+        return Err(AppError::NotFound(format!(
+            "container '{container_name}' not found"
+        )));
     }
-    if let Some(annotations) = dep.spec.as_mut()
+    if let Some(annotations) = dep
+        .spec
+        .as_mut()
         .and_then(|s| s.template.metadata.as_mut())
         .and_then(|m| m.annotations.as_mut())
     {
@@ -813,5 +949,9 @@ pub async fn remove_container(
     let detail = deployment_detail(&updated);
     let pods = list_pods_for_deployment(&state, &ns, &updated).await?;
     let ingresses = list_ingresses_for_service(&state, &ns, &name).await?;
-    Ok(Json(DeploymentDetailResponse { detail, pods, ingresses }))
+    Ok(Json(DeploymentDetailResponse {
+        detail,
+        pods,
+        ingresses,
+    }))
 }

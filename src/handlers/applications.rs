@@ -312,7 +312,9 @@ pub async fn create(
         {
             // Roll back the ConfigMap so we don't leave an orphaned Application record.
             let t = K8sTimer::new("configmaps", "delete");
-            let del = cm_api.delete(&cm_name(&req.name), &Default::default()).await;
+            let del = cm_api
+                .delete(&cm_name(&req.name), &Default::default())
+                .await;
             t.finish(del.is_ok());
             return Err(e);
         }
@@ -352,7 +354,11 @@ pub async fn update(
     });
     let t = K8sTimer::new("configmaps", "patch");
     let res = cm_api
-        .patch(&cm_name(&name), &PatchParams::default(), &Patch::Merge(patch))
+        .patch(
+            &cm_name(&name),
+            &PatchParams::default(),
+            &Patch::Merge(patch),
+        )
         .await;
     t.finish(res.is_ok());
     res?;
@@ -456,14 +462,18 @@ pub async fn add_member(
         "Deployment" => {
             let api = state.deployments_api(&ns)?;
             let t = K8sTimer::new("deployments", "patch");
-            let res = api.patch(&req.resource_name, &params, &Patch::Merge(&patch)).await;
+            let res = api
+                .patch(&req.resource_name, &params, &Patch::Merge(&patch))
+                .await;
             t.finish(res.is_ok());
             res?;
         }
         "CronJob" => {
             let api = state.cronjobs_api(&ns)?;
             let t = K8sTimer::new("cronjobs", "patch");
-            let res = api.patch(&req.resource_name, &params, &Patch::Merge(&patch)).await;
+            let res = api
+                .patch(&req.resource_name, &params, &Patch::Merge(&patch))
+                .await;
             t.finish(res.is_ok());
             res?;
         }
@@ -499,14 +509,18 @@ pub async fn remove_member(
         "Deployment" => {
             let api = state.deployments_api(&ns)?;
             let t = K8sTimer::new("deployments", "patch");
-            let res = api.patch(&resource_name, &params, &Patch::Merge(&patch)).await;
+            let res = api
+                .patch(&resource_name, &params, &Patch::Merge(&patch))
+                .await;
             t.finish(res.is_ok());
             res?;
         }
         "CronJob" => {
             let api = state.cronjobs_api(&ns)?;
             let t = K8sTimer::new("cronjobs", "patch");
-            let res = api.patch(&resource_name, &params, &Patch::Merge(&patch)).await;
+            let res = api
+                .patch(&resource_name, &params, &Patch::Merge(&patch))
+                .await;
             t.finish(res.is_ok());
             res?;
         }
@@ -687,10 +701,7 @@ async fn create_seed_deployment(
         spec: Some(DeploymentSpec {
             replicas: Some(tmpl.replicas),
             selector: LabelSelector {
-                match_labels: Some(BTreeMap::from([(
-                    "app".to_string(),
-                    app_name.to_string(),
-                )])),
+                match_labels: Some(BTreeMap::from([("app".to_string(), app_name.to_string())])),
                 ..Default::default()
             },
             template: PodTemplateSpec {

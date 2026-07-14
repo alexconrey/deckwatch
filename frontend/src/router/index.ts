@@ -97,6 +97,12 @@ const router = createRouter({
           component: () =>
             import("@/components/pages/ClusterOverviewPage.vue"),
         },
+        {
+          path: "audit",
+          name: "AuditLog",
+          component: () =>
+            import("@/components/pages/AuditLogPage.vue"),
+        },
       ],
     },
     {

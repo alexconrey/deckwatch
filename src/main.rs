@@ -1,20 +1,24 @@
+pub mod audit;
 mod auth;
+mod auto_rollback;
 mod config;
-mod log_sanitize;
-mod metrics;
-mod notifications;
+mod db;
+mod entities;
 mod error;
 mod handlers;
 mod kube_ext;
+mod license;
+mod license_middleware;
+mod log_sanitize;
+mod metrics;
+mod migrations;
+mod notifications;
 mod rate_limit;
 mod routes;
 mod state;
 mod watcher;
-mod auto_rollback;
-mod license;
-mod license_middleware;
-mod webhook_tls;
 mod webhook_registration;
+mod webhook_tls;
 
 use clap::Parser;
 use tokio::net::TcpListener;
@@ -23,7 +27,7 @@ use tracing_subscriber::EnvFilter;
 use config::Config;
 use handlers::registry::RegistryStore;
 use handlers::s3_backend::{S3Backend, S3Config};
-use rate_limit::{RateLimiter, DEFAULT_HOURLY_LIMIT};
+use rate_limit::RateLimiter;
 use state::AppState;
 
 #[tokio::main]
@@ -51,6 +55,18 @@ async fn main() {
         "starting deckwatch"
     );
 
+    // --- Database ---
+    let db_backend = db::backend_name(&config.database_url);
+    tracing::info!(
+        backend = db_backend,
+        url = %config.database_url,
+        "connecting to database"
+    );
+    let db = db::connect(&config.database_url)
+        .await
+        .expect("Failed to connect to database and run migrations");
+    tracing::info!(backend = db_backend, "database ready (migrations applied)");
+
     let kube_client = kube::Client::try_default()
         .await
         .expect("Failed to create Kubernetes client");
@@ -61,17 +77,16 @@ async fn main() {
         None
     };
 
-    // Rate limiter is created with the compiled-in default up front so it
-    // exists before we look at any settings. `load_ai_safety_limit` below
-    // reads the ConfigMap and hot-swaps the cap if the operator has one
-    // configured. This ordering means a broken settings document can never
-    // leave AppState without a limiter.
-    let ai_rate_limiter = RateLimiter::new(DEFAULT_HOURLY_LIMIT);
+    // Rate limiter is retained in AppState but no longer enforced in handlers.
+    // It can be re-enabled as a future business feature.
+    let ai_rate_limiter = RateLimiter::default();
 
     let state = AppState {
         kube_client,
         allowed_namespaces: allowed,
-        settings_namespace: config.settings_namespace.clone().unwrap_or_else(|| std::env::var("POD_NAMESPACE").unwrap_or_else(|_| "deckwatch".to_string())),
+        settings_namespace: config.settings_namespace.clone().unwrap_or_else(|| {
+            std::env::var("POD_NAMESPACE").unwrap_or_else(|_| "deckwatch".to_string())
+        }),
         settings_configmap_name: config.settings_configmap_name.clone(),
         entitlements: std::sync::Arc::new(crate::license::Entitlements::community()),
         registry_public_url: if config.registry_public_url.is_empty() {
@@ -79,23 +94,9 @@ async fn main() {
         } else {
             Some(config.registry_public_url.clone())
         },
-        ai_rate_limiter: ai_rate_limiter.clone(),
+        ai_rate_limiter,
+        db,
     };
-
-    // Seed the running limiter from persisted settings. Best-effort; a
-    // missing/broken ConfigMap keeps the default.
-    if let Some(limit) = load_ai_safety_limit(&state).await {
-        tracing::info!(
-            limit,
-            "AI job rate limit set from settings ConfigMap",
-        );
-        ai_rate_limiter.set_limit(limit);
-    } else {
-        tracing::info!(
-            limit = DEFAULT_HOURLY_LIMIT,
-            "AI job rate limit using compiled-in default",
-        );
-    }
 
     let watcher_state = state.clone();
     tokio::spawn(async move {
@@ -222,17 +223,4 @@ async fn load_auth_config(state: &AppState) -> auth::AuthConfig {
         return auth::AuthConfig::disabled();
     };
     auth::AuthConfig::from_settings(parsed.auth.as_ref())
-}
-
-/// Peek at the persisted AI safety block. Returns `None` if the setting is
-/// absent or the ConfigMap is missing/malformed — caller keeps the default.
-async fn load_ai_safety_limit(state: &AppState) -> Option<u32> {
-    use k8s_openapi::api::core::v1::ConfigMap;
-    use kube::Api;
-
-    let api: Api<ConfigMap> = Api::namespaced(state.kube_client.clone(), &state.settings_namespace);
-    let cm = api.get(&state.settings_configmap_name).await.ok()?;
-    let data = cm.data.as_ref()?.get("settings")?;
-    let parsed = serde_json::from_str::<handlers::settings::DeckwatchSettings>(data).ok()?;
-    parsed.ai_safety.map(|a| a.jobs_per_namespace_per_hour)
 }

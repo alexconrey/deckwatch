@@ -349,8 +349,8 @@ where
     let code: u16 = code_str
         .parse()
         .map_err(|_| anyhow::anyhow!("invalid status code"))?;
-    let status = StatusCode::from_u16(code)
-        .map_err(|_| anyhow::anyhow!("status code out of range"))?;
+    let status =
+        StatusCode::from_u16(code).map_err(|_| anyhow::anyhow!("status code out of range"))?;
 
     let mut headers = Vec::new();
     for line in lines {

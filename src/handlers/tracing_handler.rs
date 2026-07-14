@@ -125,8 +125,7 @@ pub async fn list_traces(
         return Ok(Json(ListTracesResponse {
             traces: Vec::new(),
             unavailable_reason: Some(
-                "tracing not configured (set tracing.query_url in deckwatch settings)"
-                    .to_string(),
+                "tracing not configured (set tracing.query_url in deckwatch settings)".to_string(),
             ),
             ui_url,
             backend_kind,
@@ -257,7 +256,9 @@ async fn fetch_jaeger_compat(
         Ok(r) => r,
         Err(e) => {
             timer.finish(false);
-            return Err(format!("failed to reach tracing backend at {base_url}: {e}"));
+            return Err(format!(
+                "failed to reach tracing backend at {base_url}: {e}"
+            ));
         }
     };
     if !response.status().is_success() {
@@ -397,7 +398,10 @@ mod tests {
     fn normalized_query_url_strips_trailing_slash() {
         let mut s = TracingSettings::default();
         s.query_url = "http://tempo:3200/".to_string();
-        assert_eq!(normalized_query_url(&s).as_deref(), Some("http://tempo:3200"));
+        assert_eq!(
+            normalized_query_url(&s).as_deref(),
+            Some("http://tempo:3200")
+        );
     }
 
     #[test]

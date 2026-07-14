@@ -26,6 +26,10 @@ use crate::log_sanitize::{sanitize_logs, wrap_prompt};
 use crate::metrics;
 use crate::state::AppState;
 
+/// Maximum length for Kubernetes label values (and the names we use as
+/// label values). RFC 1123 / K8s validation caps label values at 63 chars.
+const K8S_LABEL_VALUE_MAX: usize = 63;
+
 const DIAG_LABEL_KEY: &str = "deckwatch.io/diagnostic";
 const DIAG_POD_LABEL_KEY: &str = "deckwatch.io/diagnostic-source-pod";
 const DIAG_AGENT_LABEL_KEY: &str = "deckwatch.io/diagnostic-agent";
@@ -111,10 +115,6 @@ pub struct DiagnoseResponse {
     pub job_name: String,
     pub status: DiagStatus,
     pub agent: DiagAgent,
-    /// Snapshot of the requester's quota *after* this job was recorded.
-    /// Included on the create-response so the UI can update the remaining-
-    /// quota chip without a follow-up GET.
-    pub quota: QuotaSnapshotResponse,
 }
 
 #[derive(Debug, Serialize)]
@@ -151,30 +151,6 @@ pub struct DiagnosticHistoryResponse {
     pub items: Vec<DiagnosticHistoryItem>,
 }
 
-/// Public shape of the per-namespace AI-job quota. Same struct powers the
-/// standalone `GET /api/namespaces/{ns}/ai-quota` endpoint and the `quota`
-/// field embedded in create-responses.
-#[derive(Debug, Clone, Copy, Serialize)]
-pub struct QuotaSnapshotResponse {
-    pub limit: u32,
-    pub used: u32,
-    pub remaining: u32,
-    /// Seconds until a slot frees up. `None` when the namespace is empty
-    /// (no slot needs to free — quota is already full).
-    pub reset_in_secs: Option<u64>,
-}
-
-impl From<crate::rate_limit::QuotaSnapshot> for QuotaSnapshotResponse {
-    fn from(s: crate::rate_limit::QuotaSnapshot) -> Self {
-        Self {
-            limit: s.limit,
-            used: s.used,
-            remaining: s.remaining(),
-            reset_in_secs: s.reset_in_secs,
-        }
-    }
-}
-
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum DiagStatus {
@@ -182,22 +158,6 @@ pub enum DiagStatus {
     Running,
     Succeeded,
     Failed,
-}
-
-/// Standalone quota lookup. The frontend uses it to render the
-/// "N of M diagnostics used this hour" chip before the operator clicks
-/// the button — no side effects, safe to poll.
-pub async fn get_ai_quota(
-    State(state): State<AppState>,
-    Path(ns): Path<String>,
-) -> Result<Json<QuotaSnapshotResponse>, AppError> {
-    // Still enforce the namespace allowlist — the quota endpoint would
-    // otherwise become a way to enumerate the cluster's namespaces.
-    if !state.is_namespace_allowed(&ns) {
-        return Err(AppError::NamespaceNotAllowed(ns));
-    }
-    let snap = state.ai_rate_limiter.snapshot(&ns);
-    Ok(Json(snap.into()))
 }
 
 pub async fn create_diagnostic(
@@ -212,20 +172,6 @@ pub async fn create_diagnostic(
         return Err(AppError::BadRequest("logs must not be empty".to_string()));
     }
 
-    // Rate limit BEFORE any k8s writes so a rejected request costs nothing.
-    // The check-then-record pattern (rather than a single atomic reserve)
-    // can allow a small over-count under high concurrency; that's fine for
-    // a soft safety cap — see the rate_limit module rationale.
-    let pre = state.ai_rate_limiter.check(&ns);
-    if pre.exceeded() {
-        return Err(AppError::RateLimited {
-            namespace: ns.clone(),
-            limit: pre.limit,
-            used: pre.used,
-            retry_after_secs: pre.reset_in_secs.unwrap_or(60),
-        });
-    }
-
     // Sanitize + hard-truncate before we ever hand the text to an LLM.
     // Order matters: strip control bytes first so the byte-based truncation
     // isn't fooled by embedded terminal escapes inflating the length.
@@ -238,17 +184,20 @@ pub async fn create_diagnostic(
     let wrapped_prompt = wrap_prompt(DIAG_PROMPT, &context_header, &truncated);
 
     let agent = req.agent;
-    let source_pod = sanitize_name_segment(&req.pod_name);
     let ts = jiff::Timestamp::now().as_second();
-    let job_name = format!(
-        "deckwatch-diag-{}-{}-{}",
-        agent.as_str(),
-        source_pod,
-        ts
-    );
+    let job_name = make_short_name("dw-diag", agent.as_str(), &req.pod_name, ts);
     let cm_name = format!("{job_name}-logs");
 
-    create_logs_configmap(&state, &ns, &cm_name, &job_name, &req.pod_name, agent, &wrapped_prompt).await?;
+    create_logs_configmap(
+        &state,
+        &ns,
+        &cm_name,
+        &job_name,
+        &req.pod_name,
+        agent,
+        &wrapped_prompt,
+    )
+    .await?;
 
     let job_uid = match create_diag_job(
         &state,
@@ -285,17 +234,10 @@ pub async fn create_diagnostic(
         }
     }
 
-    // Record consumption only after the Job creation actually succeeded —
-    // otherwise a repeated 5xx from the apiserver would starve the operator
-    // out of the quota window without ever having run an agent.
-    state.ai_rate_limiter.record(&ns);
-    let post = state.ai_rate_limiter.snapshot(&ns);
-
     Ok(Json(DiagnoseResponse {
         job_name,
         status: DiagStatus::Pending,
         agent,
-        quota: post.into(),
     }))
 }
 
@@ -308,9 +250,14 @@ pub async fn get_diagnostic_status(
 
     let status = job_status(&job);
     let labels = job.metadata.labels.as_ref();
-    let source_pod = labels
-        .and_then(|l| l.get(DIAG_POD_LABEL_KEY))
-        .cloned();
+    // Prefer the annotation (full pod name) over the label (may be truncated).
+    let source_pod = job
+        .metadata
+        .annotations
+        .as_ref()
+        .and_then(|a| a.get("deckwatch.io/source-pod"))
+        .cloned()
+        .or_else(|| labels.and_then(|l| l.get(DIAG_POD_LABEL_KEY)).cloned());
     let agent = labels
         .and_then(|l| l.get(DIAG_AGENT_LABEL_KEY))
         .and_then(|v| parse_agent(v.as_str()));
@@ -451,11 +398,7 @@ async fn drive_diag_stream(
     // Succeeded, or Failed the kubelet has attached stdout and `logs`
     // will return something (even for a completed pod).
     if let Err(e) = wait_for_pod_started(&state, &ns, &pod_name).await {
-        let _ = send_error(
-            &tx,
-            &format!("pod {pod_name} never left Pending: {e}"),
-        )
-        .await;
+        let _ = send_error(&tx, &format!("pod {pod_name} never left Pending: {e}")).await;
         let _ = send_done(&tx, &state, &ns, &job_name).await;
         return;
     }
@@ -669,9 +612,14 @@ pub async fn list_diagnostics(
             let agent = labels
                 .and_then(|l| l.get(DIAG_AGENT_LABEL_KEY))
                 .and_then(|v| parse_agent(v.as_str()));
-            let source_pod = labels
-                .and_then(|l| l.get(DIAG_POD_LABEL_KEY))
-                .cloned();
+            // Prefer annotation (full pod name) over label (may be truncated).
+            let source_pod = job
+                .metadata
+                .annotations
+                .as_ref()
+                .and_then(|a| a.get("deckwatch.io/source-pod"))
+                .cloned()
+                .or_else(|| labels.and_then(|l| l.get(DIAG_POD_LABEL_KEY)).cloned());
             let js = job.status.as_ref();
             let started_at = js
                 .and_then(|s| s.start_time.as_ref())
@@ -740,8 +688,20 @@ async fn create_logs_configmap(
     let mut labels = BTreeMap::new();
     labels.insert(DIAG_LABEL_KEY.to_string(), "true".to_string());
     labels.insert(DIAG_AGENT_LABEL_KEY.to_string(), agent.as_str().to_string());
-    labels.insert(DIAG_POD_LABEL_KEY.to_string(), sanitize_name_segment(pod_name));
-    labels.insert("deckwatch.io/diagnostic-job".to_string(), job_name.to_string());
+    labels.insert(
+        DIAG_POD_LABEL_KEY.to_string(),
+        truncate_label_value(&sanitize_name_segment(pod_name)),
+    );
+    labels.insert(
+        "deckwatch.io/diagnostic-job".to_string(),
+        job_name.to_string(),
+    );
+
+    // Store the full (un-truncated) pod name in an annotation so it's
+    // always recoverable even when the label was shortened to fit the
+    // 63-char K8s limit.
+    let mut annotations = BTreeMap::new();
+    annotations.insert("deckwatch.io/source-pod".to_string(), pod_name.to_string());
 
     // The whole prompt (task + fenced sanitized logs) lives as a single
     // ConfigMap key so the in-cluster shell script doesn't need to
@@ -756,6 +716,7 @@ async fn create_logs_configmap(
             name: Some(cm_name.to_string()),
             namespace: Some(ns.to_string()),
             labels: Some(labels),
+            annotations: Some(annotations),
             ..Default::default()
         },
         data: Some(data),
@@ -779,7 +740,13 @@ async fn create_diag_job(
     let mut labels = BTreeMap::new();
     labels.insert(DIAG_LABEL_KEY.to_string(), "true".to_string());
     labels.insert(DIAG_AGENT_LABEL_KEY.to_string(), agent.as_str().to_string());
-    labels.insert(DIAG_POD_LABEL_KEY.to_string(), sanitize_name_segment(pod_name));
+    labels.insert(
+        DIAG_POD_LABEL_KEY.to_string(),
+        truncate_label_value(&sanitize_name_segment(pod_name)),
+    );
+
+    let mut annotations = BTreeMap::new();
+    annotations.insert("deckwatch.io/source-pod".to_string(), pod_name.to_string());
 
     let mut env = vec![
         EnvVar {
@@ -822,13 +789,15 @@ async fn create_diag_job(
     // is strictly safer against prompt-injection payloads. See
     // docs/AI_SAFETY.md for the discussion.
     let (cli, extra_flags): (&str, Vec<String>) = match agent {
-        DiagAgent::Claude => (
-            "claude",
-            vec!["-p".to_string()],
-        ),
+        DiagAgent::Claude => ("claude", vec!["-p".to_string()]),
         DiagAgent::Codex => (
             "codex",
-            vec!["exec".to_string(), "--sandbox".to_string(), "read-only".to_string(), "--".to_string()],
+            vec![
+                "exec".to_string(),
+                "--sandbox".to_string(),
+                "read-only".to_string(),
+                "--".to_string(),
+            ],
         ),
     };
 
@@ -866,6 +835,7 @@ cat "$DECKWATCH_DIAG_PROMPT_PATH" | {cli} {cli_flags}
             name: Some(job_name.to_string()),
             namespace: Some(ns.to_string()),
             labels: Some(labels),
+            annotations: Some(annotations),
             ..Default::default()
         },
         spec: Some(JobSpec {
@@ -970,5 +940,41 @@ fn sanitize_name_segment(input: &str) -> String {
         .collect();
     let trimmed = cleaned.trim_matches('-');
     let s = if trimmed.is_empty() { "pod" } else { trimmed };
-    if s.len() > 40 { s[..40].to_string() } else { s.to_string() }
+    if s.len() > 40 {
+        s[..40].to_string()
+    } else {
+        s.to_string()
+    }
+}
+
+/// Truncate a string to fit within the K8s label value limit (63 chars).
+/// Trims trailing dashes so the result is a valid label value.
+fn truncate_label_value(s: &str) -> String {
+    if s.len() <= K8S_LABEL_VALUE_MAX {
+        return s.to_string();
+    }
+    s[..K8S_LABEL_VALUE_MAX].trim_end_matches('-').to_string()
+}
+
+/// Build a short, K8s-safe resource name that fits within the 63-char label
+/// value limit. The full source identifier (pod name, app name) is stored in
+/// annotations by the caller; the resource name only needs to be unique and
+/// recognizable in `kubectl get jobs` output.
+///
+/// Format: `{prefix}-{agent}-{hash}` where hash is an 8-char hex digest
+/// derived from the source identifier + timestamp. The longest possible
+/// result is `dw-diag-claude-xxxxxxxx` (24 chars), well under 63.
+fn make_short_name(prefix: &str, agent: &str, source: &str, ts: i64) -> String {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+
+    let mut hasher = DefaultHasher::new();
+    source.hash(&mut hasher);
+    ts.hash(&mut hasher);
+    let hash = hasher.finish();
+    let short_hash = format!("{:016x}", hash);
+
+    // Use only the first 8 hex chars for brevity; collision risk is
+    // negligible in practice (different ts values for the same pod).
+    format!("{}-{}-{}", prefix, agent, &short_hash[..8])
 }

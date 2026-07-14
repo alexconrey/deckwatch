@@ -97,42 +97,77 @@ impl NotificationEvent {
     /// clients that can't render blocks.
     pub fn text(&self) -> String {
         match self {
-            Self::BuildCompleted { namespace, deployment, image, commit_sha } => format!(
+            Self::BuildCompleted {
+                namespace,
+                deployment,
+                image,
+                commit_sha,
+            } => format!(
                 ":white_check_mark: Build succeeded — `{}/{}` -> `{}` ({})",
-                namespace, deployment, image, Self::short_sha(commit_sha),
+                namespace,
+                deployment,
+                image,
+                Self::short_sha(commit_sha),
             ),
-            Self::BuildFailed { namespace, deployment, commit_sha, error } => format!(
+            Self::BuildFailed {
+                namespace,
+                deployment,
+                commit_sha,
+                error,
+            } => format!(
                 ":x: Build failed — `{}/{}` at {}: {}",
-                namespace, deployment, Self::short_sha(commit_sha), error,
+                namespace,
+                deployment,
+                Self::short_sha(commit_sha),
+                error,
             ),
-            Self::DeploymentCreated { namespace, deployment, image } => format!(
+            Self::DeploymentCreated {
+                namespace,
+                deployment,
+                image,
+            } => format!(
                 ":package: Deployment created — `{}/{}` image `{}`",
                 namespace, deployment, image,
             ),
-            Self::DeploymentDeleted { namespace, deployment } => format!(
+            Self::DeploymentDeleted {
+                namespace,
+                deployment,
+            } => format!(
                 ":wastebasket: Deployment deleted — `{}/{}`",
                 namespace, deployment,
             ),
-            Self::DeploymentScaled { namespace, deployment, replicas } => format!(
+            Self::DeploymentScaled {
+                namespace,
+                deployment,
+                replicas,
+            } => format!(
                 ":arrows_counterclockwise: Deployment scaled — `{}/{}` -> {} replicas",
                 namespace, deployment, replicas,
             ),
-            Self::PodCrashLoop { namespace, pod, container, restart_count } => format!(
+            Self::PodCrashLoop {
+                namespace,
+                pod,
+                container,
+                restart_count,
+            } => format!(
                 ":rotating_light: CrashLoopBackOff — `{}/{}` container `{}` ({} restarts)",
                 namespace, pod, container, restart_count,
             ),
-            Self::ApplicationCreated { namespace, application } => format!(
+            Self::ApplicationCreated {
+                namespace,
+                application,
+            } => format!(
                 ":sparkles: Application created — `{}/{}`",
                 namespace, application,
             ),
-            Self::ApplicationDeleted { namespace, application } => format!(
+            Self::ApplicationDeleted {
+                namespace,
+                application,
+            } => format!(
                 ":wastebasket: Application deleted — `{}/{}`",
                 namespace, application,
             ),
-            Self::Test { source } => format!(
-                ":wave: Deckwatch notification test from {}",
-                source,
-            ),
+            Self::Test { source } => format!(":wave: Deckwatch notification test from {}", source,),
         }
     }
 }

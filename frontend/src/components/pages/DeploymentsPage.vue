@@ -20,6 +20,8 @@ import type {
 } from "@/types/api";
 import StatusChip from "@/components/common/StatusChip.vue";
 import ReplicaGauge from "@/components/views/deployment/ReplicaGauge.vue";
+import ConfirmDialog from "@/components/common/ConfirmDialog.vue";
+import { deploymentsApi } from "@/api/deployments";
 import { formatAge, formatTimestamp } from "@/utils/format";
 import { estimateCost, formatCost } from "@/utils/cost";
 
@@ -56,6 +58,8 @@ function costForDeployment(d: DeploymentSummary): string {
   if (!est) return "—";
   return `${formatCost(est.hourly, est.currency)}/hr`;
 }
+
+const search = ref("");
 
 type TabKey = "deployments" | "cronjobs" | "secrets" | "configmaps";
 // Initial tab honors ?tab= query so /deployments?tab=secrets (used by the
@@ -111,6 +115,75 @@ const nameRules = [
     namePattern.test(v) || "Lowercase alphanumeric or '-', start/end alphanumeric",
 ];
 
+// --- Deployment per-row actions ---
+const showRowRestartDialog = ref(false);
+const showRowDeleteDialog = ref(false);
+const showRowScaleDialog = ref(false);
+const rowActionTarget = ref<string | null>(null);
+const rowActionLoading = ref(false);
+const rowScaleReplicas = ref(1);
+
+const openRowRestart = (name: string) => {
+  rowActionTarget.value = name;
+  showRowRestartDialog.value = true;
+};
+
+const openRowScale = (name: string, currentReplicas: number) => {
+  rowActionTarget.value = name;
+  rowScaleReplicas.value = currentReplicas;
+  showRowScaleDialog.value = true;
+};
+
+const openRowDelete = (name: string) => {
+  rowActionTarget.value = name;
+  showRowDeleteDialog.value = true;
+};
+
+const handleRowRestart = async () => {
+  if (!ns.selected || !rowActionTarget.value) return;
+  rowActionLoading.value = true;
+  try {
+    await deploymentsApi.restart(ns.selected, rowActionTarget.value);
+    showRowRestartDialog.value = false;
+    rowActionTarget.value = null;
+    await deployments.fetchDeployments(ns.selected);
+  } catch (e) {
+    deployments.error = e instanceof Error ? e.message : "Failed to restart";
+  } finally {
+    rowActionLoading.value = false;
+  }
+};
+
+const handleRowScale = async () => {
+  if (!ns.selected || !rowActionTarget.value) return;
+  rowActionLoading.value = true;
+  try {
+    await deploymentsApi.scale(ns.selected, rowActionTarget.value, rowScaleReplicas.value);
+    showRowScaleDialog.value = false;
+    rowActionTarget.value = null;
+    await deployments.fetchDeployments(ns.selected);
+  } catch (e) {
+    deployments.error = e instanceof Error ? e.message : "Failed to scale";
+  } finally {
+    rowActionLoading.value = false;
+  }
+};
+
+const handleRowDelete = async () => {
+  if (!ns.selected || !rowActionTarget.value) return;
+  rowActionLoading.value = true;
+  try {
+    await deploymentsApi.delete(ns.selected, rowActionTarget.value);
+    showRowDeleteDialog.value = false;
+    rowActionTarget.value = null;
+    await deployments.fetchDeployments(ns.selected);
+  } catch (e) {
+    deployments.error = e instanceof Error ? e.message : "Failed to delete";
+  } finally {
+    rowActionLoading.value = false;
+  }
+};
+
 // Cost column is inserted only when the overlay is configured — otherwise
 // the column would render "—" for every row and add nothing but noise.
 const deploymentHeaders = computed(() => {
@@ -124,6 +197,7 @@ const deploymentHeaders = computed(() => {
     base.push({ title: "Cost", key: "cost", width: "140px", sortable: false });
   }
   base.push({ title: "Age", key: "created_at", width: "140px" });
+  base.push({ title: "", key: "actions", width: "64px", sortable: false });
   return base;
 });
 
@@ -441,6 +515,19 @@ const deleteCm = async (name: string) => {
       >
         Refresh
       </v-btn>
+      <v-text-field
+        v-if="tab === 'deployments'"
+        v-model="search"
+        prepend-inner-icon="mdi-magnify"
+        label="Search deployments"
+        density="compact"
+        variant="outlined"
+        hide-details
+        clearable
+        single-line
+        style="max-width: 260px"
+        class="mr-2"
+      />
       <v-btn
         v-if="tab === 'deployments'"
         color="primary"
@@ -504,6 +591,7 @@ const deleteCm = async (name: string) => {
           :items="deployments.deployments"
           :headers="deploymentHeaders"
           :loading="deployments.loading"
+          :search="search"
           item-value="name"
           hover
           class="bg-surface rounded"
@@ -533,6 +621,38 @@ const deleteCm = async (name: string) => {
             <span class="text-body-2 text-secondary">
               {{ formatAge(item.created_at) }}
             </span>
+          </template>
+
+          <template v-slot:item.actions="{ item }">
+            <v-menu location="bottom end">
+              <template v-slot:activator="{ props: menuProps }">
+                <v-btn
+                  icon="mdi-dots-vertical"
+                  variant="text"
+                  size="small"
+                  v-bind="menuProps"
+                  @click.stop
+                />
+              </template>
+              <v-list density="compact">
+                <v-list-item
+                  prepend-icon="mdi-restart"
+                  title="Restart"
+                  @click="openRowRestart(item.name)"
+                />
+                <v-list-item
+                  prepend-icon="mdi-arrow-expand-vertical"
+                  title="Scale"
+                  @click="openRowScale(item.name, item.replicas.desired)"
+                />
+                <v-list-item
+                  prepend-icon="mdi-delete"
+                  title="Delete"
+                  class="text-error"
+                  @click="openRowDelete(item.name)"
+                />
+              </v-list>
+            </v-menu>
           </template>
 
           <template v-slot:no-data>
@@ -951,6 +1071,65 @@ const deleteCm = async (name: string) => {
             @click="submitCm"
           >
             {{ cmDialogMode === "create" ? "Create" : "Save" }}
+          </v-btn>
+        </v-card-actions>
+      </v-card>
+    </v-dialog>
+
+    <!-- Deployment row action dialogs -->
+    <ConfirmDialog
+      v-model="showRowRestartDialog"
+      title="Restart Deployment"
+      :message="`This will trigger a rolling restart of '${rowActionTarget}'.`"
+      confirm-text="Restart"
+      confirm-color="warning"
+      :loading="rowActionLoading"
+      @confirm="handleRowRestart"
+    />
+
+    <ConfirmDialog
+      v-model="showRowDeleteDialog"
+      title="Delete Deployment"
+      :message="`Are you sure you want to delete '${rowActionTarget}'? This action cannot be undone.`"
+      confirm-text="Delete"
+      :confirm-input="rowActionTarget ?? ''"
+      :loading="rowActionLoading"
+      @confirm="handleRowDelete"
+    />
+
+    <v-dialog v-model="showRowScaleDialog" max-width="420">
+      <v-card>
+        <v-card-title>Scale Deployment</v-card-title>
+        <v-card-text>
+          <div class="mb-3">
+            Set replica count for <strong>{{ rowActionTarget }}</strong>:
+          </div>
+          <v-text-field
+            v-model.number="rowScaleReplicas"
+            label="Replicas"
+            type="number"
+            min="0"
+            density="compact"
+            hide-details
+            autofocus
+          />
+        </v-card-text>
+        <v-card-actions>
+          <v-spacer />
+          <v-btn
+            variant="text"
+            :disabled="rowActionLoading"
+            @click="showRowScaleDialog = false"
+          >
+            Cancel
+          </v-btn>
+          <v-btn
+            color="primary"
+            variant="flat"
+            :loading="rowActionLoading"
+            @click="handleRowScale"
+          >
+            Scale
           </v-btn>
         </v-card-actions>
       </v-card>

@@ -2,6 +2,7 @@
 import { computed, onMounted, ref, watch } from "vue";
 import { settingsApi } from "@/api/settings";
 import { gitopsApi } from "@/api/gitops";
+import { secretsApi } from "@/api/secrets";
 import type {
   DeckwatchSettings,
   GitOpsConfig,
@@ -75,6 +76,50 @@ const webhookSecretCopied = ref(false);
 const webhookUrlCopied = ref(false);
 
 const registryPickerOpen = ref(false);
+
+// Create-new-token inline flow state.
+const showCreateToken = ref(false);
+const newTokenSecretName = ref("");
+const newTokenValue = ref("");
+const createTokenLoading = ref(false);
+const createTokenError = ref<string | null>(null);
+
+async function handleCreateToken() {
+  const ns = props.namespace;
+  if (!ns) {
+    createTokenError.value = "Namespace is required to create a secret.";
+    return;
+  }
+  const secretName = newTokenSecretName.value.trim();
+  if (!secretName) {
+    createTokenError.value = "Secret name is required.";
+    return;
+  }
+  if (!newTokenValue.value) {
+    createTokenError.value = "Token value is required.";
+    return;
+  }
+  createTokenLoading.value = true;
+  createTokenError.value = null;
+  try {
+    await secretsApi.create(ns, {
+      name: secretName,
+      data: { token: newTokenValue.value },
+    });
+    // Auto-fill the token secret field with the new secret name.
+    form.value.tokenSecretName = secretName;
+    selectedTokenName.value = CUSTOM_SENTINEL;
+    // Reset and close the inline form.
+    showCreateToken.value = false;
+    newTokenSecretName.value = "";
+    newTokenValue.value = "";
+  } catch (e) {
+    createTokenError.value =
+      e instanceof Error ? e.message : "Failed to create secret";
+  } finally {
+    createTokenLoading.value = false;
+  }
+}
 
 // Branch autocomplete state.
 const branchOptions = ref<string[]>([]);
@@ -493,7 +538,84 @@ onMounted(() => {
           variant="outlined"
           density="comfortable"
           class="mb-2"
-        />
+        >
+          <template #append-inner>
+            <v-tooltip location="top" text="Create a new K8s secret with a Git token">
+              <template #activator="{ props: tipProps }">
+                <v-btn
+                  v-bind="tipProps"
+                  size="small"
+                  variant="tonal"
+                  density="comfortable"
+                  @click="showCreateToken = !showCreateToken"
+                >
+                  Create New
+                </v-btn>
+              </template>
+            </v-tooltip>
+          </template>
+        </v-text-field>
+
+        <!-- Inline create-token form -->
+        <v-expand-transition>
+          <v-sheet
+            v-if="showCreateToken && useCustomToken"
+            class="pa-3 mb-3 rounded"
+            color="grey-lighten-4"
+            border
+          >
+            <div class="text-subtitle-2 mb-2">Create Git Token Secret</div>
+            <v-alert
+              v-if="createTokenError"
+              type="error"
+              density="compact"
+              variant="tonal"
+              class="mb-2"
+              closable
+              @click:close="createTokenError = null"
+            >
+              {{ createTokenError }}
+            </v-alert>
+            <v-text-field
+              v-model="newTokenSecretName"
+              label="Secret Name"
+              placeholder="my-git-token"
+              variant="outlined"
+              density="compact"
+              hide-details
+              class="mb-2"
+            />
+            <v-text-field
+              v-model="newTokenValue"
+              label="Token Value"
+              type="password"
+              placeholder="ghp_... or glpat-..."
+              variant="outlined"
+              density="compact"
+              hide-details
+              class="mb-2"
+            />
+            <div class="d-flex justify-end ga-2">
+              <v-btn
+                size="small"
+                variant="text"
+                @click="showCreateToken = false"
+              >
+                Cancel
+              </v-btn>
+              <v-btn
+                size="small"
+                variant="flat"
+                color="primary"
+                :loading="createTokenLoading"
+                :disabled="!newTokenSecretName.trim() || !newTokenValue"
+                @click="handleCreateToken"
+              >
+                Save
+              </v-btn>
+            </div>
+          </v-sheet>
+        </v-expand-transition>
 
         <!-- OCI Registry -->
         <v-select

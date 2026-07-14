@@ -169,8 +169,7 @@ pub async fn query_range(
             // can hint at it.
             let (fb_promql, _) =
                 build_fallback_query(params.query, &params.namespace, &params.deployment);
-            match execute_range(&http, &prom_url, &fb_promql, params.start, params.end, step)
-                .await
+            match execute_range(&http, &prom_url, &fb_promql, params.start, params.end, step).await
             {
                 Ok(fb) if !fb.is_empty() => {
                     warnings.push(format!(

@@ -176,7 +176,11 @@ pub async fn promote(
     let patch = build_promote_patch(&source, req.change_cause.as_deref());
 
     let patched = dst_api
-        .patch(&target_name, &PatchParams::default(), &Patch::Strategic(patch))
+        .patch(
+            &target_name,
+            &PatchParams::default(),
+            &Patch::Strategic(patch),
+        )
         .await?;
 
     Ok((
@@ -238,9 +242,7 @@ fn compute_changes(source: &Deployment, target: &Deployment) -> Vec<PromoteField
     changes
 }
 
-fn primary_container(
-    dep: &Deployment,
-) -> Option<&k8s_openapi::api::core::v1::Container> {
+fn primary_container(dep: &Deployment) -> Option<&k8s_openapi::api::core::v1::Container> {
     dep.spec
         .as_ref()
         .and_then(|s| s.template.spec.as_ref())
@@ -253,10 +255,7 @@ fn primary_container(
 /// `name` and the target's sidecars survive untouched. Deckwatch names
 /// the primary container after the deployment; strategic merge will
 /// match by that name and update image/command/args in place.
-fn build_promote_patch(
-    source: &Deployment,
-    change_cause: Option<&str>,
-) -> serde_json::Value {
+fn build_promote_patch(source: &Deployment, change_cause: Option<&str>) -> serde_json::Value {
     let src = primary_container(source);
     let name = src.map(|c| c.name.clone()).unwrap_or_default();
     let image = src.and_then(|c| c.image.clone());
@@ -268,14 +267,12 @@ fn build_promote_patch(
         container["image"] = serde_json::Value::String(image);
     }
     if let Some(command) = command {
-        container["command"] = serde_json::Value::Array(
-            command.into_iter().map(serde_json::Value::String).collect(),
-        );
+        container["command"] =
+            serde_json::Value::Array(command.into_iter().map(serde_json::Value::String).collect());
     }
     if let Some(args) = args {
-        container["args"] = serde_json::Value::Array(
-            args.into_iter().map(serde_json::Value::String).collect(),
-        );
+        container["args"] =
+            serde_json::Value::Array(args.into_iter().map(serde_json::Value::String).collect());
     }
 
     // Stamp change-cause annotation so the promotion shows up in the

@@ -89,9 +89,7 @@ pub async fn list_branches(
         return Err(AppError::BadRequest("repo_url is required".to_string()));
     }
     if q.token_secret.is_empty() {
-        return Err(AppError::BadRequest(
-            "token_secret is required".to_string(),
-        ));
+        return Err(AppError::BadRequest("token_secret is required".to_string()));
     }
 
     let key = cache_key(&q.repo_url, &q.token_secret);

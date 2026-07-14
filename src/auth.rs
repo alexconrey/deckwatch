@@ -53,10 +53,7 @@ impl AuthConfig {
                 enabled: true,
                 tenant_id: s.tenant_id.clone(),
                 client_id: s.client_id.clone(),
-                issuer_url: format!(
-                    "https://login.microsoftonline.com/{}/v2.0",
-                    s.tenant_id
-                ),
+                issuer_url: format!("https://login.microsoftonline.com/{}/v2.0", s.tenant_id),
                 jwks: Arc::new(RwLock::new(JwksCache::default())),
             },
             _ => Self::disabled(),

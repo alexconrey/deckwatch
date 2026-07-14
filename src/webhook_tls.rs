@@ -45,17 +45,12 @@ pub struct WebhookTls {
 ///
 /// Returns paths + the base64-encoded CA bundle ready to drop into a
 /// `ValidatingWebhookConfiguration`.
-pub fn generate(
-    service_name: &str,
-    namespace: &str,
-    out_dir: &Path,
-) -> Result<WebhookTls> {
+pub fn generate(service_name: &str, namespace: &str, out_dir: &Path) -> Result<WebhookTls> {
     std::fs::create_dir_all(out_dir)
         .with_context(|| format!("creating webhook cert dir {}", out_dir.display()))?;
 
     // ---- CA ---------------------------------------------------------
-    let mut ca_params = CertificateParams::new(Vec::new())
-        .context("building CA params")?;
+    let mut ca_params = CertificateParams::new(Vec::new()).context("building CA params")?;
     let mut ca_dn = DistinguishedName::new();
     ca_dn.push(DnType::CommonName, "deckwatch-webhook-ca");
     ca_dn.push(DnType::OrganizationName, "deckwatch");
@@ -74,14 +69,12 @@ pub fn generate(
     let cert_not_after = ca_params.not_after;
 
     let ca_key = KeyPair::generate().context("generating CA key")?;
-    let ca_cert: Certificate = ca_params
-        .self_signed(&ca_key)
-        .context("self-signing CA")?;
+    let ca_cert: Certificate = ca_params.self_signed(&ca_key).context("self-signing CA")?;
 
     // ---- Server cert ------------------------------------------------
     let dns_names = webhook_dns_names(service_name, namespace);
-    let mut srv_params = CertificateParams::new(dns_names.clone())
-        .context("building server cert params")?;
+    let mut srv_params =
+        CertificateParams::new(dns_names.clone()).context("building server cert params")?;
     let mut srv_dn = DistinguishedName::new();
     srv_dn.push(
         DnType::CommonName,

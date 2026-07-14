@@ -61,10 +61,7 @@ pub struct GetSecretQuery {
 }
 
 fn secret_type(secret: &Secret) -> String {
-    secret
-        .type_
-        .clone()
-        .unwrap_or_else(|| "Opaque".to_string())
+    secret.type_.clone().unwrap_or_else(|| "Opaque".to_string())
 }
 
 fn secret_keys(secret: &Secret) -> Vec<String> {
