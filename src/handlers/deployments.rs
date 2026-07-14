@@ -955,3 +955,7 @@ pub async fn remove_container(
         ingresses,
     }))
 }
+
+#[cfg(test)]
+#[path = "../handlers_deployments_tests.rs"]
+mod handlers_deployments_tests;

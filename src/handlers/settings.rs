@@ -407,3 +407,7 @@ pub async fn test_notification(
         .map_err(|e| AppError::BadRequest(format!("test notification failed: {e}")))?;
     Ok(Json(serde_json::json!({"status": "sent"})))
 }
+
+#[cfg(test)]
+#[path = "../settings_tests.rs"]
+mod settings_tests;

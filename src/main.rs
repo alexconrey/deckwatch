@@ -224,3 +224,6 @@ async fn load_auth_config(state: &AppState) -> auth::AuthConfig {
     };
     auth::AuthConfig::from_settings(parsed.auth.as_ref())
 }
+
+#[cfg(test)]
+mod integration_tests;

@@ -885,3 +885,7 @@ pub fn event_summary(event: &k8s_openapi::api::core::v1::Event) -> EventSummary 
         source_host: event.source.as_ref().and_then(|s| s.host.clone()),
     }
 }
+
+#[cfg(test)]
+#[path = "kube_ext_tests.rs"]
+mod kube_ext_tests;

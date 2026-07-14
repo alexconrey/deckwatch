@@ -75,3 +75,7 @@ pub fn backend_name(database_url: &str) -> &'static str {
         "unknown"
     }
 }
+
+#[cfg(test)]
+#[path = "db_tests.rs"]
+mod db_tests;

@@ -762,3 +762,7 @@ async fn list_ingresses_for_service(
         .map(ingress_summary)
         .collect())
 }
+
+#[cfg(test)]
+#[path = "../handlers_addons_tests.rs"]
+mod handlers_addons_tests;

@@ -126,3 +126,7 @@ impl AppState {
         Api::all(self.kube_client.clone())
     }
 }
+
+#[cfg(test)]
+#[path = "state_tests.rs"]
+mod state_tests;
