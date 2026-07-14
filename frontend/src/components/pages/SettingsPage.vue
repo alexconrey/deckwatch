@@ -34,6 +34,8 @@ const NOTIFICATION_EVENTS: { value: NotificationEventType; title: string; hint: 
 type SectionId =
   | "general"
   | "auth"
+  | "ai_providers"
+  | "observability"
   | "templates"
   | "git_repositories"
   | "container_registries"
@@ -42,6 +44,8 @@ type SectionId =
 const navItems: { id: SectionId; title: string; icon: string }[] = [
   { id: "general", title: "General", icon: "mdi-tune" },
   { id: "auth", title: "Authentication", icon: "mdi-shield-account" },
+  { id: "ai_providers", title: "AI Providers", icon: "mdi-robot" },
+  { id: "observability", title: "Observability", icon: "mdi-chart-line" },
   { id: "templates", title: "Templates", icon: "mdi-shape-outline" },
   { id: "git_repositories", title: "Git Repositories", icon: "mdi-git" },
   { id: "container_registries", title: "Container Registries", icon: "mdi-package-variant" },
@@ -599,40 +603,6 @@ onMounted(load);
 
             <v-divider class="my-6" />
 
-            <h3 class="text-h6 mb-2">Cluster alert notifications</h3>
-            <p class="text-body-2 text-secondary mb-3">
-              When enabled, deckwatch pops a toast in the top-right of every
-              page for each new cluster Warning event. Toasts auto-dismiss
-              after 5 seconds. This setting is stored in this browser only.
-            </p>
-            <v-switch
-              v-model="alertsEnabled"
-              color="primary"
-              label="Enable cluster alert notifications"
-              hide-details
-              inset
-              density="compact"
-            />
-
-            <v-divider class="my-6" />
-
-            <h3 class="text-h6 mb-2">Prometheus monitoring</h3>
-            <p class="text-body-2 text-secondary mb-3">
-              When enabled, deckwatch can create PodMonitor resources for
-              per-deployment metrics scraping. Requires the prometheus-operator
-              CRDs (monitoring.coreos.com) to be installed in the cluster.
-            </p>
-            <v-switch
-              v-model="prometheusEnabled"
-              color="primary"
-              label="Enable Prometheus monitoring"
-              hide-details
-              inset
-              density="compact"
-            />
-
-            <v-divider class="my-6" />
-
             <h3 class="text-h6 mb-2">Container Registry</h3>
             <p class="text-body-2 text-secondary mb-3">
               When enabled, the Registry page is accessible from the
@@ -738,75 +708,6 @@ onMounted(load);
               </span>
             </div>
 
-            <v-divider class="my-6" />
-
-            <h3 class="text-h6 mb-2">AI providers</h3>
-            <p class="text-body-2 text-secondary mb-4">
-              Controls which AI agents show up in the "Diagnose with AI" and
-              "Fix with AI" flows. Turning Claude off hides the Diagnose button
-              entirely across every pod view. These toggles apply to all users.
-            </p>
-
-            <v-card variant="outlined" class="mb-3 pa-4">
-              <div class="d-flex align-center">
-                <v-icon
-                  icon="mdi-alpha-c-circle"
-                  color="deep-purple"
-                  size="large"
-                  class="mr-3"
-                />
-                <div class="flex-grow-1">
-                  <div class="text-subtitle-1">Claude</div>
-                  <div class="text-caption text-secondary">
-                    Anthropic Claude Code CLI. Runs as a Kubernetes Job with an
-                    <code>ANTHROPIC_API_KEY</code> Secret mounted in.
-                  </div>
-                </div>
-                <v-switch
-                  v-model="aiClaudeEnabled"
-                  color="primary"
-                  hide-details
-                  density="compact"
-                  inset
-                />
-              </div>
-            </v-card>
-
-            <v-card variant="outlined" class="mb-3 pa-4">
-              <div class="d-flex align-center">
-                <v-icon
-                  icon="mdi-alpha-o-circle"
-                  color="grey"
-                  size="large"
-                  class="mr-3"
-                />
-                <div class="flex-grow-1">
-                  <div class="d-flex align-center">
-                    <span class="text-subtitle-1">Codex</span>
-                    <v-chip
-                      size="x-small"
-                      color="info"
-                      variant="tonal"
-                      class="ml-2"
-                    >
-                      Coming Soon
-                    </v-chip>
-                  </div>
-                  <div class="text-caption text-secondary">
-                    OpenAI Codex CLI. Backend plumbing is in place; provider
-                    wiring will ship in a follow-up.
-                  </div>
-                </div>
-                <v-switch
-                  v-model="aiCodexEnabled"
-                  color="primary"
-                  hide-details
-                  density="compact"
-                  :disabled="true"
-                  inset
-                />
-              </div>
-            </v-card>
           </template>
         </div>
 
@@ -883,6 +784,112 @@ onMounted(load);
             placeholder="openid profile email"
             variant="outlined"
             density="comfortable"
+          />
+        </div>
+
+        <!-- AI Providers -->
+        <div v-else-if="section === 'ai_providers'">
+          <h3 class="text-h6 mb-2">AI Integrations</h3>
+          <p class="text-body-2 text-secondary mb-4">
+            Controls which AI agents show up in the "Diagnose with AI" and
+            "Fix with AI" flows. Turning Claude off hides the Diagnose button
+            entirely across every pod view. These toggles apply to all users.
+          </p>
+
+          <v-card variant="outlined" class="mb-3 pa-4">
+            <div class="d-flex align-center">
+              <v-icon
+                icon="mdi-alpha-c-circle"
+                color="deep-purple"
+                size="large"
+                class="mr-3"
+              />
+              <div class="flex-grow-1">
+                <div class="text-subtitle-1">Claude</div>
+                <div class="text-caption text-secondary">
+                  Anthropic Claude Code CLI. Runs as a Kubernetes Job with an
+                  <code>ANTHROPIC_API_KEY</code> Secret mounted in.
+                </div>
+              </div>
+              <v-switch
+                v-model="aiClaudeEnabled"
+                color="primary"
+                hide-details
+                density="compact"
+                inset
+              />
+            </div>
+          </v-card>
+
+          <v-card variant="outlined" class="mb-3 pa-4">
+            <div class="d-flex align-center">
+              <v-icon
+                icon="mdi-alpha-o-circle"
+                color="grey"
+                size="large"
+                class="mr-3"
+              />
+              <div class="flex-grow-1">
+                <div class="d-flex align-center">
+                  <span class="text-subtitle-1">Codex</span>
+                  <v-chip
+                    size="x-small"
+                    color="info"
+                    variant="tonal"
+                    class="ml-2"
+                  >
+                    Coming Soon
+                  </v-chip>
+                </div>
+                <div class="text-caption text-secondary">
+                  OpenAI Codex CLI. Backend plumbing is in place; provider
+                  wiring will ship in a follow-up.
+                </div>
+              </div>
+              <v-switch
+                v-model="aiCodexEnabled"
+                color="primary"
+                hide-details
+                density="compact"
+                :disabled="true"
+                inset
+              />
+            </div>
+          </v-card>
+        </div>
+
+        <!-- Observability -->
+        <div v-else-if="section === 'observability'">
+          <h3 class="text-h6 mb-2">Prometheus monitoring</h3>
+          <p class="text-body-2 text-secondary mb-3">
+            When enabled, deckwatch can create PodMonitor resources for
+            per-deployment metrics scraping. Requires the prometheus-operator
+            CRDs (monitoring.coreos.com) to be installed in the cluster.
+          </p>
+          <v-switch
+            v-model="prometheusEnabled"
+            color="primary"
+            label="Enable Prometheus monitoring"
+            hide-details
+            inset
+            density="compact"
+          />
+
+          <v-divider class="my-6" />
+
+          <h3 class="text-h6 mb-2">Cluster alert notifications</h3>
+          <p class="text-body-2 text-secondary mb-3">
+            When enabled, deckwatch pops a toast in the top-right of every
+            page for each new cluster Warning event. Toasts auto-dismiss
+            after 5 seconds. This setting is stored in this browser only.
+          </p>
+          <v-switch
+            v-model="alertsEnabled"
+            color="primary"
+            label="Enable cluster alert notifications"
+            hide-details
+            inset
+            density="compact"
           />
         </div>
 
