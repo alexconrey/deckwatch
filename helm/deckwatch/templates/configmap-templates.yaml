@@ -1,0 +1,16 @@
+{{- $cmName := .Values.templates.configMapName | default "deckwatch-templates" }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ $cmName }}
+  labels:
+    {{- include "deckwatch.labels" . | nindent 4 }}
+    app.kubernetes.io/component: templates
+  annotations:
+    # Server-side apply from the running app claims the `templates` field;
+    # helm owns the initial seed only. `resource-policy: keep` prevents
+    # `helm uninstall` from wiping operator-authored overrides.
+    "helm.sh/resource-policy": keep
+data:
+  templates: |
+{{ .Values.templates.overrides | default list | toJson | indent 4 }}

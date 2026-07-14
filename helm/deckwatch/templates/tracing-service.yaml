@@ -1,0 +1,63 @@
+{{- if .Values.tracing.enabled }}
+{{- $backend := .Values.tracing.backend | default "tempo" -}}
+{{- if eq $backend "tempo" }}
+# Service exposing Tempo's OTLP receivers to sidecar collectors.
+# The name `deckwatch-tempo` is stable and referenced by the tracing handler's
+# default endpoint discovery — do not rename without updating
+# `default_tempo_service()` in src/handlers/tracing.rs.
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "deckwatch.fullname" . }}-tempo
+  labels:
+    {{- include "deckwatch.labels" . | nindent 4 }}
+    app.kubernetes.io/component: tracing-backend
+spec:
+  type: ClusterIP
+  ports:
+    - name: otlp-grpc
+      port: 4317
+      targetPort: otlp-grpc
+      protocol: TCP
+    - name: otlp-http
+      port: 4318
+      targetPort: otlp-http
+      protocol: TCP
+    - name: http
+      port: 3200
+      targetPort: http
+      protocol: TCP
+  selector:
+    {{- include "deckwatch.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: tracing-backend
+{{- else if eq $backend "jaeger" }}
+# Jaeger all-in-one exposes the collector on 4317/4318 and the UI on 16686.
+# Split from the deployment so the UI port can be optionally ingress-exposed
+# by an operator without touching the workload manifest.
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "deckwatch.fullname" . }}-jaeger
+  labels:
+    {{- include "deckwatch.labels" . | nindent 4 }}
+    app.kubernetes.io/component: tracing-backend
+spec:
+  type: ClusterIP
+  ports:
+    - name: otlp-grpc
+      port: 4317
+      targetPort: otlp-grpc
+      protocol: TCP
+    - name: otlp-http
+      port: 4318
+      targetPort: otlp-http
+      protocol: TCP
+    - name: ui
+      port: 16686
+      targetPort: ui
+      protocol: TCP
+  selector:
+    {{- include "deckwatch.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: tracing-backend
+{{- end }}
+{{- end }}

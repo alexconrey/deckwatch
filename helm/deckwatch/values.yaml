@@ -1,0 +1,137 @@
+replicaCount: 1
+
+image:
+  repository: ""
+  pullPolicy: IfNotPresent
+  tag: ""
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+serviceAccount:
+  create: true
+  automount: true
+  annotations: {}
+  name: ""
+
+# Comma-separated list of namespaces deckwatch is allowed to manage.
+# Empty string = all namespaces.
+namespaces: ""
+
+service:
+  type: ClusterIP
+  port: 80
+  # Annotations applied to the Service. When metrics.annotations is enabled
+  # below, Prometheus scrape hints are merged in.
+  annotations: {}
+
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+  hosts:
+    - host: deckwatch.local
+      paths:
+        - path: /
+          pathType: Prefix
+  tls: []
+
+resources:
+  requests:
+    cpu: 50m
+    memory: 64Mi
+  limits:
+    cpu: 200m
+    memory: 128Mi
+
+podAnnotations: {}
+podLabels: {}
+nodeSelector: {}
+tolerations: []
+affinity: {}
+
+metrics:
+  # Prometheus text-format exposition is served at /metrics on the same
+  # container port as the app (8080). No auth is required.
+  enabled: true
+
+  # Adds prometheus.io/* scrape hints to the Service. Leave enabled if your
+  # Prometheus is configured with the classic kubernetes_sd_configs job that
+  # respects those annotations. Disable when relying on ServiceMonitor.
+  annotations: true
+
+  # Emit a prometheus-operator ServiceMonitor resource. Requires the
+  # monitoring.coreos.com/v1 CRDs to be installed in the cluster.
+  serviceMonitor:
+    enabled: false
+    # Namespace the ServiceMonitor is deployed into. Defaults to the release
+    # namespace.
+    namespace: ""
+    interval: 30s
+    scrapeTimeout: 10s
+    # Extra labels required by your Prometheus operator's serviceMonitorSelector.
+    labels: {}
+    # Metric relabeling applied at scrape time.
+    metricRelabelings: []
+    relabelings: []
+
+settings:
+  configMapName: "deckwatch-config"
+  defaults:
+    allowed_namespaces: []
+    auth:
+      enabled: false
+      tenant_id: ""
+      client_id: ""
+    notifications:
+      enabled: false
+      webhook_url: ""
+    default_resource_limits: null
+    git_repositories: []
+    oci_registries: []
+    git_token_secrets: []
+
+registry:
+  enabled: false
+
+  # Storage backend: "filesystem" (default, PVC-backed) or "s3".
+  # Filesystem uses the storageSize/storageClassName/accessMode fields below
+  # to provision a PVC. S3 skips the PVC entirely and reads the `s3` block.
+  storage: filesystem
+
+  # Only used when storage=filesystem.
+  storageSize: 10Gi
+  storageClassName: ""
+  accessMode: ReadWriteOnce
+
+  # Only used when storage=s3.
+  s3:
+    bucket: ""
+    prefix: ""
+    region: "us-east-1"
+    # Custom endpoint for MinIO / Ceph RGW / R2. Empty = AWS default.
+    endpoint: ""
+    # Force path-style addressing. Auto-enabled when `endpoint` is set.
+    pathStyle: false
+
+    # Credentials. Prefer IRSA on EKS:
+    #   serviceAccount.annotations["eks.amazonaws.com/role-arn"] = <role>
+    # Otherwise set `credentialsSecret` to the name of an existing Secret
+    # containing AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY / (optional)
+    # AWS_SESSION_TOKEN keys. Values are wired in via `envFrom.secretRef`.
+    credentialsSecret: ""
+
+  service:
+    port: 5000
+  publicUrl: ""
+  ingress:
+    enabled: false
+    className: ""
+    annotations: {}
+    hosts: []
+    tls: []
+
+templates:
+  configMapName: "deckwatch-templates"
+  overrides: []

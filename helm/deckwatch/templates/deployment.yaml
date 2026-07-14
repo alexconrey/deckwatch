@@ -1,0 +1,115 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "deckwatch.fullname" . }}
+  labels:
+    {{- include "deckwatch.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "deckwatch.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      {{- with .Values.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      labels:
+        {{- include "deckwatch.labels" . | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      serviceAccountName: {{ include "deckwatch.serviceAccountName" . }}
+      containers:
+        - name: deckwatch
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+          env:
+            - name: DECKWATCH_NAMESPACES
+              value: {{ .Values.namespaces | quote }}
+            - name: DECKWATCH_PORT
+              value: "8080"
+            - name: RUST_LOG
+              value: "deckwatch=info,tower_http=info"
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: DECKWATCH_SETTINGS_CONFIGMAP
+              value: {{ .Values.settings.configMapName | default "deckwatch-config" | quote }}
+            {{- if .Values.registry.enabled }}
+            - name: DECKWATCH_REGISTRY_ENABLED
+              value: "true"
+            - name: DECKWATCH_REGISTRY_STORAGE
+              value: {{ .Values.registry.storage | default "filesystem" | quote }}
+            {{- if or (eq (default "filesystem" .Values.registry.storage) "filesystem") (not .Values.registry.storage) }}
+            - name: DECKWATCH_REGISTRY_ROOT
+              value: /data/registry
+            {{- end }}
+            {{- if eq (default "filesystem" .Values.registry.storage) "s3" }}
+            - name: DECKWATCH_REGISTRY_S3_BUCKET
+              value: {{ .Values.registry.s3.bucket | quote }}
+            - name: DECKWATCH_REGISTRY_S3_PREFIX
+              value: {{ .Values.registry.s3.prefix | default "" | quote }}
+            - name: DECKWATCH_REGISTRY_S3_REGION
+              value: {{ .Values.registry.s3.region | default "us-east-1" | quote }}
+            - name: DECKWATCH_REGISTRY_S3_ENDPOINT
+              value: {{ .Values.registry.s3.endpoint | default "" | quote }}
+            - name: DECKWATCH_REGISTRY_S3_PATH_STYLE
+              value: {{ .Values.registry.s3.pathStyle | default false | quote }}
+            {{- end }}
+            - name: DECKWATCH_REGISTRY_PUBLIC_URL
+              value: {{ include "deckwatch.registryPublicUrl" . | quote }}
+            {{- end }}
+          {{- if and .Values.registry.enabled (eq (default "filesystem" .Values.registry.storage) "s3") .Values.registry.s3.credentialsSecret }}
+          envFrom:
+            - secretRef:
+                name: {{ .Values.registry.s3.credentialsSecret | quote }}
+          {{- end }}
+          livenessProbe:
+            httpGet:
+              path: /api/healthz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /api/readyz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          {{- if and .Values.registry.enabled (or (eq (default "filesystem" .Values.registry.storage) "filesystem") (not .Values.registry.storage)) }}
+          volumeMounts:
+            - name: registry-storage
+              mountPath: /data/registry
+          {{- end }}
+      {{- if and .Values.registry.enabled (or (eq (default "filesystem" .Values.registry.storage) "filesystem") (not .Values.registry.storage)) }}
+      volumes:
+        - name: registry-storage
+          persistentVolumeClaim:
+            claimName: {{ include "deckwatch.fullname" . }}-registry
+      {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

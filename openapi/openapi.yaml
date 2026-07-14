@@ -1,0 +1,1025 @@
+openapi: 3.0.3
+info:
+  title: Deckwatch API
+  description: |
+    Kubernetes control-plane and OCI registry surface exposed by Deckwatch.
+
+    - `/api/*` — application, deployment, namespace, and cluster management
+    - `/v2/*`  — OCI Distribution Spec v1.1 (only when the embedded registry is enabled)
+    - `/metrics` — Prometheus exposition
+  version: "0.1.0"
+  contact:
+    name: Deckwatch
+    url: https://github.com/kore/deckwatch
+
+servers:
+  - url: /
+    description: Same-origin (served by deckwatch)
+
+tags:
+  - name: Health
+  - name: Namespaces
+  - name: Deployments
+  - name: Applications
+  - name: Pods
+  - name: Ingresses
+  - name: Secrets
+  - name: ConfigMaps
+  - name: CronJobs
+  - name: Nodes
+  - name: Events
+  - name: Metrics
+  - name: Logs
+  - name: Exec
+  - name: GitOps
+  - name: Git
+  - name: Diagnostics
+  - name: Addons
+  - name: Templates
+  - name: Settings
+  - name: Registry
+  - name: OCI
+
+paths:
+
+  # ------------------------------------------------------------------ health
+  /api/healthz:
+    get:
+      tags: [Health]
+      summary: Liveness probe
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Health" }
+  /api/readyz:
+    get:
+      tags: [Health]
+      summary: Readiness probe (verifies kube API reachability)
+      responses:
+        "200":
+          description: Ready
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Health" }
+        "503":
+          description: Not ready
+
+  # -------------------------------------------------------------- namespaces
+  /api/namespaces:
+    get:
+      tags: [Namespaces]
+      summary: List namespaces visible to deckwatch
+      responses:
+        "200":
+          description: Namespaces
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/NamespaceListResponse" }
+    post:
+      tags: [Namespaces]
+      summary: Create a namespace
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CreateNamespaceRequest" }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/CreateNamespaceResponse" }
+
+  # -------------------------------------------------------------- deployments
+  /api/namespaces/{ns}/deployments:
+    parameters:
+      - $ref: "#/components/parameters/Namespace"
+    get:
+      tags: [Deployments]
+      summary: List deployments in a namespace
+      parameters:
+        - in: query
+          name: label_selector
+          required: false
+          schema: { type: string }
+          description: Kubernetes label selector (e.g. `app=api`)
+      responses:
+        "200":
+          description: Deployments
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DeploymentListResponse" }
+    post:
+      tags: [Deployments]
+      summary: Create a deployment
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CreateDeploymentRequest" }
+      responses:
+        "201": { description: Created }
+
+  /api/namespaces/{ns}/deployments/{name}:
+    parameters:
+      - $ref: "#/components/parameters/Namespace"
+      - $ref: "#/components/parameters/Name"
+    get:
+      tags: [Deployments]
+      summary: Get a deployment with pods and ingresses
+      responses:
+        "200":
+          description: Deployment detail
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DeploymentDetailResponse" }
+    put:
+      tags: [Deployments]
+      summary: Update a deployment (image, replicas, env, resources, probes)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/UpdateDeploymentRequest" }
+      responses:
+        "200": { description: Updated }
+    delete:
+      tags: [Deployments]
+      summary: Delete a deployment
+      responses:
+        "204": { description: Deleted }
+
+  /api/namespaces/{ns}/deployments/{name}/yaml:
+    parameters:
+      - $ref: "#/components/parameters/Namespace"
+      - $ref: "#/components/parameters/Name"
+    get:
+      tags: [Deployments]
+      summary: Get the raw Deployment manifest as YAML
+      responses:
+        "200":
+          description: YAML manifest
+          content:
+            application/yaml:
+              schema: { type: string }
+    put:
+      tags: [Deployments]
+      summary: Replace the Deployment manifest from YAML
+      requestBody:
+        required: true
+        content:
+          application/yaml:
+            schema: { type: string }
+      responses:
+        "200": { description: Updated }
+
+  /api/namespaces/{ns}/deployments/{name}/restart:
+    parameters:
+      - $ref: "#/components/parameters/Namespace"
+      - $ref: "#/components/parameters/Name"
+    post:
+      tags: [Deployments]
+      summary: Rolling-restart a deployment
+      responses:
+        "202": { description: Restart triggered }
+
+  /api/namespaces/{ns}/deployments/{name}/scale:
+    parameters:
+      - $ref: "#/components/parameters/Namespace"
+      - $ref: "#/components/parameters/Name"
+    post:
+      tags: [Deployments]
+      summary: Scale a deployment
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [replicas]
+              properties:
+                replicas: { type: integer, minimum: 0 }
+      responses:
+        "200": { description: Scaled }
+
+  /api/namespaces/{ns}/deployments/{name}/probes:
+    parameters:
+      - $ref: "#/components/parameters/Namespace"
+      - $ref: "#/components/parameters/Name"
+    patch:
+      tags: [Deployments]
+      summary: Patch liveness / readiness / startup probes
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                liveness_probe:  { $ref: "#/components/schemas/ProbeInput" }
+                readiness_probe: { $ref: "#/components/schemas/ProbeInput" }
+                startup_probe:   { $ref: "#/components/schemas/ProbeInput" }
+      responses:
+        "200": { description: Updated }
+
+  /api/namespaces/{ns}/deployments/{name}/containers:
+    parameters:
+      - $ref: "#/components/parameters/Namespace"
+      - $ref: "#/components/parameters/Name"
+    post:
+      tags: [Deployments]
+      summary: Add a sidecar container
+      responses:
+        "200": { description: Container added }
+
+  /api/namespaces/{ns}/deployments/{name}/containers/{container_name}:
+    parameters:
+      - $ref: "#/components/parameters/Namespace"
+      - $ref: "#/components/parameters/Name"
+      - in: path
+        name: container_name
+        required: true
+        schema: { type: string }
+    delete:
+      tags: [Deployments]
+      summary: Remove a sidecar container
+      responses:
+        "204": { description: Removed }
+
+  /api/namespaces/{ns}/deployments/{name}/pods:
+    parameters:
+      - $ref: "#/components/parameters/Namespace"
+      - $ref: "#/components/parameters/Name"
+    get:
+      tags: [Pods]
+      summary: List pods belonging to a deployment
+      responses:
+        "200":
+          description: Pods
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PodListResponse" }
+
+  /api/namespaces/{ns}/deployments/{name}/history:
+    parameters:
+      - $ref: "#/components/parameters/Namespace"
+      - $ref: "#/components/parameters/Name"
+    get:
+      tags: [Deployments]
+      summary: List ReplicaSet revision history for a deployment
+      responses: { "200": { description: Revisions } }
+
+  /api/namespaces/{ns}/deployments/{name}/rollback:
+    parameters:
+      - $ref: "#/components/parameters/Namespace"
+      - $ref: "#/components/parameters/Name"
+    post:
+      tags: [Deployments]
+      summary: Rollback to a prior revision
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                revision: { type: integer }
+      responses:
+        "202": { description: Rollback triggered }
+
+  /api/namespaces/{ns}/deployments/validate:
+    parameters:
+      - $ref: "#/components/parameters/Namespace"
+    post:
+      tags: [Deployments]
+      summary: Dry-run validate a deployment payload
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CreateDeploymentRequest" }
+      responses:
+        "200": { description: Valid }
+        "400": { description: Invalid }
+
+  /api/namespaces/{ns}/deployments/{name}/clone:
+    parameters:
+      - $ref: "#/components/parameters/Namespace"
+      - $ref: "#/components/parameters/Name"
+    post:
+      tags: [Deployments]
+      summary: Clone a deployment (into same or another namespace)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                target_namespace: { type: string }
+                target_name:      { type: string }
+      responses:
+        "201": { description: Cloned }
+
+  # -------------------------------------------------------------- ingresses
+  /api/namespaces/{ns}/ingresses:
+    parameters:
+      - $ref: "#/components/parameters/Namespace"
+    get:
+      tags: [Ingresses]
+      summary: List ingresses
+      responses: { "200": { description: OK } }
+    post:
+      tags: [Ingresses]
+      summary: Create an ingress
+      responses: { "201": { description: Created } }
+  /api/namespaces/{ns}/ingresses/{name}:
+    parameters:
+      - $ref: "#/components/parameters/Namespace"
+      - $ref: "#/components/parameters/Name"
+    get:
+      tags: [Ingresses]
+      responses: { "200": { description: OK } }
+    put:
+      tags: [Ingresses]
+      responses: { "200": { description: Updated } }
+    delete:
+      tags: [Ingresses]
+      responses: { "204": { description: Deleted } }
+
+  # -------------------------------------------------------------- gitops
+  /api/namespaces/{ns}/deployments/{name}/gitops:
+    parameters:
+      - $ref: "#/components/parameters/Namespace"
+      - $ref: "#/components/parameters/Name"
+    get:
+      tags: [GitOps]
+      summary: Get GitOps config attached to a deployment
+      responses:
+        "200":
+          description: GitOps status
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/GitOpsStatusResponse" }
+    put:
+      tags: [GitOps]
+      summary: Attach or update GitOps config for a deployment
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/GitOpsConfigRequest" }
+      responses: { "200": { description: Saved } }
+    delete:
+      tags: [GitOps]
+      summary: Detach GitOps config
+      responses: { "204": { description: Detached } }
+  /api/namespaces/{ns}/deployments/{name}/gitops/trigger:
+    parameters:
+      - $ref: "#/components/parameters/Namespace"
+      - $ref: "#/components/parameters/Name"
+    post:
+      tags: [GitOps]
+      summary: Manually trigger a build (kaniko job)
+      responses: { "202": { description: Build queued } }
+  /api/namespaces/{ns}/deployments/{name}/gitops/builds:
+    parameters:
+      - $ref: "#/components/parameters/Namespace"
+      - $ref: "#/components/parameters/Name"
+    get:
+      tags: [GitOps]
+      summary: List past kaniko builds for this deployment
+      responses: { "200": { description: OK } }
+
+  # -------------------------------------------------------------- pods / logs / exec
+  /api/namespaces/{ns}/pods/{pod_name}:
+    parameters:
+      - $ref: "#/components/parameters/Namespace"
+      - in: path
+        name: pod_name
+        required: true
+        schema: { type: string }
+    get:
+      tags: [Pods]
+      summary: Get a pod
+      responses:
+        "200":
+          description: Pod
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PodSummary" }
+
+  /api/namespaces/{ns}/pods/{pod_name}/logs:
+    parameters:
+      - $ref: "#/components/parameters/Namespace"
+      - in: path
+        name: pod_name
+        required: true
+        schema: { type: string }
+    get:
+      tags: [Logs]
+      summary: Stream pod logs (Server-Sent Events)
+      parameters:
+        - in: query
+          name: container
+          schema: { type: string }
+        - in: query
+          name: follow
+          schema: { type: boolean, default: true }
+      responses:
+        "200":
+          description: text/event-stream
+          content:
+            text/event-stream:
+              schema: { type: string }
+
+  /api/namespaces/{ns}/pods/{pod_name}/logs/history:
+    parameters:
+      - $ref: "#/components/parameters/Namespace"
+      - in: path
+        name: pod_name
+        required: true
+        schema: { type: string }
+    get:
+      tags: [Logs]
+      summary: Fetch a historical log slice (non-streaming)
+      parameters:
+        - in: query
+          name: container
+          schema: { type: string }
+        - in: query
+          name: tail_lines
+          schema: { type: integer }
+      responses: { "200": { description: Logs } }
+
+  /api/namespaces/{ns}/pods/{pod_name}/exec:
+    parameters:
+      - $ref: "#/components/parameters/Namespace"
+      - in: path
+        name: pod_name
+        required: true
+        schema: { type: string }
+    get:
+      tags: [Exec]
+      summary: Upgrade to a WebSocket TTY exec session
+      responses:
+        "101": { description: Switching Protocols (WebSocket) }
+
+  /api/namespaces/{ns}/pods/metrics:
+    parameters:
+      - $ref: "#/components/parameters/Namespace"
+    get:
+      tags: [Metrics]
+      summary: Per-pod resource metrics (from metrics-server)
+      responses: { "200": { description: OK } }
+
+  /api/nodes:
+    get:
+      tags: [Nodes]
+      summary: List cluster nodes
+      responses: { "200": { description: Nodes } }
+  /api/nodes/metrics:
+    get:
+      tags: [Metrics]
+      summary: Per-node resource metrics
+      responses: { "200": { description: OK } }
+
+  # -------------------------------------------------------------- cronjobs
+  /api/namespaces/{ns}/cronjobs:
+    parameters:
+      - $ref: "#/components/parameters/Namespace"
+    get:
+      tags: [CronJobs]
+      responses: { "200": { description: OK } }
+  /api/namespaces/{ns}/cronjobs/{name}:
+    parameters:
+      - $ref: "#/components/parameters/Namespace"
+      - $ref: "#/components/parameters/Name"
+    get:
+      tags: [CronJobs]
+      responses: { "200": { description: OK } }
+
+  # -------------------------------------------------------------- addons / templates
+  /api/addons:
+    get:
+      tags: [Addons]
+      summary: List addon catalog
+      responses: { "200": { description: OK } }
+  /api/namespaces/{ns}/deployments/{name}/addons/{addon_id}:
+    parameters:
+      - $ref: "#/components/parameters/Namespace"
+      - $ref: "#/components/parameters/Name"
+      - in: path
+        name: addon_id
+        required: true
+        schema: { type: string }
+    post:
+      tags: [Addons]
+      summary: Attach an addon to a deployment
+      responses: { "200": { description: OK } }
+    patch:
+      tags: [Addons]
+      summary: Update attached addon config
+      responses: { "200": { description: OK } }
+    delete:
+      tags: [Addons]
+      summary: Detach an addon
+      responses: { "204": { description: Detached } }
+  /api/templates:
+    get:
+      tags: [Templates]
+      summary: List deployment templates
+      responses: { "200": { description: OK } }
+
+  # -------------------------------------------------------------- diagnostics
+  /api/namespaces/{ns}/diagnostics:
+    parameters:
+      - $ref: "#/components/parameters/Namespace"
+    post:
+      tags: [Diagnostics]
+      summary: Kick off an AI-assisted diagnostic Job
+      responses: { "202": { description: Queued } }
+  /api/namespaces/{ns}/diagnostics/{job_name}:
+    parameters:
+      - $ref: "#/components/parameters/Namespace"
+      - in: path
+        name: job_name
+        required: true
+        schema: { type: string }
+    get:
+      tags: [Diagnostics]
+      summary: Poll diagnostic Job status
+      responses: { "200": { description: OK } }
+  /api/namespaces/{ns}/diagnostics/{job_name}/result:
+    parameters:
+      - $ref: "#/components/parameters/Namespace"
+      - in: path
+        name: job_name
+        required: true
+        schema: { type: string }
+    get:
+      tags: [Diagnostics]
+      summary: Fetch diagnostic result (once complete)
+      responses: { "200": { description: OK } }
+
+  # -------------------------------------------------------------- applications
+  /api/namespaces/{ns}/applications:
+    parameters:
+      - $ref: "#/components/parameters/Namespace"
+    get:
+      tags: [Applications]
+      summary: List applications
+      responses: { "200": { description: OK } }
+    post:
+      tags: [Applications]
+      summary: Create an application (grouping of deployments)
+      responses: { "201": { description: Created } }
+  /api/namespaces/{ns}/applications/{name}:
+    parameters:
+      - $ref: "#/components/parameters/Namespace"
+      - $ref: "#/components/parameters/Name"
+    get:
+      tags: [Applications]
+      responses: { "200": { description: OK } }
+    put:
+      tags: [Applications]
+      responses: { "200": { description: OK } }
+    delete:
+      tags: [Applications]
+      responses: { "204": { description: Deleted } }
+  /api/namespaces/{ns}/applications/{name}/members:
+    parameters:
+      - $ref: "#/components/parameters/Namespace"
+      - $ref: "#/components/parameters/Name"
+    post:
+      tags: [Applications]
+      summary: Add a member resource (deployment / cronjob) to the app
+      responses: { "200": { description: OK } }
+  /api/namespaces/{ns}/applications/{name}/members/{kind}/{resource_name}:
+    parameters:
+      - $ref: "#/components/parameters/Namespace"
+      - $ref: "#/components/parameters/Name"
+      - in: path
+        name: kind
+        required: true
+        schema: { type: string, enum: [Deployment, CronJob] }
+      - in: path
+        name: resource_name
+        required: true
+        schema: { type: string }
+    delete:
+      tags: [Applications]
+      summary: Remove a member from the app
+      responses: { "204": { description: Removed } }
+
+  # -------------------------------------------------------------- git
+  /api/git/branches:
+    get:
+      tags: [Git]
+      summary: List branches on a remote git repo (auth via configured secret)
+      parameters:
+        - in: query
+          name: repo_url
+          required: true
+          schema: { type: string }
+        - in: query
+          name: token_secret
+          schema: { type: string }
+      responses: { "200": { description: OK } }
+
+  # -------------------------------------------------------------- events
+  /api/events:
+    get:
+      tags: [Events]
+      summary: List cluster-wide events
+      responses: { "200": { description: OK } }
+  /api/namespaces/{ns}/events:
+    parameters:
+      - $ref: "#/components/parameters/Namespace"
+    get:
+      tags: [Events]
+      summary: List events in a namespace
+      responses: { "200": { description: OK } }
+
+  # -------------------------------------------------------------- secrets / configmaps
+  /api/namespaces/{ns}/secrets:
+    parameters:
+      - $ref: "#/components/parameters/Namespace"
+    get:
+      tags: [Secrets]
+      responses: { "200": { description: OK } }
+    post:
+      tags: [Secrets]
+      responses: { "201": { description: Created } }
+  /api/namespaces/{ns}/secrets/{name}:
+    parameters:
+      - $ref: "#/components/parameters/Namespace"
+      - $ref: "#/components/parameters/Name"
+    get:
+      tags: [Secrets]
+      responses: { "200": { description: OK } }
+    put:
+      tags: [Secrets]
+      responses: { "200": { description: OK } }
+    delete:
+      tags: [Secrets]
+      responses: { "204": { description: Deleted } }
+  /api/namespaces/{ns}/configmaps:
+    parameters:
+      - $ref: "#/components/parameters/Namespace"
+    get:
+      tags: [ConfigMaps]
+      responses: { "200": { description: OK } }
+    post:
+      tags: [ConfigMaps]
+      responses: { "201": { description: Created } }
+  /api/namespaces/{ns}/configmaps/{name}:
+    parameters:
+      - $ref: "#/components/parameters/Namespace"
+      - $ref: "#/components/parameters/Name"
+    get:
+      tags: [ConfigMaps]
+      responses: { "200": { description: OK } }
+    put:
+      tags: [ConfigMaps]
+      responses: { "200": { description: OK } }
+    delete:
+      tags: [ConfigMaps]
+      responses: { "204": { description: Deleted } }
+
+  # -------------------------------------------------------------- settings
+  /api/settings:
+    get:
+      tags: [Settings]
+      summary: Read deckwatch settings (from ConfigMap)
+      responses:
+        "200":
+          description: Settings
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DeckwatchSettings" }
+    put:
+      tags: [Settings]
+      summary: Update deckwatch settings
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/DeckwatchSettings" }
+      responses: { "200": { description: Updated } }
+
+  # -------------------------------------------------------------- registry UI
+  /api/registry/enabled:
+    get:
+      tags: [Registry]
+      summary: Whether the embedded OCI registry is enabled
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties: { enabled: { type: boolean } }
+  /api/registry/repositories:
+    get:
+      tags: [Registry]
+      summary: List repositories in the embedded registry
+      responses: { "200": { description: OK } }
+  /api/registry/repositories/{name}/tags:
+    parameters:
+      - in: path
+        name: name
+        required: true
+        schema: { type: string }
+        description: Repository name (may contain slashes)
+    get:
+      tags: [Registry]
+      responses: { "200": { description: Tags } }
+  /api/registry/repositories/{name}/tags/{tag}:
+    parameters:
+      - in: path
+        name: name
+        required: true
+        schema: { type: string }
+      - in: path
+        name: tag
+        required: true
+        schema: { type: string }
+    get:
+      tags: [Registry]
+      summary: Manifest detail for a tag
+      responses: { "200": { description: OK } }
+    delete:
+      tags: [Registry]
+      summary: Delete a tag
+      responses: { "204": { description: Deleted } }
+
+  # -------------------------------------------------------------- OCI Distribution
+  /v2/:
+    get:
+      tags: [OCI]
+      summary: OCI Distribution Spec v1.1 base endpoint
+      responses:
+        "200": { description: Registry supports the spec }
+
+  /metrics:
+    get:
+      tags: [Metrics]
+      summary: Prometheus metrics
+      responses:
+        "200":
+          description: text/plain; version=0.0.4
+          content:
+            text/plain:
+              schema: { type: string }
+
+components:
+  parameters:
+    Namespace:
+      in: path
+      name: ns
+      required: true
+      schema: { type: string }
+      description: Kubernetes namespace
+    Name:
+      in: path
+      name: name
+      required: true
+      schema: { type: string }
+      description: Resource name
+
+  schemas:
+    Health:
+      type: object
+      properties:
+        status: { type: string, example: ok }
+
+    NamespaceListResponse:
+      type: object
+      properties:
+        namespaces:
+          type: array
+          items: { type: string }
+
+    CreateNamespaceRequest:
+      type: object
+      required: [name]
+      properties:
+        name: { type: string }
+        labels:
+          type: object
+          additionalProperties: { type: string }
+
+    CreateNamespaceResponse:
+      type: object
+      properties:
+        name: { type: string }
+        created_at: { type: string, format: date-time, nullable: true }
+        labels:
+          type: object
+          additionalProperties: { type: string }
+
+    EnvVarInput:
+      type: object
+      required: [name, value]
+      properties:
+        name: { type: string }
+        value: { type: string }
+
+    ResourceSpec:
+      type: object
+      properties:
+        cpu:    { type: string, example: "500m" }
+        memory: { type: string, example: "256Mi" }
+
+    ProbeInput:
+      type: object
+      description: HTTP-GET, exec, or TCP probe. Provide exactly one of `http_get`, `exec`, or `tcp_socket`.
+      properties:
+        initial_delay_seconds: { type: integer }
+        period_seconds:        { type: integer }
+        timeout_seconds:       { type: integer }
+        failure_threshold:     { type: integer }
+        http_get:
+          type: object
+          properties:
+            path: { type: string }
+            port: { oneOf: [{ type: integer }, { type: string }] }
+        exec:
+          type: object
+          properties:
+            command:
+              type: array
+              items: { type: string }
+        tcp_socket:
+          type: object
+          properties:
+            port: { oneOf: [{ type: integer }, { type: string }] }
+
+    CreateDeploymentRequest:
+      type: object
+      required: [name, image]
+      properties:
+        name:     { type: string }
+        image:    { type: string }
+        replicas: { type: integer, minimum: 0 }
+        port:     { type: integer }
+        env:
+          type: array
+          items: { $ref: "#/components/schemas/EnvVarInput" }
+        labels:
+          type: object
+          additionalProperties: { type: string }
+        command:
+          type: array
+          items: { type: string }
+        args:
+          type: array
+          items: { type: string }
+        resource_limits:   { $ref: "#/components/schemas/ResourceSpec" }
+        resource_requests: { $ref: "#/components/schemas/ResourceSpec" }
+        liveness_probe:    { $ref: "#/components/schemas/ProbeInput" }
+        readiness_probe:   { $ref: "#/components/schemas/ProbeInput" }
+        startup_probe:     { $ref: "#/components/schemas/ProbeInput" }
+
+    UpdateDeploymentRequest:
+      type: object
+      properties:
+        image:    { type: string }
+        replicas: { type: integer }
+        env:
+          type: array
+          items: { $ref: "#/components/schemas/EnvVarInput" }
+        command: { type: array, items: { type: string } }
+        args:    { type: array, items: { type: string } }
+        resource_limits:   { $ref: "#/components/schemas/ResourceSpec" }
+        resource_requests: { $ref: "#/components/schemas/ResourceSpec" }
+        liveness_probe:    { $ref: "#/components/schemas/ProbeInput" }
+        readiness_probe:   { $ref: "#/components/schemas/ProbeInput" }
+        startup_probe:     { $ref: "#/components/schemas/ProbeInput" }
+
+    DeploymentSummary:
+      type: object
+      description: Flattened Kubernetes Deployment used by the UI list view.
+      properties:
+        namespace:   { type: string }
+        name:        { type: string }
+        image:       { type: string, nullable: true }
+        replicas:    { type: integer }
+        ready:       { type: integer }
+        available:   { type: integer }
+        created_at:  { type: string, format: date-time, nullable: true }
+        labels:
+          type: object
+          additionalProperties: { type: string }
+
+    DeploymentListResponse:
+      type: object
+      properties:
+        deployments:
+          type: array
+          items: { $ref: "#/components/schemas/DeploymentSummary" }
+
+    DeploymentDetailResponse:
+      allOf:
+        - $ref: "#/components/schemas/DeploymentSummary"
+        - type: object
+          properties:
+            pods:
+              type: array
+              items: { $ref: "#/components/schemas/PodSummary" }
+            ingresses:
+              type: array
+              items: { $ref: "#/components/schemas/IngressSummary" }
+
+    PodSummary:
+      type: object
+      properties:
+        namespace: { type: string }
+        name:      { type: string }
+        phase:     { type: string, example: Running }
+        node:      { type: string, nullable: true }
+        ready:     { type: boolean }
+        restarts:  { type: integer }
+        started_at: { type: string, format: date-time, nullable: true }
+
+    PodListResponse:
+      type: object
+      properties:
+        pods:
+          type: array
+          items: { $ref: "#/components/schemas/PodSummary" }
+
+    IngressSummary:
+      type: object
+      properties:
+        namespace: { type: string }
+        name:      { type: string }
+        hosts:
+          type: array
+          items: { type: string }
+
+    GitOpsConfigRequest:
+      type: object
+      required: [repo_url]
+      properties:
+        repo_url:         { type: string }
+        branch:           { type: string, default: main }
+        token_secret:     { type: string, nullable: true }
+        dockerfile_path:  { type: string, default: Dockerfile }
+        docker_context:   { type: string, default: "." }
+        oci_repository:   { type: string, nullable: true, description: "Preferred: OCI-generic destination (e.g. ghcr.io/org/api)" }
+        ecr_repository:   { type: string, nullable: true, description: "Deprecated alias for oci_repository" }
+        include_paths:    { type: array, items: { type: string } }
+        exclude_paths:    { type: array, items: { type: string } }
+        poll_interval_seconds: { type: integer }
+        webhook_enabled:  { type: boolean }
+
+    GitOpsConfig:
+      type: object
+      properties:
+        repo_url:         { type: string }
+        branch:           { type: string }
+        token_secret:     { type: string, nullable: true }
+        dockerfile_path:  { type: string }
+        docker_context:   { type: string }
+        oci_repository:   { type: string }
+        ecr_repository:   { type: string, description: "Mirror of oci_repository for backwards compat" }
+        include_paths:    { type: array, items: { type: string } }
+        exclude_paths:    { type: array, items: { type: string } }
+
+    GitOpsStatusResponse:
+      type: object
+      properties:
+        enabled: { type: boolean }
+        config:  { $ref: "#/components/schemas/GitOpsConfig", nullable: true }
+        last_commit_sha:   { type: string, nullable: true }
+        last_build_status: { type: string, nullable: true }
+        last_build_job:    { type: string, nullable: true }
+        last_build_time:   { type: string, format: date-time, nullable: true }
+        last_build_error:  { type: string, nullable: true }
+
+    DeckwatchSettings:
+      type: object
+      properties:
+        allowed_namespaces:
+          type: array
+          items: { type: string }
+        default_resource_limits: { $ref: "#/components/schemas/ResourceSpec" }
+        git_repositories:
+          type: array
+          items:
+            type: object
+            properties:
+              name: { type: string }
+              url:  { type: string }
+        oci_registries:
+          type: array
+          items:
+            type: object
+            properties:
+              name: { type: string }
+              url:  { type: string }

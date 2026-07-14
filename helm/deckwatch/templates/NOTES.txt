@@ -1,0 +1,18 @@
+Deckwatch has been deployed!
+
+{{- if .Values.ingress.enabled }}
+Access via:
+{{- range .Values.ingress.hosts }}
+  http{{ if $.Values.ingress.tls }}s{{ end }}://{{ .host }}
+{{- end }}
+{{- else }}
+Port-forward to access:
+  kubectl port-forward svc/{{ include "deckwatch.fullname" . }} 8080:{{ .Values.service.port }} -n {{ .Release.Namespace }}
+  Open http://localhost:8080
+{{- end }}
+
+{{- if .Values.namespaces }}
+Managing namespaces: {{ .Values.namespaces }}
+{{- else }}
+Managing all namespaces (no restriction configured).
+{{- end }}

@@ -1,0 +1,24 @@
+{{- if .Values.registry.enabled -}}
+# Dedicated Service for the embedded OCI registry so kaniko pushes to a
+# stable in-cluster URL like `{fullname}-registry:5000`, and so operators
+# can restrict RBAC / NetworkPolicy on the registry independently from the
+# main deckwatch UI.
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "deckwatch.fullname" . }}-registry
+  labels:
+    {{- include "deckwatch.labels" . | nindent 4 }}
+    app.kubernetes.io/component: registry
+spec:
+  type: ClusterIP
+  ports:
+    - port: {{ .Values.registry.service.port | default 5000 }}
+      # Same target as the main service — the `/v2/*` endpoints are served
+      # by the same axum router; this is only a DNS convenience.
+      targetPort: http
+      protocol: TCP
+      name: registry
+  selector:
+    {{- include "deckwatch.selectorLabels" . | nindent 4 }}
+{{- end }}

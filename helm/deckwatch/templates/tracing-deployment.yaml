@@ -1,0 +1,122 @@
+{{- if .Values.tracing.enabled }}
+{{- $backend := .Values.tracing.backend | default "tempo" -}}
+{{- if eq $backend "tempo" }}
+# Grafana Tempo single-binary deployment. Uses local disk (ephemeral) by
+# default; production installs should override tracing.storage to point at
+# object storage per the Tempo docs. Kept intentionally small — this is a
+# batteries-included default for shops without an existing tracing backend,
+# not a scaled-out Tempo install (use the upstream chart for that).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "deckwatch.fullname" . }}-tempo
+  labels:
+    {{- include "deckwatch.labels" . | nindent 4 }}
+    app.kubernetes.io/component: tracing-backend
+spec:
+  replicas: 1
+  # Recreate — Tempo's single-binary local-disk mode can't safely have two
+  # writers of the same WAL. Switch to RollingUpdate only when storage
+  # points at real object storage.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "deckwatch.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: tracing-backend
+  template:
+    metadata:
+      labels:
+        {{- include "deckwatch.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: tracing-backend
+      annotations:
+        # Bump me whenever the config below changes to force a rollout.
+        checksum/config: {{ include (print $.Template.BasePath "/tracing-configmap.yaml") . | sha256sum }}
+    spec:
+      containers:
+        - name: tempo
+          image: "{{ .Values.tracing.tempo.image.repository }}:{{ .Values.tracing.tempo.image.tag }}"
+          imagePullPolicy: {{ .Values.tracing.tempo.image.pullPolicy }}
+          args:
+            - -config.file=/etc/tempo/tempo.yaml
+          ports:
+            - name: otlp-grpc
+              containerPort: 4317
+              protocol: TCP
+            - name: otlp-http
+              containerPort: 4318
+              protocol: TCP
+            - name: http
+              containerPort: 3200
+              protocol: TCP
+          resources:
+            {{- toYaml .Values.tracing.tempo.resources | nindent 12 }}
+          volumeMounts:
+            - name: config
+              mountPath: /etc/tempo
+            - name: data
+              mountPath: /var/tempo
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: http
+            initialDelaySeconds: 15
+            periodSeconds: 10
+      volumes:
+        - name: config
+          configMap:
+            name: {{ include "deckwatch.fullname" . }}-tempo-config
+        - name: data
+          emptyDir: {}
+{{- else if eq $backend "jaeger" }}
+# Jaeger all-in-one (in-memory storage). Dev-only — restarts wipe traces.
+# Included so operators can pick jaeger via one values flag without pulling
+# in the upstream jaeger-operator chart.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "deckwatch.fullname" . }}-jaeger
+  labels:
+    {{- include "deckwatch.labels" . | nindent 4 }}
+    app.kubernetes.io/component: tracing-backend
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "deckwatch.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: tracing-backend
+  template:
+    metadata:
+      labels:
+        {{- include "deckwatch.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: tracing-backend
+    spec:
+      containers:
+        - name: jaeger
+          image: "{{ .Values.tracing.jaeger.image.repository }}:{{ .Values.tracing.jaeger.image.tag }}"
+          imagePullPolicy: {{ .Values.tracing.jaeger.image.pullPolicy }}
+          env:
+            - name: COLLECTOR_OTLP_ENABLED
+              value: "true"
+          ports:
+            - name: otlp-grpc
+              containerPort: 4317
+              protocol: TCP
+            - name: otlp-http
+              containerPort: 4318
+              protocol: TCP
+            - name: ui
+              containerPort: 16686
+              protocol: TCP
+          resources:
+            {{- toYaml .Values.tracing.jaeger.resources | nindent 12 }}
+          readinessProbe:
+            httpGet:
+              path: /
+              port: ui
+            initialDelaySeconds: 15
+            periodSeconds: 10
+{{- end }}
+{{- end }}

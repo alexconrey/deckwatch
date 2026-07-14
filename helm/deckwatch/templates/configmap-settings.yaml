@@ -1,0 +1,16 @@
+{{- $cmName := .Values.settings.configMapName | default "deckwatch-config" }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ $cmName }}
+  labels:
+    {{- include "deckwatch.labels" . | nindent 4 }}
+    app.kubernetes.io/component: settings
+  annotations:
+    # Server-side apply from the running app claims the `settings` field; helm
+    # owns the initial seed and everything else in metadata. Rendering only
+    # the default `settings` value on install avoids clobbering runtime edits.
+    "helm.sh/resource-policy": keep
+data:
+  settings: |
+{{ .Values.settings.defaults | toJson | indent 4 }}

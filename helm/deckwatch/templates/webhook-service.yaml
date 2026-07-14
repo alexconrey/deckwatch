@@ -1,0 +1,22 @@
+{{- if .Values.webhook.enabled }}
+# Dedicated Service for the admission webhook. Separate from the main
+# deckwatch Service so (a) the API server dials HTTPS on 443, (b) the
+# UI Service stays plaintext on 80, and (c) network policy for the
+# admission path can be shaped independently.
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "deckwatch.fullname" . }}-webhook
+  labels:
+    {{- include "deckwatch.labels" . | nindent 4 }}
+    app.kubernetes.io/component: admission-webhook
+spec:
+  type: ClusterIP
+  ports:
+    - name: webhook
+      port: 443
+      targetPort: webhook
+      protocol: TCP
+  selector:
+    {{- include "deckwatch.selectorLabels" . | nindent 4 }}
+{{- end }}

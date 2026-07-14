@@ -1,0 +1,18 @@
+{{- if and .Values.registry.enabled (or (eq (default "filesystem" .Values.registry.storage) "filesystem") (not .Values.registry.storage)) -}}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ include "deckwatch.fullname" . }}-registry
+  labels:
+    {{- include "deckwatch.labels" . | nindent 4 }}
+    app.kubernetes.io/component: registry
+spec:
+  accessModes:
+    - {{ .Values.registry.accessMode | default "ReadWriteOnce" }}
+  resources:
+    requests:
+      storage: {{ .Values.registry.storageSize | default "10Gi" }}
+  {{- with .Values.registry.storageClassName }}
+  storageClassName: {{ . | quote }}
+  {{- end }}
+{{- end }}

@@ -1,0 +1,24 @@
+# mdBook configuration for the Deckwatch operator/developer manual.
+#
+# Build:   mdbook build docs/book
+# Serve:   mdbook serve docs/book
+#
+# The `src` directory contains a curated SUMMARY.md plus symlinks (or copies)
+# to the real markdown files in ../.., so authors keep editing the canonical
+# `docs/*.md` files and mdBook re-uses them.
+[book]
+title = "Deckwatch"
+authors = ["Deckwatch contributors"]
+description = "Kubernetes deployment lifecycle manager"
+language = "en"
+multilingual = false
+src = "src"
+
+[build]
+build-dir = "book"
+
+[output.html]
+default-theme = "rust"
+preferred-dark-theme = "navy"
+git-repository-url = "https://github.com/kore/deckwatch"
+edit-url-template = "https://github.com/kore/deckwatch/edit/main/{path}"
