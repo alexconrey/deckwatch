@@ -703,3 +703,7 @@ async fn update_resource_gauges(state: &AppState) {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "watcher_tests.rs"]
+mod watcher_tests;
