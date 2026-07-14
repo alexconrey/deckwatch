@@ -152,19 +152,10 @@ fn default_true() -> bool {
 /// `AppState` so the handler does not need to hit the API server on
 /// every admission — the admission-path latency budget is ~100ms p99
 /// per the design doc §9.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct WebhookConfig {
     pub enabled: bool,
     pub policies: WebhookPolicies,
-}
-
-impl Default for WebhookConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            policies: WebhookPolicies::default(),
-        }
-    }
 }
 
 // -------------------------------------------------------------- entry point
@@ -176,7 +167,7 @@ impl Default for WebhookConfig {
 /// break the cluster's admission chain. `failurePolicy: Ignore` in the
 /// webhook config is a second line of defense outside our process.
 pub async fn validate(
-    State(state): State<AppState>,
+    State(_state): State<AppState>,
     Json(review): Json<AdmissionReview>,
 ) -> impl IntoResponse {
     let Some(request) = review.request.as_ref() else {

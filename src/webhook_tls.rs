@@ -63,7 +63,7 @@ pub fn generate(service_name: &str, namespace: &str, out_dir: &Path) -> Result<W
     ];
     // Short-lived (~24h). See module docstring for the rotation story.
     ca_params.not_before = time::OffsetDateTime::now_utc();
-    ca_params.not_after = ca_params.not_before.clone() + time::Duration::hours(24);
+    ca_params.not_after = ca_params.not_before + time::Duration::hours(24);
 
     let cert_not_before = ca_params.not_before;
     let cert_not_after = ca_params.not_after;

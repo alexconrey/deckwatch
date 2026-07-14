@@ -28,7 +28,7 @@ fn friendly_kube_message(raw: &str) -> String {
     if raw.contains("already exists") {
         return format!(
             "That name is already taken. {}",
-            raw.split(':').last().unwrap_or("").trim()
+            raw.split(':').next_back().unwrap_or("").trim()
         );
     }
     if raw.contains("not found") && raw.contains("namespaces") {
