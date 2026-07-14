@@ -24,7 +24,6 @@ use serde_json::json;
 
 use crate::error::AppError;
 use crate::handlers::settings;
-use crate::metrics::K8sTimer;
 use crate::state::AppState;
 
 async fn check_prometheus_enabled(state: &AppState) -> bool {

@@ -48,7 +48,7 @@ pub fn get_ann<'a>(dep: &'a Deployment, key: &str) -> Option<&'a str> {
 /// OCI destination for the built image. Reads the new `oci-repository`
 /// annotation, falling back to the legacy `ecr-repository` for deployments
 /// configured before the OCI-generic switch.
-pub fn get_oci_repository<'a>(dep: &'a Deployment) -> Option<&'a str> {
+pub fn get_oci_repository(dep: &Deployment) -> Option<&str> {
     get_ann(dep, "oci-repository").or_else(|| get_ann(dep, "ecr-repository"))
 }
 
@@ -161,31 +161,29 @@ async fn check_and_build(
         config.exclude_paths.split(',').collect()
     };
 
-    if !include_paths.is_empty() || !exclude_paths.is_empty() {
-        if !last_sha.is_empty() {
-            if let Some(changed) =
-                check_paths_github(http, repo_url, &token, last_sha, &remote_sha).await
-            {
-                let dominated_by_excludes = !changed.iter().any(|f| {
-                    let included =
-                        include_paths.is_empty() || include_paths.iter().any(|p| f.starts_with(p));
-                    let excluded = exclude_paths.iter().any(|p| f.starts_with(p));
-                    included && !excluded
-                });
-                if dominated_by_excludes {
-                    tracing::info!(
-                        deployment = %dep_name,
-                        commit = %short_sha,
-                        "skipping build: no included paths changed"
-                    );
-                    // Update the DB row with the new commit SHA (skip build).
-                    update_gitops_config_field(&state.db, &config.application_id, |active| {
-                        active.last_commit_sha = Set(Some(remote_sha.clone()));
-                        active.updated_at = Set(now_utc());
-                    })
-                    .await?;
-                    return Ok(());
-                }
+    if (!include_paths.is_empty() || !exclude_paths.is_empty()) && !last_sha.is_empty() {
+        if let Some(changed) =
+            check_paths_github(http, repo_url, &token, last_sha, &remote_sha).await
+        {
+            let dominated_by_excludes = !changed.iter().any(|f| {
+                let included =
+                    include_paths.is_empty() || include_paths.iter().any(|p| f.starts_with(p));
+                let excluded = exclude_paths.iter().any(|p| f.starts_with(p));
+                included && !excluded
+            });
+            if dominated_by_excludes {
+                tracing::info!(
+                    deployment = %dep_name,
+                    commit = %short_sha,
+                    "skipping build: no included paths changed"
+                );
+                // Update the DB row with the new commit SHA (skip build).
+                update_gitops_config_field(&state.db, &config.application_id, |active| {
+                    active.last_commit_sha = Set(Some(remote_sha.clone()));
+                    active.updated_at = Set(now_utc());
+                })
+                .await?;
+                return Ok(());
             }
         }
     }
@@ -220,7 +218,7 @@ async fn check_and_build(
     .await?;
 
     // Ensure the application row exists before FK insert.
-    if let Err(e) = crate::db::ensure_application(&state.db, ns, &dep_name).await {
+    if let Err(e) = crate::db::ensure_application(&state.db, ns, dep_name).await {
         tracing::warn!(error = %e, "failed to ensure application row");
     }
 

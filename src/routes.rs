@@ -10,10 +10,10 @@ use crate::audit;
 use crate::auth::{self, AuthConfig};
 use crate::handlers::registry::RegistryStore;
 use crate::handlers::{
-    addons, admission, ai_fix, applications, autoscaling, configmaps_ui, cronjobs, deployments,
-    deployments_ux, diagnostics, docs, events, exec, git, gitops, health, ingresses, license, logs,
-    monitoring, namespaces, nodes, pods, portforward, preview, promote, registry, registry_ui,
-    resource_metrics, secrets, settings, templates, tracing_handler,
+    addons, ai_fix, applications, autoscaling, configmaps_ui, cronjobs, deployments,
+    deployments_ux, diagnostics, docs, events, exec, git, gitops, health, ingresses, logs,
+    monitoring, namespaces, nodes, pods, portforward, registry, registry_ui, resource_metrics,
+    secrets, settings, templates,
 };
 use crate::metrics;
 use crate::state::AppState;

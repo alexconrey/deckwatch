@@ -283,7 +283,7 @@ fn split_admission_errors(message: &str) -> Vec<String> {
     // strings inside a single message. Split so the frontend can render one
     // chip per failure without a bespoke parser.
     message
-        .split(|c: char| c == '\n' || c == ';')
+        .split(['\n', ';'])
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
         .collect()

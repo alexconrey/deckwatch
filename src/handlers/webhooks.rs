@@ -34,8 +34,7 @@ use serde::Serialize;
 
 use crate::error::AppError;
 use crate::handlers::git_provider::{
-    detect_provider, normalize_repo_url, Bitbucket, GitHub, GitLab, GitProvider, WebhookError,
-    WebhookEvent,
+    normalize_repo_url, Bitbucket, GitHub, GitLab, GitProvider, WebhookError, WebhookEvent,
 };
 use crate::handlers::gitops::webhook_secret_name;
 use crate::metrics;

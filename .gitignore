@@ -29,3 +29,4 @@ TODO.md
 # scripts/build-docs.sh; committing them would double-review every doc edit)
 /docs/book/book
 /docs/book/src/docs
+.claude/worktrees/

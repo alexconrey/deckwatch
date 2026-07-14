@@ -10,7 +10,7 @@ use axum::extract::State;
 use axum::Json;
 use serde::Serialize;
 
-use crate::license::{Entitlements, Limits, Tier};
+use crate::license::Limits;
 use crate::state::AppState;
 
 /// Response body for `GET /api/license`. Shaped to feed

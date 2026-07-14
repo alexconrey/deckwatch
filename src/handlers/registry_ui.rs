@@ -180,7 +180,7 @@ pub async fn get_manifest_detail(
         return not_found("manifest not readable");
     };
 
-    let config = manifest.get("config").and_then(|c| layer_from_json(c));
+    let config = manifest.get("config").and_then(layer_from_json);
 
     let layers: Vec<LayerSummary> = manifest
         .get("layers")

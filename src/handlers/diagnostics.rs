@@ -796,15 +796,14 @@ async fn create_diag_job(
     // (the ghcr.io/anthropics/claude-code image is not publicly pullable).
     // Codex: expected to be pre-installed in the image.
     let shell_script = match agent {
-        DiagAgent::Claude => format!(
-            r#"set -eu
+        DiagAgent::Claude => r#"set -eu
 if ! command -v npx >/dev/null 2>&1; then
   echo "error: npx not found in image PATH — is this a Node.js base image?" >&2
   exit 127
 fi
 cat "$DECKWATCH_DIAG_PROMPT_PATH" | npx -y @anthropic-ai/claude-code@latest --print
 "#
-        ),
+        .to_string(),
         DiagAgent::Codex => {
             let cli = "codex";
             let cli_flags = "exec --sandbox read-only --";

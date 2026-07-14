@@ -161,7 +161,7 @@ impl S3Backend {
         match self.store.head(&key).await {
             Ok(meta) => Ok(Some(meta.size as u64)),
             Err(object_store::Error::NotFound { .. }) => Ok(None),
-            Err(e) => Err(std::io::Error::new(std::io::ErrorKind::Other, e)),
+            Err(e) => Err(std::io::Error::other(e)),
         }
     }
 
@@ -568,7 +568,7 @@ fn io_from_object_store(e: object_store::Error) -> std::io::Error {
         object_store::Error::AlreadyExists { .. } => {
             std::io::Error::new(std::io::ErrorKind::AlreadyExists, e)
         }
-        other => std::io::Error::new(std::io::ErrorKind::Other, other),
+        other => std::io::Error::other(other),
     }
 }
 
