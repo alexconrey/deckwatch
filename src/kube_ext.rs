@@ -13,6 +13,7 @@ pub enum DeploymentPhase {
     Progressing,
     Degraded,
     Failed,
+    ScaledToZero,
 }
 
 #[derive(Serialize, Debug)]
@@ -138,11 +139,7 @@ pub fn deployment_phase(dep: &Deployment) -> DeploymentPhase {
         None => return DeploymentPhase::Progressing,
     };
 
-    let desired = dep
-        .spec
-        .as_ref()
-        .and_then(|s| s.replicas)
-        .unwrap_or(1);
+    let desired = dep.spec.as_ref().and_then(|s| s.replicas).unwrap_or(1);
     let available = status.available_replicas.unwrap_or(0);
     let updated = status.updated_replicas.unwrap_or(0);
 
@@ -172,7 +169,7 @@ pub fn deployment_phase(dep: &Deployment) -> DeploymentPhase {
     }
 
     if desired == 0 {
-        DeploymentPhase::Available
+        DeploymentPhase::ScaledToZero
     } else if available >= desired {
         DeploymentPhase::Available
     } else if available > 0 {
@@ -183,11 +180,7 @@ pub fn deployment_phase(dep: &Deployment) -> DeploymentPhase {
 }
 
 pub fn replica_counts(dep: &Deployment) -> ReplicaCounts {
-    let desired = dep
-        .spec
-        .as_ref()
-        .and_then(|s| s.replicas)
-        .unwrap_or(1);
+    let desired = dep.spec.as_ref().and_then(|s| s.replicas).unwrap_or(1);
     let status = dep.status.as_ref();
     ReplicaCounts {
         desired,
@@ -225,10 +218,7 @@ pub fn deployment_summary(dep: &Deployment) -> DeploymentSummary {
         image: primary_image(dep),
         replicas: replica_counts(dep),
         status: deployment_phase(dep),
-        created_at: meta
-            .creation_timestamp
-            .as_ref()
-            .map(|t| t.0.to_string()),
+        created_at: meta.creation_timestamp.as_ref().map(|t| t.0.to_string()),
         labels: meta.labels.clone().unwrap_or_default(),
         resource_requests,
     }
@@ -262,9 +252,7 @@ pub fn deployment_detail(dep: &Deployment) -> DeploymentDetail {
         .and_then(|c| c.command.clone())
         .unwrap_or_default();
 
-    let args = container
-        .and_then(|c| c.args.clone())
-        .unwrap_or_default();
+    let args = container.and_then(|c| c.args.clone()).unwrap_or_default();
 
     let resources = container.and_then(|c| c.resources.as_ref());
 
@@ -307,10 +295,7 @@ pub fn deployment_detail(dep: &Deployment) -> DeploymentDetail {
         replicas: replica_counts(dep),
         status: deployment_phase(dep),
         conditions,
-        created_at: meta
-            .creation_timestamp
-            .as_ref()
-            .map(|t| t.0.to_string()),
+        created_at: meta.creation_timestamp.as_ref().map(|t| t.0.to_string()),
         labels: meta.labels.clone().unwrap_or_default(),
         annotations: meta.annotations.clone().unwrap_or_default(),
         env,
@@ -318,9 +303,15 @@ pub fn deployment_detail(dep: &Deployment) -> DeploymentDetail {
         args,
         resource_limits,
         resource_requests,
-        liveness_probe: container.and_then(|c| c.liveness_probe.as_ref()).map(extract_probe),
-        readiness_probe: container.and_then(|c| c.readiness_probe.as_ref()).map(extract_probe),
-        startup_probe: container.and_then(|c| c.startup_probe.as_ref()).map(extract_probe),
+        liveness_probe: container
+            .and_then(|c| c.liveness_probe.as_ref())
+            .map(extract_probe),
+        readiness_probe: container
+            .and_then(|c| c.readiness_probe.as_ref())
+            .map(extract_probe),
+        startup_probe: container
+            .and_then(|c| c.startup_probe.as_ref())
+            .map(extract_probe),
     }
 }
 
@@ -360,7 +351,10 @@ fn container_state_info(cs: &ContainerStatus) -> (String, Option<String>) {
     match &cs.state {
         Some(state) => {
             if let Some(running) = &state.running {
-                ("running".to_string(), running.started_at.as_ref().map(|t| t.0.to_string()))
+                (
+                    "running".to_string(),
+                    running.started_at.as_ref().map(|t| t.0.to_string()),
+                )
             } else if let Some(waiting) = &state.waiting {
                 ("waiting".to_string(), waiting.reason.clone())
             } else if let Some(terminated) = &state.terminated {
@@ -379,13 +373,9 @@ fn container_state_info(cs: &ContainerStatus) -> (String, Option<String>) {
 /// and the OOM signal is only visible in `last_state.terminated.reason`.
 fn container_oom_killed(cs: &ContainerStatus) -> bool {
     let is_oom = |st: &k8s_openapi::api::core::v1::ContainerState| {
-        st.terminated
-            .as_ref()
-            .and_then(|t| t.reason.as_deref())
-            == Some("OOMKilled")
+        st.terminated.as_ref().and_then(|t| t.reason.as_deref()) == Some("OOMKilled")
     };
-    cs.state.as_ref().is_some_and(is_oom)
-        || cs.last_state.as_ref().is_some_and(is_oom)
+    cs.state.as_ref().is_some_and(is_oom) || cs.last_state.as_ref().is_some_and(is_oom)
 }
 
 pub fn pod_summary(pod: &Pod) -> PodSummary {
@@ -429,7 +419,10 @@ pub fn pod_summary(pod: &Pod) -> PodSummary {
 
     if let Some(list) = runtime_statuses {
         for cs in list {
-            if container_statuses.iter().any(|existing| existing.name == cs.name) {
+            if container_statuses
+                .iter()
+                .any(|existing| existing.name == cs.name)
+            {
                 continue;
             }
             let (state, state_reason) = container_state_info(cs);
@@ -445,8 +438,7 @@ pub fn pod_summary(pod: &Pod) -> PodSummary {
         }
     }
 
-    let ready = !container_statuses.is_empty()
-        && container_statuses.iter().all(|cs| cs.ready);
+    let ready = !container_statuses.is_empty() && container_statuses.iter().all(|cs| cs.ready);
     let restart_count: i32 = container_statuses.iter().map(|cs| cs.restart_count).sum();
     let oom_killed = container_statuses.iter().any(|cs| cs.oom_killed);
 
@@ -474,10 +466,7 @@ pub fn pod_summary(pod: &Pod) -> PodSummary {
         phase,
         ready,
         restart_count,
-        node: pod
-            .spec
-            .as_ref()
-            .and_then(|s| s.node_name.clone()),
+        node: pod.spec.as_ref().and_then(|s| s.node_name.clone()),
         started_at,
         conditions,
         container_statuses,
@@ -675,10 +664,7 @@ pub fn cronjob_summary(cj: &CronJob) -> CronJobSummary {
         last_schedule_time: status
             .and_then(|s| s.last_schedule_time.as_ref())
             .map(|t| t.0.to_string()),
-        created_at: meta
-            .creation_timestamp
-            .as_ref()
-            .map(|t| t.0.to_string()),
+        created_at: meta.creation_timestamp.as_ref().map(|t| t.0.to_string()),
         labels: meta.labels.clone().unwrap_or_default(),
     }
 }
@@ -783,15 +769,14 @@ pub fn node_summary(node: &Node) -> NodeSummary {
         cpu_capacity: capacity.and_then(|c| c.get("cpu")).map(|q| q.0.clone()),
         memory_capacity: capacity.and_then(|c| c.get("memory")).map(|q| q.0.clone()),
         cpu_allocatable: allocatable.and_then(|a| a.get("cpu")).map(|q| q.0.clone()),
-        memory_allocatable: allocatable.and_then(|a| a.get("memory")).map(|q| q.0.clone()),
+        memory_allocatable: allocatable
+            .and_then(|a| a.get("memory"))
+            .map(|q| q.0.clone()),
         os_image: node_info.map(|n| n.os_image.clone()),
         kernel_version: node_info.map(|n| n.kernel_version.clone()),
         kubelet_version: node_info.map(|n| n.kubelet_version.clone()),
         conditions,
-        created_at: meta
-            .creation_timestamp
-            .as_ref()
-            .map(|t| t.0.to_string()),
+        created_at: meta.creation_timestamp.as_ref().map(|t| t.0.to_string()),
     }
 }
 
@@ -842,12 +827,18 @@ pub fn compute_application_health(deployments: &[DeploymentSummary]) -> Applicat
     if deployments.is_empty() {
         return ApplicationHealth::Empty;
     }
-    let all_available = deployments
-        .iter()
-        .all(|d| matches!(d.status, DeploymentPhase::Available));
-    let any_available = deployments
-        .iter()
-        .any(|d| matches!(d.status, DeploymentPhase::Available));
+    let all_available = deployments.iter().all(|d| {
+        matches!(
+            d.status,
+            DeploymentPhase::Available | DeploymentPhase::ScaledToZero
+        )
+    });
+    let any_available = deployments.iter().any(|d| {
+        matches!(
+            d.status,
+            DeploymentPhase::Available | DeploymentPhase::ScaledToZero
+        )
+    });
     if all_available {
         ApplicationHealth::Healthy
     } else if any_available {

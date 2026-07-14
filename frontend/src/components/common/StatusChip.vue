@@ -18,6 +18,8 @@ const chipConfig = computed(() => {
       return { color: "warning", icon: "mdi-alert", text: "Degraded" };
     case "failed":
       return { color: "error", icon: "mdi-close-circle", text: "Failed" };
+    case "scaled_to_zero":
+      return { color: "grey", icon: "mdi-pause-circle", text: "Scaled to 0" };
     default:
       return { color: "secondary", icon: "mdi-help-circle", text: "Unknown" };
   }

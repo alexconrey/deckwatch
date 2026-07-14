@@ -38,10 +38,8 @@ use serde::{Deserialize, Serialize};
 /// build script (see `build.rs`) or by patching this constant in a release
 /// commit. Never ship the dev key to customers.
 pub const EMBEDDED_PUBLIC_KEY: [u8; 32] = [
-    0xde, 0xad, 0xbe, 0xef, 0xde, 0xad, 0xbe, 0xef,
-    0xde, 0xad, 0xbe, 0xef, 0xde, 0xad, 0xbe, 0xef,
-    0xde, 0xad, 0xbe, 0xef, 0xde, 0xad, 0xbe, 0xef,
-    0xde, 0xad, 0xbe, 0xef, 0xde, 0xad, 0xbe, 0xef,
+    0xde, 0xad, 0xbe, 0xef, 0xde, 0xad, 0xbe, 0xef, 0xde, 0xad, 0xbe, 0xef, 0xde, 0xad, 0xbe, 0xef,
+    0xde, 0xad, 0xbe, 0xef, 0xde, 0xad, 0xbe, 0xef, 0xde, 0xad, 0xbe, 0xef, 0xde, 0xad, 0xbe, 0xef,
 ];
 
 /// How long after `expires_at` Pro features stay live before going dark.
@@ -190,7 +188,9 @@ impl License {
 /// runtime must never hard-fail on a license problem. See module docs.
 #[derive(Debug, thiserror::Error)]
 pub enum LicenseError {
-    #[error("no license source found (env {LICENSE_ENV_VAR} unset and {LICENSE_SECRET_PATH} missing)")]
+    #[error(
+        "no license source found (env {LICENSE_ENV_VAR} unset and {LICENSE_SECRET_PATH} missing)"
+    )]
     NotFound,
     #[error("license blob malformed: {0}")]
     Malformed(String),
@@ -224,8 +224,8 @@ pub fn load_license() -> Result<Option<License>, LicenseError> {
 /// because the algorithm is fixed at Ed25519 and versioning happens at the
 /// public-key level.
 fn parse_license_blob(blob: &str) -> Result<License, LicenseError> {
-    use base64::Engine as _;
     use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    use base64::Engine as _;
 
     let (payload_b64, sig_b64) = blob
         .split_once('.')
@@ -305,8 +305,8 @@ impl Entitlements {
     /// - `now >= exp + GRACE_PERIOD_SECS`: silently downgrade to Community.
     pub fn from_license(license: &License, now: Timestamp) -> Self {
         let exp = Timestamp::from_second(license.payload.exp).unwrap_or(now);
-        let grace_cutoff = Timestamp::from_second(license.payload.exp + GRACE_PERIOD_SECS)
-            .unwrap_or(now);
+        let grace_cutoff =
+            Timestamp::from_second(license.payload.exp + GRACE_PERIOD_SECS).unwrap_or(now);
 
         if now >= grace_cutoff {
             // Hard-expired past grace: fall back to Community. Do NOT hard-fail;
@@ -409,9 +409,7 @@ impl Entitlements {
 pub fn init_entitlements() -> Entitlements {
     match load_license() {
         Ok(None) => {
-            tracing::info!(
-                "no deckwatch license configured; running with Community entitlements"
-            );
+            tracing::info!("no deckwatch license configured; running with Community entitlements");
             Entitlements::community()
         }
         Ok(Some(license)) => {
@@ -470,10 +468,8 @@ mod tests {
             signature: [0u8; 64],
             payload_json: serde_json::to_vec(&payload).unwrap(),
         };
-        let ent = Entitlements::from_license(
-            &license,
-            Timestamp::from_second(1_800_000_000).unwrap(),
-        );
+        let ent =
+            Entitlements::from_license(&license, Timestamp::from_second(1_800_000_000).unwrap());
         assert_eq!(ent.tier(), Tier::Pro);
         assert!(ent.has("ai_diagnostics"));
         assert!(ent.has("webhook_notifications"));
@@ -499,13 +495,11 @@ mod tests {
             signature: [0u8; 64],
             payload_json: serde_json::to_vec(&payload).unwrap(),
         };
-        let ent = Entitlements::from_license(
-            &license,
-            Timestamp::from_second(1_800_000_000).unwrap(),
-        );
-        assert!(ent.has("ai_diagnostics"));   // Pro feature
-        assert!(ent.has("multi_cluster"));    // Enterprise feature
-        assert!(ent.has("custom_branding"));  // Enterprise feature
+        let ent =
+            Entitlements::from_license(&license, Timestamp::from_second(1_800_000_000).unwrap());
+        assert!(ent.has("ai_diagnostics")); // Pro feature
+        assert!(ent.has("multi_cluster")); // Enterprise feature
+        assert!(ent.has("custom_branding")); // Enterprise feature
     }
 
     #[test]
@@ -526,10 +520,8 @@ mod tests {
             signature: [0u8; 64],
             payload_json: serde_json::to_vec(&payload).unwrap(),
         };
-        let ent = Entitlements::from_license(
-            &license,
-            Timestamp::from_second(1_800_000_000).unwrap(),
-        );
+        let ent =
+            Entitlements::from_license(&license, Timestamp::from_second(1_800_000_000).unwrap());
         assert!(ent.has("custom_branding"));
         assert!(ent.has("ai_diagnostics"));
     }
@@ -592,15 +584,24 @@ mod tests {
     #[test]
     fn required_tier_maps_features_to_advertisement() {
         assert_eq!(Entitlements::required_tier("ai_diagnostics"), Tier::Pro);
-        assert_eq!(Entitlements::required_tier("multi_cluster"), Tier::Enterprise);
-        assert_eq!(Entitlements::required_tier("custom_branding"), Tier::Enterprise);
-        assert_eq!(Entitlements::required_tier("webhook_notifications"), Tier::Pro);
+        assert_eq!(
+            Entitlements::required_tier("multi_cluster"),
+            Tier::Enterprise
+        );
+        assert_eq!(
+            Entitlements::required_tier("custom_branding"),
+            Tier::Enterprise
+        );
+        assert_eq!(
+            Entitlements::required_tier("webhook_notifications"),
+            Tier::Pro
+        );
     }
 
     #[test]
     fn round_trip_signature_verifies_with_signing_key() {
-        use base64::Engine as _;
         use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+        use base64::Engine as _;
 
         let key = SigningKey::generate(&mut OsRng);
         let payload = LicensePayload {
@@ -626,8 +627,11 @@ mod tests {
         assert_eq!(parsed.payload.tier, Tier::Pro);
         // Verify against the signing key we actually used (not EMBEDDED_PUBLIC_KEY).
         let vk = key.verifying_key();
-        vk.verify(&parsed.payload_json, &Signature::from_bytes(&parsed.signature))
-            .expect("signature verifies against original signing key");
+        vk.verify(
+            &parsed.payload_json,
+            &Signature::from_bytes(&parsed.signature),
+        )
+        .expect("signature verifies against original signing key");
     }
 
     #[test]

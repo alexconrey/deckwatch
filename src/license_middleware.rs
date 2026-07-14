@@ -54,7 +54,10 @@ pub fn require_entitlement(
     EntitlementGuard,
     (),
 > {
-    let guard = EntitlementGuard { feature, entitlements };
+    let guard = EntitlementGuard {
+        feature,
+        entitlements,
+    };
     from_fn_with_state(guard, entitlement_middleware)
 }
 
@@ -134,10 +137,7 @@ mod tests {
             signature: [0u8; 64],
             payload_json: serde_json::to_vec(&payload).unwrap(),
         };
-        Entitlements::from_license(
-            &license,
-            Timestamp::from_second(1_800_000_000).unwrap(),
-        )
+        Entitlements::from_license(&license, Timestamp::from_second(1_800_000_000).unwrap())
     }
 
     #[tokio::test]
@@ -157,8 +157,10 @@ mod tests {
     async fn returns_403_when_feature_denied() {
         let app = Router::new().route(
             "/ai",
-            get(ok)
-                .layer(require_entitlement("ai_diagnostics", Entitlements::community())),
+            get(ok).layer(require_entitlement(
+                "ai_diagnostics",
+                Entitlements::community(),
+            )),
         );
         let resp = app
             .oneshot(HttpRequest::get("/ai").body(Body::empty()).unwrap())
@@ -172,12 +174,10 @@ mod tests {
         assert_eq!(body["feature"], "ai_diagnostics");
         assert_eq!(body["tier_required"], "pro");
         assert_eq!(body["current_tier"], "community");
-        assert!(
-            body["upgrade_url"]
-                .as_str()
-                .unwrap()
-                .contains("ai_diagnostics")
-        );
+        assert!(body["upgrade_url"]
+            .as_str()
+            .unwrap()
+            .contains("ai_diagnostics"));
     }
 
     #[tokio::test]

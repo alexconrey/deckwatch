@@ -4,6 +4,7 @@ use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::Json;
 use k8s_openapi::api::core::v1::{Service, ServicePort, ServiceSpec};
+use k8s_openapi::api::networking::v1::IngressClass;
 use k8s_openapi::api::networking::v1::{
     HTTPIngressPath, HTTPIngressRuleValue, Ingress, IngressBackend, IngressRule,
     IngressServiceBackend, IngressSpec, IngressTLS, ServiceBackendPort,
@@ -13,6 +14,7 @@ use k8s_openapi::apimachinery::pkg::util::intstr::IntOrString;
 use kube::api::{ListParams, PostParams};
 use serde::Deserialize;
 
+use crate::audit;
 use crate::error::AppError;
 use crate::kube_ext::{ingress_detail, ingress_summary, IngressDetail, IngressSummary};
 use crate::metrics::K8sTimer;
@@ -155,6 +157,21 @@ pub async fn create(
     let created = api.create(&PostParams::default(), &ingress).await;
     t.finish(created.is_ok());
     let created = created?;
+
+    let host_desc = req.host.as_deref().unwrap_or("(no host)");
+    if let Err(e) = audit::log_action(
+        &state.db,
+        "create",
+        "ingress",
+        &req.name,
+        &ns,
+        &format!("created ingress for host {host_desc}"),
+    )
+    .await
+    {
+        tracing::warn!(error = %e, "failed to write audit log");
+    }
+
     Ok((StatusCode::CREATED, Json(ingress_detail(&created))))
 }
 
@@ -223,6 +240,20 @@ pub async fn update(
     let updated = api.replace(&name, &PostParams::default(), &ing).await;
     t.finish(updated.is_ok());
     let updated = updated?;
+
+    if let Err(e) = audit::log_action(
+        &state.db,
+        "update",
+        "ingress",
+        &name,
+        &ns,
+        "updated ingress",
+    )
+    .await
+    {
+        tracing::warn!(error = %e, "failed to write audit log");
+    }
+
     Ok(Json(ingress_detail(&updated)))
 }
 
@@ -235,7 +266,57 @@ pub async fn delete(
     let res = api.delete(&name, &Default::default()).await;
     t.finish(res.is_ok());
     res?;
+
+    if let Err(e) = audit::log_action(
+        &state.db,
+        "delete",
+        "ingress",
+        &name,
+        &ns,
+        "deleted ingress",
+    )
+    .await
+    {
+        tracing::warn!(error = %e, "failed to write audit log");
+    }
+
     Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(serde::Serialize)]
+pub struct IngressClassInfo {
+    pub name: String,
+    pub is_default: bool,
+}
+
+#[derive(serde::Serialize)]
+pub struct IngressClassListResponse {
+    pub classes: Vec<IngressClassInfo>,
+}
+
+pub async fn list_classes(
+    State(state): State<AppState>,
+) -> Result<Json<IngressClassListResponse>, AppError> {
+    let api: kube::Api<IngressClass> = state.ingressclasses_api();
+    let t = K8sTimer::new("ingressclasses", "list");
+    let result = api.list(&ListParams::default()).await;
+    t.finish(result.is_ok());
+    let list = result?;
+    let classes: Vec<IngressClassInfo> = list
+        .iter()
+        .filter_map(|ic| {
+            let name = ic.metadata.name.as_deref()?.to_string();
+            let is_default = ic
+                .metadata
+                .annotations
+                .as_ref()
+                .and_then(|a| a.get("ingressclass.kubernetes.io/is-default-class"))
+                .map(|v| v == "true")
+                .unwrap_or(false);
+            Some(IngressClassInfo { name, is_default })
+        })
+        .collect();
+    Ok(Json(IngressClassListResponse { classes }))
 }
 
 async fn ensure_service(

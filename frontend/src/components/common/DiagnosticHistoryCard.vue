@@ -8,6 +8,7 @@ import type {
   DiagnosticHistoryItem,
   DiagnosticResultResponse,
 } from "@/types/api";
+import { formatTimestamp } from "@/utils/format";
 
 const props = withDefaults(
   defineProps<{
@@ -139,12 +140,6 @@ function agentLabel(a: DiagAgent | null): string {
   return "—";
 }
 
-function formatTimestamp(ts: string | null): string {
-  if (!ts) return "—";
-  const d = new Date(ts);
-  if (Number.isNaN(d.getTime())) return ts;
-  return d.toLocaleString();
-}
 
 function startPolling() {
   stopPolling();

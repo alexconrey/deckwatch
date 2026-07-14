@@ -48,7 +48,8 @@ export type DeploymentPhase =
   | "available"
   | "progressing"
   | "degraded"
-  | "failed";
+  | "failed"
+  | "scaled_to_zero";
 
 export interface DeploymentCondition {
   condition_type: string;
@@ -228,10 +229,12 @@ export interface GitOpsConfig {
   dockerfile_path: string;
   docker_context: string;
   ecr_repository: string;
+  oci_repository?: string;
   include_paths: string[];
   exclude_paths: string[];
   poll_interval_seconds: number;
   webhook_enabled: boolean;
+  webhook_secret_configured?: boolean;
 }
 
 export interface GitOpsStatus {
@@ -250,11 +253,13 @@ export interface GitOpsConfigRequest {
   token_secret: string;
   dockerfile_path?: string;
   docker_context?: string;
-  ecr_repository: string;
+  ecr_repository?: string;
+  oci_repository?: string;
   include_paths?: string[];
   exclude_paths?: string[];
   poll_interval_seconds?: number;
   webhook_enabled?: boolean;
+  webhook_secret?: string;
 }
 
 export interface BuildSummary {
@@ -386,21 +391,10 @@ export interface DiagnoseRequest {
   agent: DiagAgent;
 }
 
-// Shared per-namespace quota shape. Emitted by the standalone /ai-quota
-// endpoint AND embedded in create-responses so a successful submit
-// immediately refreshes the remaining-count chip.
-export interface AiQuotaSnapshot {
-  limit: number;
-  used: number;
-  remaining: number;
-  reset_in_secs: number | null;
-}
-
 export interface DiagnoseResponse {
   job_name: string;
   status: DiagStatus;
   agent: DiagAgent;
-  quota: AiQuotaSnapshot;
 }
 
 export interface DiagnosticStatusResponse {
@@ -508,21 +502,31 @@ export interface NotificationSettings {
   webhook_url: string;
 }
 
-// Operator-tunable AI safety block. Optional — a missing value means
-// "use the compiled-in default" (currently 10 jobs/namespace/hour).
-export interface AiSafetySettings {
-  jobs_per_namespace_per_hour: number;
-}
-
 export interface DeckwatchSettings {
   allowed_namespaces: string[];
   default_resource_limits: ResourceDefaults | null;
   auth: AuthSettings | null;
   notifications: NotificationSettings | null;
-  ai_safety: AiSafetySettings | null;
   git_repositories: GitRepository[];
   oci_registries: OciRegistry[];
   git_token_secrets: GitTokenSecret[];
+  prometheus_enabled?: boolean;
+  registry_enabled?: boolean;
+  ai_claude_enabled?: boolean;
+  ai_codex_enabled?: boolean;
+  cost?: CostSettings | null;
+  tracing?: TracingSettings | null;
+}
+
+export interface CostSettings {
+  cost_per_cpu_hour: number | null;
+  cost_per_gb_hour: number | null;
+  currency: string;
+}
+
+export interface TracingSettings {
+  query_url: string;
+  ui_url: string;
 }
 
 // --- Application types ---

@@ -1,20 +1,18 @@
-use std::collections::BTreeMap;
-
 use axum::extract::State;
 use axum::Json;
 use k8s_openapi::api::core::v1::ConfigMap;
-use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
-use kube::api::{Patch, PatchParams};
+use sea_orm::entity::prelude::*;
+use sea_orm::ActiveValue::Set;
 use serde::{Deserialize, Serialize};
 
+use crate::entities::settings as settings_entity;
 use crate::error::AppError;
-use crate::notifications::{NotificationClient, NotificationEvent};
 use crate::metrics::K8sTimer;
-use crate::rate_limit::DEFAULT_HOURLY_LIMIT;
+use crate::notifications::{NotificationClient, NotificationEvent};
 use crate::state::AppState;
 
 const SETTINGS_KEY: &str = "settings";
-const FIELD_MANAGER: &str = "deckwatch";
+const DB_SETTINGS_KEY: &str = "main";
 
 /// Display name used for the auto-populated deckwatch registry entry. Kept
 /// as a const so the frontend can special-case it (badge as "local", hide
@@ -31,11 +29,6 @@ pub struct DeckwatchSettings {
     pub auth: Option<AuthSettings>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub notifications: Option<NotificationSettings>,
-    /// Safety knobs for AI-agent jobs (diagnostics + ai-fix). Optional so
-    /// existing settings ConfigMaps deserialize cleanly; a missing block
-    /// means "use the compiled-in defaults".
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub ai_safety: Option<AiSafetySettings>,
     /// Managed list of Git repositories that operators can pick from in the
     /// GitOps dialog. A "Custom" option on the frontend still allows free-form
     /// URLs for one-off use.
@@ -61,6 +54,33 @@ pub struct DeckwatchSettings {
     /// configured" and the tracing handler returns `unavailable_reason`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tracing: Option<TracingSettings>,
+    /// Runtime toggle for Prometheus monitoring features (PodMonitor CRD
+    /// management, per-deployment scrape configuration). When false, the
+    /// monitoring endpoints return 404 and the frontend hides the section.
+    /// Defaults to true so clusters with prometheus-operator get it
+    /// automatically; operators on clusters without the CRDs toggle it off
+    /// in the settings pane.
+    #[serde(default = "default_true")]
+    pub prometheus_enabled: bool,
+    /// Runtime toggle for the embedded container registry UI. When false,
+    /// the Registry nav link is hidden and the registry page is
+    /// inaccessible. Defaults to false so the feature is opt-in.
+    #[serde(default)]
+    pub registry_enabled: bool,
+    /// Runtime toggle for the Claude AI diagnostic provider. When false,
+    /// the "Diagnose with AI" / "Fix with AI" buttons hide Claude as an
+    /// option across all users. Defaults to true (the shipping provider).
+    #[serde(default = "default_true")]
+    pub ai_claude_enabled: bool,
+    /// Runtime toggle for the Codex AI diagnostic provider. When false,
+    /// Codex is hidden as an option. Defaults to true so it's available
+    /// once the backend wiring ships.
+    #[serde(default = "default_true")]
+    pub ai_codex_enabled: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -99,32 +119,6 @@ pub struct NotificationSettings {
     pub event_types: Vec<String>,
     #[serde(default)]
     pub namespaces: Vec<String>,
-}
-
-/// Operator-tunable safety controls for LLM-agent jobs. Persisted in the
-/// deckwatch settings ConfigMap so a cluster admin can raise the cap
-/// without redeploying. Applied at startup and on every PUT -- the running
-/// rate limiter is hot-swapped from `put_settings`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AiSafetySettings {
-    /// Maximum AI-agent jobs (diagnostics + ai-fix combined) that any single
-    /// namespace can start per rolling hour. `0` is coerced to `1` at the
-    /// limiter level; use a big number if you want "unlimited" (there's no
-    /// disabled state -- the guardrail is always on).
-    #[serde(default = "default_hourly_limit")]
-    pub jobs_per_namespace_per_hour: u32,
-}
-
-impl Default for AiSafetySettings {
-    fn default() -> Self {
-        Self {
-            jobs_per_namespace_per_hour: DEFAULT_HOURLY_LIMIT,
-        }
-    }
-}
-
-fn default_hourly_limit() -> u32 {
-    DEFAULT_HOURLY_LIMIT
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -219,20 +213,67 @@ pub struct TracingSettings {
 pub async fn get_settings(
     State(state): State<AppState>,
 ) -> Result<Json<DeckwatchSettings>, AppError> {
-    let api = state.configmaps_api(&state.settings_namespace)?;
-    // The settings CM often doesn't exist yet on a fresh install -- a NotFound
-    // is expected and falls back to defaults, so don't inflate the k8s error
-    // counter for that case.
-    let t = K8sTimer::new("configmaps", "get");
-    let get_res = api.get(&state.settings_configmap_name).await;
-    let is_notfound = matches!(&get_res, Err(kube::Error::Api(e)) if e.code == 404);
-    t.finish(get_res.is_ok() || is_notfound);
-    let mut settings = match get_res {
-        Ok(cm) => parse_settings(&cm),
-        Err(_) => default_settings(&state),
-    };
+    let mut settings = load_settings_from_db(&state).await;
     inject_builtin_registry(&state, &mut settings);
     Ok(Json(settings))
+}
+
+/// Load settings from the database. If the DB row doesn't exist yet, attempt
+/// a one-time migration from the legacy ConfigMap. If neither source has data,
+/// return compiled-in defaults.
+pub async fn load_settings_from_db(state: &AppState) -> DeckwatchSettings {
+    // Try database first.
+    match settings_entity::Entity::find_by_id(DB_SETTINGS_KEY)
+        .one(&state.db)
+        .await
+    {
+        Ok(Some(row)) => {
+            if let Ok(s) = serde_json::from_str::<DeckwatchSettings>(&row.value) {
+                return s;
+            }
+            tracing::warn!("settings row in DB has invalid JSON; falling back to defaults");
+        }
+        Ok(None) => {
+            // DB is empty -- try to seed from the legacy ConfigMap so existing
+            // deployments don't lose their settings on upgrade.
+            if let Some(s) = migrate_settings_from_configmap(state).await {
+                return s;
+            }
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "failed to query settings from DB");
+        }
+    }
+    default_settings(state)
+}
+
+/// One-time migration: read the settings ConfigMap and persist it into the
+/// database so subsequent reads go straight to the DB. Returns the migrated
+/// settings on success, or `None` if no ConfigMap exists.
+async fn migrate_settings_from_configmap(state: &AppState) -> Option<DeckwatchSettings> {
+    let api = match state.configmaps_api(&state.settings_namespace) {
+        Ok(a) => a,
+        Err(_) => return None,
+    };
+    let t = K8sTimer::new("configmaps", "get");
+    let cm = match api.get(&state.settings_configmap_name).await {
+        Ok(cm) => {
+            t.finish(true);
+            cm
+        }
+        Err(_) => {
+            t.finish(false);
+            return None;
+        }
+    };
+    let settings = parse_settings(&cm);
+    // Persist to DB so we never read the ConfigMap again.
+    if let Err(e) = upsert_settings_to_db(&state.db, &settings).await {
+        tracing::warn!(error = %e, "failed to seed DB from ConfigMap; will retry next read");
+    } else {
+        tracing::info!("migrated settings from ConfigMap to database");
+    }
+    Some(settings)
 }
 
 pub async fn put_settings(
@@ -243,53 +284,67 @@ pub async fn put_settings(
     // from the deployment env var, not user data.
     settings.oci_registries.retain(|r| !r.builtin);
 
-    let serialized = serde_json::to_string_pretty(&settings)
-        .map_err(|e| AppError::BadRequest(format!("failed to serialize settings: {e}")))?;
+    upsert_settings_to_db(&state.db, &settings)
+        .await
+        .map_err(|e| AppError::BadRequest(format!("failed to save settings: {e}")))?;
 
-    let mut data = BTreeMap::new();
-    data.insert(SETTINGS_KEY.to_string(), serialized);
-
-    let mut labels = BTreeMap::new();
-    labels.insert(
-        "app.kubernetes.io/managed-by".to_string(),
-        "deckwatch".to_string(),
-    );
-    labels.insert(
-        "app.kubernetes.io/component".to_string(),
-        "settings".to_string(),
-    );
-
-    let cm = ConfigMap {
-        metadata: ObjectMeta {
-            name: Some(state.settings_configmap_name.clone()),
-            namespace: Some(state.settings_namespace.clone()),
-            labels: Some(labels),
-            ..Default::default()
-        },
-        data: Some(data),
-        ..Default::default()
-    };
-
-    let api = state.configmaps_api(&state.settings_namespace)?;
-    let params = PatchParams::apply(FIELD_MANAGER).force();
-    let t = K8sTimer::new("configmaps", "patch");
-    let updated = api
-        .patch(&state.settings_configmap_name, &params, &Patch::Apply(&cm))
-        .await;
-    t.finish(updated.is_ok());
-    let updated = updated?;
-
-    let mut result = parse_settings(&updated);
-    inject_builtin_registry(&state, &mut result);
-
-    // Hot-swap the running rate limiter so a Settings change takes effect
-    // without a pod restart. The limiter is best-effort; a missing block
-    // preserves the previous limit.
-    if let Some(ai) = result.ai_safety.as_ref() {
-        state.ai_rate_limiter.set_limit(ai.jobs_per_namespace_per_hour);
+    if let Err(e) = crate::audit::log_action(
+        &state.db,
+        "update",
+        "settings",
+        "main",
+        "",
+        "updated application settings",
+    )
+    .await
+    {
+        tracing::warn!(error = %e, "failed to write audit log");
     }
 
+    let mut result = settings;
+    inject_builtin_registry(&state, &mut result);
+
     Ok(Json(result))
+}
+
+/// Return the current UTC time as a `DateTimeUtc`.
+fn now_utc() -> sea_orm::entity::prelude::DateTimeUtc {
+    use std::time::SystemTime;
+    let d = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .expect("system clock before UNIX epoch");
+    sea_orm::entity::prelude::DateTimeUtc::from_timestamp(d.as_secs() as i64, d.subsec_nanos())
+        .expect("timestamp out of range")
+}
+
+/// Upsert the entire settings blob into the `settings` table as a single
+/// JSON value with key `"main"`.
+async fn upsert_settings_to_db(
+    db: &sea_orm::DatabaseConnection,
+    settings: &DeckwatchSettings,
+) -> Result<(), sea_orm::DbErr> {
+    let json_str = serde_json::to_string_pretty(settings)
+        .map_err(|e| sea_orm::DbErr::Custom(format!("JSON serialization failed: {e}")))?;
+    let now = now_utc();
+
+    let model = settings_entity::ActiveModel {
+        key: Set(DB_SETTINGS_KEY.to_string()),
+        value: Set(json_str),
+        updated_at: Set(now),
+    };
+
+    // Try to find existing row first; insert or update accordingly.
+    let existing = settings_entity::Entity::find_by_id(DB_SETTINGS_KEY)
+        .one(db)
+        .await?;
+
+    if existing.is_some() {
+        settings_entity::Entity::update(model).exec(db).await?;
+    } else {
+        settings_entity::Entity::insert(model).exec(db).await?;
+    }
+
+    Ok(())
 }
 
 /// If this deckwatch instance runs the embedded registry, prepend it to
@@ -300,7 +355,9 @@ fn inject_builtin_registry(state: &AppState, settings: &mut DeckwatchSettings) {
     let Some(url) = state.registry_public_url.as_deref() else {
         return;
     };
-    settings.oci_registries.retain(|r| r.name != DECKWATCH_REGISTRY_NAME);
+    settings
+        .oci_registries
+        .retain(|r| r.name != DECKWATCH_REGISTRY_NAME);
     let entry = OciRegistry {
         name: DECKWATCH_REGISTRY_NAME.to_string(),
         url: url.to_string(),
@@ -327,14 +384,16 @@ fn default_settings(state: &AppState) -> DeckwatchSettings {
         default_resource_limits: None,
         auth: Some(AuthSettings::default()),
         notifications: Some(NotificationSettings::default()),
-        ai_safety: Some(AiSafetySettings::default()),
         git_repositories: Vec::new(),
         oci_registries: Vec::new(),
         git_token_secrets: Vec::new(),
         tracing: Some(TracingSettings::default()),
+        prometheus_enabled: true,
+        registry_enabled: false,
+        ai_claude_enabled: true,
+        ai_codex_enabled: true,
     }
 }
-
 
 pub async fn test_notification(
     State(state): State<AppState>,

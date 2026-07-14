@@ -15,8 +15,8 @@
 
 use anyhow::{Context, Result};
 use k8s_openapi::api::admissionregistration::v1::{
-    RuleWithOperations, ServiceReference, ValidatingWebhook,
-    ValidatingWebhookConfiguration, WebhookClientConfig,
+    RuleWithOperations, ServiceReference, ValidatingWebhook, ValidatingWebhookConfiguration,
+    WebhookClientConfig,
 };
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::{
     LabelSelector, LabelSelectorRequirement, ObjectMeta,
@@ -37,11 +37,7 @@ const FIELD_MANAGER: &str = "deckwatch-webhook";
 /// with the handler-side `PROTECTED_NAMESPACES` list. The API server
 /// respects this at admission-time so a broken handler cannot dent
 /// system components.
-const PROTECTED_NAMESPACE_SELECTOR: &[&str] = &[
-    "kube-system",
-    "kube-public",
-    "kube-node-lease",
-];
+const PROTECTED_NAMESPACE_SELECTOR: &[&str] = &["kube-system", "kube-public", "kube-node-lease"];
 
 /// Input to [`ensure`]: the webhook Service coordinates + CA bundle.
 pub struct RegistrationInput<'a> {
@@ -56,10 +52,7 @@ pub struct RegistrationInput<'a> {
 
 /// Server-side-apply the ValidatingWebhookConfiguration. Idempotent —
 /// running this on every startup keeps the CA bundle fresh.
-pub async fn ensure(
-    client: &kube::Client,
-    input: RegistrationInput<'_>,
-) -> Result<()> {
+pub async fn ensure(client: &kube::Client, input: RegistrationInput<'_>) -> Result<()> {
     let api: Api<ValidatingWebhookConfiguration> = Api::all(client.clone());
 
     // caBundle needs to be raw bytes on the wire; k8s-openapi models

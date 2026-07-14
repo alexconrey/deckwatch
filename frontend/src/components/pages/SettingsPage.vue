@@ -4,6 +4,7 @@ import { settingsApi } from "@/api/settings";
 import { templatesApi } from "@/api/templates";
 import { useAiSettings } from "@/composables/useAiSettings";
 import { useClusterAlertSettings } from "@/composables/useClusterAlertSettings";
+import AuditLogPage from "@/components/pages/AuditLogPage.vue";
 import type {
   AuthSettings,
   CostSettings,
@@ -30,17 +31,24 @@ const NOTIFICATION_EVENTS: { value: NotificationEventType; title: string; hint: 
   { value: "application_deleted", title: "Application deleted", hint: "Application removed via the API" },
 ];
 
-type TabId =
+type SectionId =
   | "general"
+  | "auth"
   | "templates"
   | "git_repositories"
-  | "oci_registries"
-  | "git_tokens"
-  | "ai_integrations"
-  | "auth"
-  | "notifications";
+  | "container_registries"
+  | "audit";
 
-const tab = ref<TabId>("general");
+const navItems: { id: SectionId; title: string; icon: string }[] = [
+  { id: "general", title: "General", icon: "mdi-tune" },
+  { id: "auth", title: "Authentication", icon: "mdi-shield-account" },
+  { id: "templates", title: "Templates", icon: "mdi-shape-outline" },
+  { id: "git_repositories", title: "Git Repositories", icon: "mdi-git" },
+  { id: "container_registries", title: "Container Registries", icon: "mdi-package-variant" },
+  { id: "audit", title: "Audit Log", icon: "mdi-clipboard-text-clock" },
+];
+
+const section = ref<SectionId>("general");
 
 const loading = ref(false);
 const saving = ref(false);
@@ -77,15 +85,23 @@ const notifications = ref<NotificationSettings>({
 });
 const testingNotification = ref(false);
 
-// AI provider toggles live in browser storage (not the backend
-// DeckwatchSettings object), so we just bind the composable's refs directly.
-const { claudeEnabled, codexEnabled } = useAiSettings();
-
-// Cluster warning-event toast notifications: browser-local toggle, same
-// pattern as the AI provider switches.
+// Cluster warning-event toast notifications: browser-local toggle (stays
+// per-browser since it's a personal preference, not a policy decision).
 const { enabled: alertsEnabled } = useClusterAlertSettings();
 
+// After saving settings, refresh the composable's cached copy so other
+// components (DiagnoseButton, AiFixButton) pick up the new toggle state.
+const { refresh: refreshAiSettings } = useAiSettings();
+
 // Managed lists.
+const prometheusEnabled = ref(true);
+const registryEnabled = ref(false);
+
+// AI provider toggles are now server-side settings, persisted alongside the
+// rest of DeckwatchSettings so an admin toggle applies to all users.
+const aiClaudeEnabled = ref(true);
+const aiCodexEnabled = ref(true);
+
 const gitRepositories = ref<GitRepository[]>([]);
 const ociRegistries = ref<OciRegistry[]>([]);
 const gitTokenSecrets = ref<GitTokenSecret[]>([]);
@@ -156,6 +172,10 @@ function applySettings(s: DeckwatchSettings) {
   gitRepositories.value = s.git_repositories ?? [];
   ociRegistries.value = s.oci_registries ?? [];
   gitTokenSecrets.value = s.git_token_secrets ?? [];
+  prometheusEnabled.value = s.prometheus_enabled ?? true;
+  registryEnabled.value = s.registry_enabled ?? false;
+  aiClaudeEnabled.value = s.ai_claude_enabled ?? true;
+  aiCodexEnabled.value = s.ai_codex_enabled ?? true;
 }
 
 async function load() {
@@ -208,6 +228,10 @@ function buildPayload(): DeckwatchSettings {
     oci_registries: ociRegistries.value,
     git_token_secrets: gitTokenSecrets.value,
     cost: hasAnyCostRate() ? costSettings.value : null,
+    prometheus_enabled: prometheusEnabled.value,
+    registry_enabled: registryEnabled.value,
+    ai_claude_enabled: aiClaudeEnabled.value,
+    ai_codex_enabled: aiCodexEnabled.value,
   };
 }
 
@@ -262,6 +286,9 @@ async function save() {
     // settings succeed, we still want the user to see the templates error.
     const updated = await settingsApi.update(buildPayload());
     applySettings(updated);
+    // Refresh the module-cached AI toggles so DiagnoseButton / AiFixButton
+    // pick up the new enabled state without a page reload.
+    void refreshAiSettings();
     const updatedTemplates = await templatesApi.update(templates.value);
     applyTemplates(updatedTemplates.templates);
     snackbarMessage.value = "Settings saved";
@@ -415,6 +442,7 @@ onMounted(load);
       <h2 class="text-h5">Settings</h2>
       <v-spacer />
       <v-btn
+        v-if="section !== 'audit'"
         color="primary"
         prepend-icon="mdi-content-save"
         :loading="saving"
@@ -429,37 +457,26 @@ onMounted(load);
       {{ error }}
     </v-alert>
 
-    <v-card class="bg-surface" flat>
-      <v-tabs v-model="tab" color="primary" density="comfortable" show-arrows>
-        <v-tab value="general" prepend-icon="mdi-tune">General</v-tab>
-        <v-tab value="templates" prepend-icon="mdi-shape-outline">
-          Templates
-        </v-tab>
-        <v-tab value="git_repositories" prepend-icon="mdi-source-repository">
-          Git Repositories
-        </v-tab>
-        <v-tab value="oci_registries" prepend-icon="mdi-package-variant-closed">
-          OCI Registries
-        </v-tab>
-        <v-tab value="git_tokens" prepend-icon="mdi-key-variant">
-          Git Tokens
-        </v-tab>
-        <v-tab value="ai_integrations" prepend-icon="mdi-robot">
-          AI Integrations
-        </v-tab>
-        <v-tab value="auth" prepend-icon="mdi-shield-account">
-          Authentication
-        </v-tab>
-        <v-tab value="notifications" prepend-icon="mdi-bell-outline">
-          Notifications
-        </v-tab>
-      </v-tabs>
+    <div class="d-flex" style="gap: 16px">
+      <!-- Sidebar navigation -->
+      <v-card class="bg-surface flex-shrink-0" flat style="min-width: 220px; max-width: 240px">
+        <v-list density="comfortable" nav>
+          <v-list-item
+            v-for="item in navItems"
+            :key="item.id"
+            :prepend-icon="item.icon"
+            :title="item.title"
+            :active="section === item.id"
+            color="primary"
+            @click="section = item.id"
+          />
+        </v-list>
+      </v-card>
 
-      <v-divider />
-
-      <v-window v-model="tab" class="pa-6">
+      <!-- Content panel -->
+      <v-card class="bg-surface flex-grow-1 pa-6" flat>
         <!-- General -->
-        <v-window-item value="general">
+        <div v-if="section === 'general'">
           <div v-if="loading" class="d-flex justify-center pa-8">
             <v-progress-circular indeterminate color="primary" />
           </div>
@@ -596,11 +613,281 @@ onMounted(load);
               inset
               density="compact"
             />
+
+            <v-divider class="my-6" />
+
+            <h3 class="text-h6 mb-2">Prometheus monitoring</h3>
+            <p class="text-body-2 text-secondary mb-3">
+              When enabled, deckwatch can create PodMonitor resources for
+              per-deployment metrics scraping. Requires the prometheus-operator
+              CRDs (monitoring.coreos.com) to be installed in the cluster.
+            </p>
+            <v-switch
+              v-model="prometheusEnabled"
+              color="primary"
+              label="Enable Prometheus monitoring"
+              hide-details
+              inset
+              density="compact"
+            />
+
+            <v-divider class="my-6" />
+
+            <h3 class="text-h6 mb-2">Container Registry</h3>
+            <p class="text-body-2 text-secondary mb-3">
+              When enabled, the Registry page is accessible from the
+              navigation bar. Disable to hide the registry UI entirely.
+            </p>
+            <v-switch
+              v-model="registryEnabled"
+              color="primary"
+              label="Enable container registry"
+              hide-details
+              inset
+              density="compact"
+            />
+
+            <v-divider class="my-6" />
+
+            <h3 class="text-h6 mb-2">Notifications</h3>
+            <p class="text-body-2 text-secondary mb-4">
+              Deckwatch fires JSON POSTs to a single webhook URL when the
+              events below occur. The payload is Slack-compatible (a top-level
+              <code>text</code> plus a colored <code>attachments</code> block)
+              but also works with Microsoft Teams incoming webhooks and any
+              generic JSON receiver.
+            </p>
+
+            <v-switch
+              v-model="notifications.enabled"
+              color="primary"
+              label="Enable webhook notifications"
+              hide-details
+              class="mb-4"
+            />
+
+            <v-text-field
+              v-model="notifications.webhook_url"
+              label="Webhook URL"
+              placeholder="https://hooks.slack.com/services/T00/B00/xxx"
+              variant="outlined"
+              density="comfortable"
+              class="mb-4"
+            />
+
+            <v-divider class="mb-4" />
+
+            <h4 class="text-subtitle-1 mb-2">Namespaces</h4>
+            <p class="text-body-2 text-secondary mb-3">
+              Restrict which namespaces trigger notifications. Leave empty to
+              fire for every allowed namespace.
+            </p>
+            <v-combobox
+              v-model="notifications.namespaces"
+              label="Namespaces"
+              multiple
+              chips
+              closable-chips
+              variant="outlined"
+              density="comfortable"
+              hint="Press Enter to add a namespace"
+              persistent-hint
+              class="mb-4"
+            />
+
+            <v-divider class="mb-4" />
+
+            <h4 class="text-subtitle-1 mb-2">Event types</h4>
+            <p class="text-body-2 text-secondary mb-3">
+              Uncheck to mute a class of event. If nothing is checked, deckwatch
+              treats it as "everything" to match the pre-filter behavior.
+            </p>
+            <v-row dense>
+              <v-col
+                v-for="evt in NOTIFICATION_EVENTS"
+                :key="evt.value"
+                cols="12"
+                md="6"
+              >
+                <v-checkbox
+                  v-model="notifications.event_types"
+                  :label="evt.title"
+                  :value="evt.value"
+                  :hint="evt.hint"
+                  persistent-hint
+                  density="comfortable"
+                />
+              </v-col>
+            </v-row>
+
+            <v-divider class="my-4" />
+
+            <div class="d-flex align-center">
+              <v-btn
+                color="secondary"
+                variant="tonal"
+                prepend-icon="mdi-send-outline"
+                :loading="testingNotification"
+                :disabled="!notifications.enabled || !notifications.webhook_url"
+                @click="testNotification"
+              >
+                Send test notification
+              </v-btn>
+              <span class="text-caption text-secondary ml-3">
+                Saves settings, then POSTs a `test` event.
+              </span>
+            </div>
+
+            <v-divider class="my-6" />
+
+            <h3 class="text-h6 mb-2">AI providers</h3>
+            <p class="text-body-2 text-secondary mb-4">
+              Controls which AI agents show up in the "Diagnose with AI" and
+              "Fix with AI" flows. Turning Claude off hides the Diagnose button
+              entirely across every pod view. These toggles apply to all users.
+            </p>
+
+            <v-card variant="outlined" class="mb-3 pa-4">
+              <div class="d-flex align-center">
+                <v-icon
+                  icon="mdi-alpha-c-circle"
+                  color="deep-purple"
+                  size="large"
+                  class="mr-3"
+                />
+                <div class="flex-grow-1">
+                  <div class="text-subtitle-1">Claude</div>
+                  <div class="text-caption text-secondary">
+                    Anthropic Claude Code CLI. Runs as a Kubernetes Job with an
+                    <code>ANTHROPIC_API_KEY</code> Secret mounted in.
+                  </div>
+                </div>
+                <v-switch
+                  v-model="aiClaudeEnabled"
+                  color="primary"
+                  hide-details
+                  density="compact"
+                  inset
+                />
+              </div>
+            </v-card>
+
+            <v-card variant="outlined" class="mb-3 pa-4">
+              <div class="d-flex align-center">
+                <v-icon
+                  icon="mdi-alpha-o-circle"
+                  color="grey"
+                  size="large"
+                  class="mr-3"
+                />
+                <div class="flex-grow-1">
+                  <div class="d-flex align-center">
+                    <span class="text-subtitle-1">Codex</span>
+                    <v-chip
+                      size="x-small"
+                      color="info"
+                      variant="tonal"
+                      class="ml-2"
+                    >
+                      Coming Soon
+                    </v-chip>
+                  </div>
+                  <div class="text-caption text-secondary">
+                    OpenAI Codex CLI. Backend plumbing is in place; provider
+                    wiring will ship in a follow-up.
+                  </div>
+                </div>
+                <v-switch
+                  v-model="aiCodexEnabled"
+                  color="primary"
+                  hide-details
+                  density="compact"
+                  :disabled="true"
+                  inset
+                />
+              </div>
+            </v-card>
           </template>
-        </v-window-item>
+        </div>
+
+        <!-- Authentication -->
+        <div v-else-if="section === 'auth'">
+          <v-alert
+            v-if="auth.enabled"
+            type="warning"
+            variant="tonal"
+            class="mb-4"
+            prepend-icon="mdi-shield-lock"
+          >
+            <strong>Authentication is enforced.</strong> All API requests must
+            carry a valid Microsoft Entra bearer token. Users without one will
+            be redirected to sign in on the next request.
+          </v-alert>
+          <v-alert
+            v-else
+            type="warning"
+            variant="tonal"
+            class="mb-4"
+            prepend-icon="mdi-alert-circle-outline"
+          >
+            <strong>Enabling auth will require all users to sign in via
+            Microsoft Entra.</strong> Confirm the Tenant ID and Client ID
+            below match a working App Registration before you flip the
+            toggle -- an invalid config will lock everyone out. The backend
+            reads this setting once at pod start, so a change here requires
+            restarting the deckwatch pods to take effect.
+          </v-alert>
+
+          <v-switch
+            v-model="auth.enabled"
+            color="primary"
+            label="Enable Entra authentication"
+            :disabled="!auth.tenant_id || !auth.client_id"
+            hint="Requires Tenant ID and Client ID to be set."
+            persistent-hint
+            class="mb-4"
+          />
+
+          <v-text-field
+            v-model="auth.tenant_id"
+            label="Tenant ID"
+            placeholder="00000000-0000-0000-0000-000000000000"
+            variant="outlined"
+            density="comfortable"
+            class="mb-2"
+          />
+
+          <v-text-field
+            v-model="auth.client_id"
+            label="Client (application) ID"
+            placeholder="00000000-0000-0000-0000-000000000000"
+            variant="outlined"
+            density="comfortable"
+            class="mb-2"
+          />
+
+          <v-text-field
+            v-model="auth.redirect_uri"
+            label="Redirect URI (optional)"
+            placeholder="https://deckwatch.example.com/auth/callback"
+            variant="outlined"
+            density="comfortable"
+            hint="Defaults to current origin + /auth/callback"
+            persistent-hint
+            class="mb-2"
+          />
+
+          <v-text-field
+            v-model="auth.scopes"
+            label="Scopes"
+            placeholder="openid profile email"
+            variant="outlined"
+            density="comfortable"
+          />
+        </div>
 
         <!-- Templates -->
-        <v-window-item value="templates">
+        <div v-else-if="section === 'templates'">
           <div class="d-flex align-center mb-2">
             <h3 class="text-h6">Deployment templates</h3>
             <v-spacer />
@@ -617,7 +904,7 @@ onMounted(load);
           <p class="text-body-2 text-secondary mb-4">
             Templates pre-fill the "Create Deployment" form. Edits to a
             builtin entry are stored as an override in the
-            <code>deckwatch-templates</code> ConfigMap — the compiled-in
+            <code>deckwatch-templates</code> ConfigMap -- the compiled-in
             default is untouched, so "Reset to Default" always restores it.
             Custom entries (id not shared with a builtin) are persisted
             wholesale.
@@ -760,7 +1047,7 @@ onMounted(load);
                   <h4 class="text-subtitle-2">Full payload (advanced)</h4>
                   <v-spacer />
                   <span class="text-caption text-secondary">
-                    Probes, cmd/args, env, resource defaults — anything the
+                    Probes, cmd/args, env, resource defaults -- anything the
                     Create API accepts.
                   </span>
                 </div>
@@ -802,10 +1089,10 @@ onMounted(load);
               </v-expansion-panel-text>
             </v-expansion-panel>
           </v-expansion-panels>
-        </v-window-item>
+        </div>
 
         <!-- Git Repositories -->
-        <v-window-item value="git_repositories">
+        <div v-else-if="section === 'git_repositories'">
           <div class="d-flex align-center mb-2">
             <h3 class="text-h6">Managed repositories</h3>
             <v-spacer />
@@ -873,10 +1160,82 @@ onMounted(load);
               </v-col>
             </v-row>
           </v-card>
-        </v-window-item>
 
-        <!-- OCI Registries -->
-        <v-window-item value="oci_registries">
+          <v-divider class="my-6" />
+
+          <!-- Git Tokens -->
+          <div class="d-flex align-center mb-2">
+            <h3 class="text-h6">Managed Git tokens</h3>
+            <v-spacer />
+            <v-btn
+              size="small"
+              color="primary"
+              variant="tonal"
+              prepend-icon="mdi-plus"
+              @click="addTokenSecret"
+            >
+              Add token
+            </v-btn>
+          </div>
+          <p class="text-body-2 text-secondary mb-4">
+            Points at a Kubernetes Secret with a <code>token</code> data key.
+            The same entry can be referenced by many deployments -- no more
+            per-deployment secret typing.
+          </p>
+
+          <div v-if="gitTokenSecrets.length === 0" class="text-center py-6 text-secondary">
+            No tokens configured. Click "Add token" to create one.
+          </div>
+
+          <v-card
+            v-for="(t, idx) in gitTokenSecrets"
+            :key="`tok-${idx}`"
+            variant="outlined"
+            class="mb-3 pa-3"
+          >
+            <v-row dense align="center">
+              <v-col cols="12" md="3">
+                <v-text-field
+                  v-model="t.name"
+                  label="Display name"
+                  placeholder="github-cicd"
+                  density="comfortable"
+                  hide-details
+                />
+              </v-col>
+              <v-col cols="12" md="4">
+                <v-text-field
+                  v-model="t.secret_name"
+                  label="Secret name"
+                  placeholder="github-cicd-token"
+                  density="comfortable"
+                  hide-details
+                />
+              </v-col>
+              <v-col cols="12" md="4">
+                <v-text-field
+                  v-model="t.namespace"
+                  label="Namespace"
+                  placeholder="deckwatch"
+                  density="comfortable"
+                  hide-details
+                />
+              </v-col>
+              <v-col cols="12" md="1" class="text-right">
+                <v-btn
+                  icon="mdi-delete"
+                  variant="text"
+                  color="error"
+                  size="small"
+                  @click="removeTokenSecret(idx)"
+                />
+              </v-col>
+            </v-row>
+          </v-card>
+        </div>
+
+        <!-- Container Registries -->
+        <div v-else-if="section === 'container_registries'">
           <div class="d-flex align-center mb-2">
             <h3 class="text-h6">Managed registries</h3>
             <v-spacer />
@@ -947,320 +1306,14 @@ onMounted(load);
               </v-col>
             </v-row>
           </v-card>
-        </v-window-item>
+        </div>
 
-        <!-- Git Tokens -->
-        <v-window-item value="git_tokens">
-          <div class="d-flex align-center mb-2">
-            <h3 class="text-h6">Managed Git tokens</h3>
-            <v-spacer />
-            <v-btn
-              size="small"
-              color="primary"
-              variant="tonal"
-              prepend-icon="mdi-plus"
-              @click="addTokenSecret"
-            >
-              Add token
-            </v-btn>
-          </div>
-          <p class="text-body-2 text-secondary mb-4">
-            Points at a Kubernetes Secret with a <code>token</code> data key.
-            The same entry can be referenced by many deployments — no more
-            per-deployment secret typing.
-          </p>
-
-          <div v-if="gitTokenSecrets.length === 0" class="text-center py-6 text-secondary">
-            No tokens configured. Click "Add token" to create one.
-          </div>
-
-          <v-card
-            v-for="(t, idx) in gitTokenSecrets"
-            :key="`tok-${idx}`"
-            variant="outlined"
-            class="mb-3 pa-3"
-          >
-            <v-row dense align="center">
-              <v-col cols="12" md="3">
-                <v-text-field
-                  v-model="t.name"
-                  label="Display name"
-                  placeholder="github-cicd"
-                  density="comfortable"
-                  hide-details
-                />
-              </v-col>
-              <v-col cols="12" md="4">
-                <v-text-field
-                  v-model="t.secret_name"
-                  label="Secret name"
-                  placeholder="github-cicd-token"
-                  density="comfortable"
-                  hide-details
-                />
-              </v-col>
-              <v-col cols="12" md="4">
-                <v-text-field
-                  v-model="t.namespace"
-                  label="Namespace"
-                  placeholder="deckwatch"
-                  density="comfortable"
-                  hide-details
-                />
-              </v-col>
-              <v-col cols="12" md="1" class="text-right">
-                <v-btn
-                  icon="mdi-delete"
-                  variant="text"
-                  color="error"
-                  size="small"
-                  @click="removeTokenSecret(idx)"
-                />
-              </v-col>
-            </v-row>
-          </v-card>
-        </v-window-item>
-
-        <!-- AI Integrations -->
-        <v-window-item value="ai_integrations">
-          <h3 class="text-h6 mb-2">AI providers</h3>
-          <p class="text-body-2 text-secondary mb-4">
-            Controls which AI agents show up in the "Diagnose with AI" and
-            "Fix with AI" flows. Turning Claude off hides the Diagnose button
-            entirely across every pod view. These toggles are stored in this
-            browser only.
-          </p>
-
-          <v-card variant="outlined" class="mb-3 pa-4">
-            <div class="d-flex align-center">
-              <v-icon
-                icon="mdi-alpha-c-circle"
-                color="deep-purple"
-                size="large"
-                class="mr-3"
-              />
-              <div class="flex-grow-1">
-                <div class="text-subtitle-1">Claude</div>
-                <div class="text-caption text-secondary">
-                  Anthropic Claude Code CLI. Runs as a Kubernetes Job with an
-                  <code>ANTHROPIC_API_KEY</code> Secret mounted in.
-                </div>
-              </div>
-              <v-switch
-                v-model="claudeEnabled"
-                color="primary"
-                hide-details
-                density="compact"
-                inset
-              />
-            </div>
-          </v-card>
-
-          <v-card variant="outlined" class="mb-3 pa-4">
-            <div class="d-flex align-center">
-              <v-icon
-                icon="mdi-alpha-o-circle"
-                color="grey"
-                size="large"
-                class="mr-3"
-              />
-              <div class="flex-grow-1">
-                <div class="d-flex align-center">
-                  <span class="text-subtitle-1">Codex</span>
-                  <v-chip
-                    size="x-small"
-                    color="info"
-                    variant="tonal"
-                    class="ml-2"
-                  >
-                    Coming Soon
-                  </v-chip>
-                </div>
-                <div class="text-caption text-secondary">
-                  OpenAI Codex CLI. Backend plumbing is in place; provider
-                  wiring will ship in a follow-up.
-                </div>
-              </div>
-              <v-switch
-                v-model="codexEnabled"
-                color="primary"
-                hide-details
-                density="compact"
-                :disabled="true"
-                inset
-              />
-            </div>
-          </v-card>
-        </v-window-item>
-
-        <!-- Authentication -->
-        <v-window-item value="auth">
-          <v-alert
-            v-if="auth.enabled"
-            type="warning"
-            variant="tonal"
-            class="mb-4"
-            prepend-icon="mdi-shield-lock"
-          >
-            <strong>Authentication is enforced.</strong> All API requests must
-            carry a valid Microsoft Entra bearer token. Users without one will
-            be redirected to sign in on the next request.
-          </v-alert>
-          <v-alert
-            v-else
-            type="warning"
-            variant="tonal"
-            class="mb-4"
-            prepend-icon="mdi-alert-circle-outline"
-          >
-            <strong>Enabling auth will require all users to sign in via
-            Microsoft Entra.</strong> Confirm the Tenant ID and Client ID
-            below match a working App Registration before you flip the
-            toggle — an invalid config will lock everyone out. The backend
-            reads this setting once at pod start, so a change here requires
-            restarting the deckwatch pods to take effect.
-          </v-alert>
-
-          <v-switch
-            v-model="auth.enabled"
-            color="primary"
-            label="Enable Entra authentication"
-            :disabled="!auth.tenant_id || !auth.client_id"
-            hint="Requires Tenant ID and Client ID to be set."
-            persistent-hint
-            class="mb-4"
-          />
-
-          <v-text-field
-            v-model="auth.tenant_id"
-            label="Tenant ID"
-            placeholder="00000000-0000-0000-0000-000000000000"
-            variant="outlined"
-            density="comfortable"
-            class="mb-2"
-          />
-
-          <v-text-field
-            v-model="auth.client_id"
-            label="Client (application) ID"
-            placeholder="00000000-0000-0000-0000-000000000000"
-            variant="outlined"
-            density="comfortable"
-            class="mb-2"
-          />
-
-          <v-text-field
-            v-model="auth.redirect_uri"
-            label="Redirect URI (optional)"
-            placeholder="https://deckwatch.example.com/auth/callback"
-            variant="outlined"
-            density="comfortable"
-            hint="Defaults to current origin + /auth/callback"
-            persistent-hint
-            class="mb-2"
-          />
-
-          <v-text-field
-            v-model="auth.scopes"
-            label="Scopes"
-            placeholder="openid profile email"
-            variant="outlined"
-            density="comfortable"
-          />
-        </v-window-item>
-
-        <!-- Notifications -->
-        <v-window-item value="notifications">
-          <p class="text-body-2 text-secondary mb-4">
-            Deckwatch fires JSON POSTs to a single webhook URL when the
-            events below occur. The payload is Slack-compatible (a top-level
-            <code>text</code> plus a colored <code>attachments</code> block)
-            but also works with Microsoft Teams incoming webhooks and any
-            generic JSON receiver.
-          </p>
-
-          <v-switch
-            v-model="notifications.enabled"
-            color="primary"
-            label="Enable webhook notifications"
-            hide-details
-            class="mb-4"
-          />
-
-          <v-text-field
-            v-model="notifications.webhook_url"
-            label="Webhook URL"
-            placeholder="https://hooks.slack.com/services/T00/B00/xxx"
-            variant="outlined"
-            density="comfortable"
-            class="mb-4"
-          />
-
-          <v-divider class="mb-4" />
-
-          <h3 class="text-subtitle-1 mb-2">Namespaces</h3>
-          <p class="text-body-2 text-secondary mb-3">
-            Restrict which namespaces trigger notifications. Leave empty to
-            fire for every allowed namespace.
-          </p>
-          <v-combobox
-            v-model="notifications.namespaces"
-            label="Namespaces"
-            multiple
-            chips
-            closable-chips
-            variant="outlined"
-            density="comfortable"
-            hint="Press Enter to add a namespace"
-            persistent-hint
-            class="mb-4"
-          />
-
-          <v-divider class="mb-4" />
-
-          <h3 class="text-subtitle-1 mb-2">Event types</h3>
-          <p class="text-body-2 text-secondary mb-3">
-            Uncheck to mute a class of event. If nothing is checked, deckwatch
-            treats it as "everything" to match the pre-filter behavior.
-          </p>
-          <v-row dense>
-            <v-col
-              v-for="evt in NOTIFICATION_EVENTS"
-              :key="evt.value"
-              cols="12"
-              md="6"
-            >
-              <v-checkbox
-                v-model="notifications.event_types"
-                :label="evt.title"
-                :value="evt.value"
-                :hint="evt.hint"
-                persistent-hint
-                density="comfortable"
-              />
-            </v-col>
-          </v-row>
-
-          <v-divider class="my-4" />
-
-          <div class="d-flex align-center">
-            <v-btn
-              color="secondary"
-              variant="tonal"
-              prepend-icon="mdi-send-outline"
-              :loading="testingNotification"
-              :disabled="!notifications.enabled || !notifications.webhook_url"
-              @click="testNotification"
-            >
-              Send test notification
-            </v-btn>
-            <span class="text-caption text-secondary ml-3">
-              Saves settings, then POSTs a `test` event.
-            </span>
-          </div>
-        </v-window-item>
-      </v-window>
-    </v-card>
+        <!-- Audit Log -->
+        <div v-else-if="section === 'audit'">
+          <AuditLogPage />
+        </div>
+      </v-card>
+    </div>
 
     <v-snackbar v-model="snackbar" :color="snackbarColor" location="top">
       {{ snackbarMessage }}

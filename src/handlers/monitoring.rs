@@ -23,7 +23,15 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use crate::error::AppError;
+use crate::handlers::settings;
+use crate::metrics::K8sTimer;
 use crate::state::AppState;
+
+async fn check_prometheus_enabled(state: &AppState) -> bool {
+    settings::load_settings_from_db(state)
+        .await
+        .prometheus_enabled
+}
 
 const PODMONITOR_GROUP: &str = "monitoring.coreos.com";
 const PODMONITOR_VERSION: &str = "v1";
@@ -64,6 +72,23 @@ pub async fn get(
     State(state): State<AppState>,
     Path((ns, name)): Path<(String, String)>,
 ) -> Result<(StatusCode, Json<MonitorResponse>), AppError> {
+    if !check_prometheus_enabled(&state).await {
+        return Ok((
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(MonitorResponse {
+                enabled: false,
+                name: podmonitor_name(&name),
+                namespace: ns,
+                port: "metrics".to_string(),
+                path: "/metrics".to_string(),
+                interval: "30s".to_string(),
+                matching_pods: 0,
+                unavailable_reason: Some(
+                    "Prometheus monitoring is disabled. Enable it in Settings.".to_string(),
+                ),
+            }),
+        ));
+    }
     let dep_api = state.deployments_api(&ns)?;
     let deployment = dep_api.get(&name).await?;
     let default_port = pick_default_port(&deployment);
@@ -132,6 +157,11 @@ pub async fn upsert(
     Path((ns, name)): Path<(String, String)>,
     Json(req): Json<MonitorConfigRequest>,
 ) -> Result<(StatusCode, Json<MonitorResponse>), AppError> {
+    if !check_prometheus_enabled(&state).await {
+        return Err(AppError::BadRequest(
+            "Prometheus monitoring is disabled. Enable it in Settings.".to_string(),
+        ));
+    }
     if !req.enabled {
         let status = delete(State(state.clone()), Path((ns.clone(), name.clone()))).await?;
         return Ok((
@@ -377,11 +407,7 @@ async fn count_matching_pods(
         return 0;
     };
     let lp = kube::api::ListParams::default().labels(&selector);
-    pods_api
-        .list(&lp)
-        .await
-        .map(|l| l.items.len())
-        .unwrap_or(0)
+    pods_api.list(&lp).await.map(|l| l.items.len()).unwrap_or(0)
 }
 
 fn is_prom_duration(s: &str) -> bool {
@@ -510,8 +536,7 @@ mod tests {
 
     #[test]
     fn build_podmonitor_shape() {
-        let labels =
-            std::collections::BTreeMap::from([("app".to_string(), "foo".to_string())]);
+        let labels = std::collections::BTreeMap::from([("app".to_string(), "foo".to_string())]);
         let pm = build_podmonitor(
             "foo-deckwatch",
             "ns",

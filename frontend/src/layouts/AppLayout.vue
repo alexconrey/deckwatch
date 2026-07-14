@@ -1,14 +1,25 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from "vue";
 import { useRouter } from "vue-router";
+import { useTheme } from "vuetify";
 import { useNamespaceStore } from "@/stores/namespace";
 import { useAuth } from "@/composables/useAuth";
+import { useFeatures } from "@/composables/useFeatures";
 import CreateNamespaceDialog from "@/components/common/CreateNamespaceDialog.vue";
 
 const router = useRouter();
 const ns = useNamespaceStore();
 const auth = useAuth();
+const { features } = useFeatures();
+const theme = useTheme();
 const showCreateNs = ref(false);
+
+const isDark = computed(() => theme.global.current.value.dark);
+const toggleTheme = () => {
+  const next = isDark.value ? "deckwatchLight" : "deckwatchDark";
+  theme.global.name.value = next;
+  localStorage.setItem("deckwatch-theme", next);
+};
 
 // Sentinel value appended to the namespace dropdown items list so a
 // "Create Namespace" action lives inside the same v-select — avoids a
@@ -78,16 +89,17 @@ const onNsCreated = (name: string) => {
             Deckwatch
           </span>
         </div>
-        <v-select
+        <v-autocomplete
           :model-value="ns.selected"
           :items="nsItems"
           label="Namespace"
-        role="combobox"
-        aria-label="Select namespace"
-        data-testid="namespace-switcher"
+          role="combobox"
+          aria-label="Select namespace"
+          data-testid="namespace-switcher"
           density="compact"
           variant="outlined"
           hide-details
+          auto-select-first
           style="min-width: 200px; max-width: 240px"
           :loading="ns.loading"
           @update:model-value="onNsSelected"
@@ -96,7 +108,7 @@ const onNsCreated = (name: string) => {
             <v-divider v-if="(item.raw as { divider?: boolean }).divider" />
             <v-list-item v-else v-bind="itemProps" />
           </template>
-        </v-select>
+        </v-autocomplete>
       </div>
     </template>
 
@@ -108,7 +120,7 @@ const onNsCreated = (name: string) => {
       <v-btn variant="text" size="small" :to="{ name: 'Deployments' }" class="mr-1">
         Resources
       </v-btn>
-      <v-btn variant="text" size="small" :to="{ name: 'Registry' }" class="mr-1">
+      <v-btn v-if="features?.registry" variant="text" size="small" :to="{ name: 'Registry' }" class="mr-1">
         Registry
       </v-btn>
       <v-btn
@@ -121,6 +133,13 @@ const onNsCreated = (name: string) => {
         Cluster
       </v-btn>
       <v-spacer />
+      <v-btn
+        :icon="isDark ? 'mdi-weather-sunny' : 'mdi-weather-night'"
+        size="small"
+        variant="text"
+        class="mr-1"
+        @click="toggleTheme"
+      />
       <v-btn
         icon="mdi-cog"
         size="small"
@@ -159,10 +178,12 @@ const onNsCreated = (name: string) => {
     </v-container>
   </v-main>
 
-  <v-footer app class="text-caption text-secondary d-flex align-center justify-center ga-4 py-1">
-    <span>Deckwatch v0.1.0</span>
-    <v-btn variant="text" size="x-small" href="/docs/book/" target="_blank">Help</v-btn>
-    <v-btn variant="text" size="x-small" href="/api/docs" target="_blank">API Docs</v-btn>
+  <v-footer class="text-caption text-secondary d-flex align-center justify-center ga-2" style="min-height: 20px; max-height: 20px; padding: 0 8px; font-size: 11px;">
+    <span>Deckwatch v0.0.2</span>
+    <span>·</span>
+    <a href="/docs/book/" target="_blank" class="text-secondary" style="text-decoration: none;">Help</a>
+    <span>·</span>
+    <a href="/api/docs" target="_blank" class="text-secondary" style="text-decoration: none;">API</a>
   </v-footer>
 
   <CreateNamespaceDialog v-model="showCreateNs" @created="onNsCreated" />

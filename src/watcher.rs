@@ -1,4 +1,5 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
+use std::time::Instant;
 
 use k8s_openapi::api::apps::v1::Deployment;
 use k8s_openapi::api::batch::v1::{Job, JobSpec};
@@ -9,8 +10,26 @@ use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
 use kube::api::{ListParams, Patch, PatchParams, PostParams};
 use kube::{Api, ResourceExt};
 
+use sea_orm::entity::prelude::*;
+use sea_orm::ActiveModelTrait;
+use sea_orm::ActiveValue::Set;
+
+use crate::entities::builds;
+use crate::entities::gitops_configs;
+use crate::kube_ext::deployment_phase;
 use crate::metrics;
 use crate::state::AppState;
+
+/// Return the current UTC time as a `DateTimeUtc` without requiring a direct
+/// `chrono` dependency.
+fn now_utc() -> DateTimeUtc {
+    use std::time::SystemTime;
+    let d = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .expect("system clock before UNIX epoch");
+    DateTimeUtc::from_timestamp(d.as_secs() as i64, d.subsec_nanos())
+        .expect("timestamp out of range")
+}
 
 const ANN_PREFIX: &str = "deckwatch.io";
 
@@ -40,6 +59,8 @@ pub async fn run_poller(state: AppState) {
     loop {
         interval.tick().await;
 
+        let cycle_start = Instant::now();
+
         if let Err(e) = poll_cycle(&state, &http_client).await {
             tracing::error!(error = %e, "watcher poll cycle failed");
         }
@@ -47,35 +68,49 @@ pub async fn run_poller(state: AppState) {
         if let Err(e) = monitor_builds(&state).await {
             tracing::error!(error = %e, "watcher build monitor failed");
         }
+
+        // Update resource gauges (best-effort; errors are logged, not fatal).
+        update_resource_gauges(&state).await;
+
+        metrics::record_gitops_poll_duration(cycle_start.elapsed().as_secs_f64());
     }
 }
 
 async fn poll_cycle(state: &AppState, http: &reqwest::Client) -> anyhow::Result<()> {
-    let namespaces = if state.allowed_namespaces.is_empty() {
-        let ns_api = state.namespaces_api();
-        let ns_list = ns_api.list(&ListParams::default()).await?;
-        ns_list.iter().map(|ns| ns.name_any()).collect::<Vec<_>>()
-    } else {
-        state.allowed_namespaces.clone()
-    };
+    // Query all gitops configs from the database instead of scanning
+    // deployment annotations.
+    let configs = gitops_configs::Entity::find().all(&state.db).await?;
 
-    for ns in &namespaces {
-        let dep_api: Api<Deployment> = Api::namespaced(state.kube_client.clone(), ns);
-        let deps = dep_api.list(&ListParams::default()).await?;
-
-        for dep in deps.items.iter() {
-            if get_ann(dep, "git-enabled") != Some("true") {
+    for config in configs.iter() {
+        // Parse application_id as "{ns}/{name}".
+        let (ns, dep_name) = match config.application_id.split_once('/') {
+            Some(pair) => pair,
+            None => {
+                tracing::warn!(
+                    application_id = %config.application_id,
+                    "invalid application_id format, expected 'namespace/name'"
+                );
                 continue;
             }
+        };
 
-            if get_ann(dep, "last-build-status") == Some("building") {
-                continue;
-            }
+        // Respect namespace restrictions.
+        if !state.is_namespace_allowed(ns) {
+            continue;
+        }
 
-            let name = dep.name_any();
-            if let Err(e) = check_and_build(state, http, ns, dep).await {
-                tracing::warn!(deployment = %name, namespace = %ns, error = %e, "git check failed");
-            }
+        // Skip if already building.
+        if config.last_build_status.as_deref() == Some("building") {
+            continue;
+        }
+
+        if let Err(e) = check_and_build(state, http, ns, dep_name, config).await {
+            tracing::warn!(
+                deployment = %dep_name,
+                namespace = %ns,
+                error = %e,
+                "git check failed"
+            );
         }
     }
 
@@ -86,43 +121,45 @@ async fn check_and_build(
     state: &AppState,
     http: &reqwest::Client,
     ns: &str,
-    dep: &Deployment,
+    dep_name: &str,
+    config: &gitops_configs::Model,
 ) -> anyhow::Result<()> {
-    let repo_url = get_ann(dep, "git-repo")
-        .ok_or_else(|| anyhow::anyhow!("missing git-repo annotation"))?;
-    let branch = get_ann(dep, "git-branch").unwrap_or("main");
-    let token = match get_ann(dep, "git-token-secret") {
-        Some(token_secret) if !token_secret.is_empty() => {
-            let secrets_api = state.secrets_api(ns)?;
-            match secrets_api.get(token_secret).await {
-                Ok(secret) => secret.data.as_ref()
-                    .and_then(|d| d.get("token"))
-                    .map(|v| String::from_utf8_lossy(&v.0).to_string())
-                    .unwrap_or_default(),
-                Err(_) => String::new(),
-            }
+    let repo_url = &config.repo_url;
+    let branch = &config.branch;
+    let token = if !config.token_secret.is_empty() {
+        let secrets_api = state.secrets_api(ns)?;
+        match secrets_api.get(&config.token_secret).await {
+            Ok(secret) => secret
+                .data
+                .as_ref()
+                .and_then(|d| d.get("token"))
+                .map(|v| String::from_utf8_lossy(&v.0).to_string())
+                .unwrap_or_default(),
+            Err(_) => String::new(),
         }
-        _ => String::new(),
+    } else {
+        String::new()
     };
 
     let remote_sha: String = check_remote_head(http, repo_url, branch, &token).await?;
-    let last_sha = get_ann(dep, "last-commit-sha").unwrap_or("");
+    let last_sha = config.last_commit_sha.as_deref().unwrap_or("");
 
     if remote_sha == last_sha {
         return Ok(());
     }
 
     let short_sha = &remote_sha[..7.min(remote_sha.len())];
-    let dep_name = dep.name_any();
 
-    let include_paths: Vec<&str> = get_ann(dep, "include-paths")
-        .filter(|s| !s.is_empty())
-        .map(|s| s.split(',').collect())
-        .unwrap_or_default();
-    let exclude_paths: Vec<&str> = get_ann(dep, "exclude-paths")
-        .filter(|s| !s.is_empty())
-        .map(|s| s.split(',').collect())
-        .unwrap_or_default();
+    let include_paths: Vec<&str> = if config.include_paths.is_empty() {
+        vec![]
+    } else {
+        config.include_paths.split(',').collect()
+    };
+    let exclude_paths: Vec<&str> = if config.exclude_paths.is_empty() {
+        vec![]
+    } else {
+        config.exclude_paths.split(',').collect()
+    };
 
     if !include_paths.is_empty() || !exclude_paths.is_empty() {
         if !last_sha.is_empty() {
@@ -130,8 +167,8 @@ async fn check_and_build(
                 check_paths_github(http, repo_url, &token, last_sha, &remote_sha).await
             {
                 let dominated_by_excludes = !changed.iter().any(|f| {
-                    let included = include_paths.is_empty()
-                        || include_paths.iter().any(|p| f.starts_with(p));
+                    let included =
+                        include_paths.is_empty() || include_paths.iter().any(|p| f.starts_with(p));
                     let excluded = exclude_paths.iter().any(|p| f.starts_with(p));
                     included && !excluded
                 });
@@ -141,8 +178,12 @@ async fn check_and_build(
                         commit = %short_sha,
                         "skipping build: no included paths changed"
                     );
-                    update_annotation(state, ns, &dep_name, "last-commit-sha", &remote_sha)
-                        .await?;
+                    // Update the DB row with the new commit SHA (skip build).
+                    update_gitops_config_field(&state.db, &config.application_id, |active| {
+                        active.last_commit_sha = Set(Some(remote_sha.clone()));
+                        active.updated_at = Set(now_utc());
+                    })
+                    .await?;
                     return Ok(());
                 }
             }
@@ -156,27 +197,51 @@ async fn check_and_build(
         "new commit detected, triggering build"
     );
 
-    let job_name: String = trigger_build(state, ns, dep, &remote_sha, &token).await?;
+    // We still need the Deployment object for trigger_build (Kaniko Job
+    // creation needs the dep name). Fetch it from K8s.
+    let dep_api = state.deployments_api(ns)?;
+    let dep = dep_api.get(dep_name).await?;
+
+    let job_name: String = trigger_build(state, ns, &dep, &remote_sha, &token).await?;
     // Counter incremented once per build kickoff; success/failure is recorded
     // later in monitor_builds when the Job completes.
     metrics::record_gitops_build(ns, "started");
 
-    let dep_api = state.deployments_api(ns)?;
-    let now = jiff::Timestamp::now().to_string();
-    let patch = serde_json::json!({
-        "metadata": {
-            "annotations": {
-                ann("last-commit-sha"): remote_sha,
-                ann("last-build-status"): "building",
-                ann("last-build-job"): job_name,
-                ann("last-build-time"): now,
-                ann("last-build-error"): "",
-            }
+    // Update the gitops_configs row with build status.
+    let now = now_utc();
+    update_gitops_config_field(&state.db, &config.application_id, |active| {
+        active.last_commit_sha = Set(Some(remote_sha.clone()));
+        active.last_build_status = Set(Some("building".to_string()));
+        active.last_build_job = Set(Some(job_name.clone()));
+        active.last_build_time = Set(Some(now));
+        active.last_build_error = Set(None);
+        active.updated_at = Set(now);
+    })
+    .await?;
+
+    // Ensure the application row exists before FK insert.
+    if let Err(e) = crate::db::ensure_application(&state.db, ns, &dep_name).await {
+        tracing::warn!(error = %e, "failed to ensure application row");
+    }
+
+    // Persist the build in the builds table so history survives Job TTL cleanup.
+    {
+        let build_row = builds::ActiveModel {
+            id: Set(uuid::Uuid::new_v4().to_string()),
+            application_id: Set(config.application_id.clone()),
+            job_name: Set(job_name.clone()),
+            commit_sha: Set(remote_sha.clone()),
+            image_tag: Set(short_sha.to_string()),
+            status: Set("building".to_string()),
+            started_at: Set(Some(now)),
+            completed_at: Set(None),
+            error_message: Set(None),
+            created_at: Set(now),
+        };
+        if let Err(e) = builds::Entity::insert(build_row).exec(&state.db).await {
+            tracing::warn!(error = %e, "failed to insert build row into database");
         }
-    });
-    dep_api
-        .patch(&dep_name, &PatchParams::default(), &Patch::Merge(patch))
-        .await?;
+    }
 
     Ok(())
 }
@@ -201,12 +266,7 @@ pub async fn check_remote_head(
         request = request.header("Authorization", format!("Basic {creds}"));
     }
 
-    let resp = request
-        .send()
-        .await?
-        .error_for_status()?
-        .text()
-        .await?;
+    let resp = request.send().await?.error_for_status()?.text().await?;
 
     let target_ref = format!("refs/heads/{branch}");
     for line in resp.lines() {
@@ -247,9 +307,7 @@ async fn check_paths_github(
     let repo = parts[0];
     let owner = parts[1];
 
-    let url = format!(
-        "https://api.github.com/repos/{owner}/{repo}/compare/{base}...{head}"
-    );
+    let url = format!("https://api.github.com/repos/{owner}/{repo}/compare/{base}...{head}");
 
     let resp = http
         .get(&url)
@@ -294,12 +352,20 @@ async fn trigger_build(
     let short_sha = &commit_sha[..7.min(commit_sha.len())];
     let job_name = format!("{dep_name}-build-{short_sha}");
 
-    let repo_url = get_ann(dep, "git-repo").unwrap_or("");
-    let branch = get_ann(dep, "git-branch").unwrap_or("main");
-    let dockerfile = get_ann(dep, "dockerfile-path").unwrap_or("Dockerfile");
-    let context = get_ann(dep, "docker-context").unwrap_or(".");
-    let oci_repo = get_oci_repository(dep).unwrap_or("");
-    let token_secret = get_ann(dep, "git-token-secret").unwrap_or("");
+    // Read config from the database.
+    let app_id = format!("{ns}/{dep_name}");
+    let config = gitops_configs::Entity::find()
+        .filter(gitops_configs::Column::ApplicationId.eq(&app_id))
+        .one(&state.db)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("no gitops config found for {app_id}"))?;
+
+    let repo_url = &config.repo_url;
+    let branch = &config.branch;
+    let dockerfile = &config.dockerfile_path;
+    let context = &config.docker_context;
+    let oci_repo = &config.oci_repository;
+    let token_secret = &config.token_secret;
 
     let repo_no_scheme = repo_url
         .strip_prefix("https://")
@@ -343,9 +409,7 @@ async fn trigger_build(
                     restart_policy: Some("Never".to_string()),
                     containers: vec![Container {
                         name: "kaniko".to_string(),
-                        image: Some(
-                            "gcr.io/kaniko-project/executor:latest".to_string(),
-                        ),
+                        image: Some("gcr.io/kaniko-project/executor:latest".to_string()),
                         args: Some(args),
                         env: if token_secret.is_empty() {
                             None
@@ -384,122 +448,258 @@ async fn trigger_build(
 }
 
 async fn monitor_builds(state: &AppState) -> anyhow::Result<()> {
-    let namespaces = if state.allowed_namespaces.is_empty() {
-        let ns_api = state.namespaces_api();
-        let ns_list = ns_api.list(&ListParams::default()).await?;
-        ns_list.iter().map(|ns| ns.name_any()).collect::<Vec<_>>()
-    } else {
-        state.allowed_namespaces.clone()
-    };
+    // Find all gitops configs that have an active build ("building" status).
+    let building_configs = gitops_configs::Entity::find()
+        .filter(gitops_configs::Column::LastBuildStatus.eq("building"))
+        .all(&state.db)
+        .await?;
 
-    for ns in &namespaces {
+    for config in building_configs.iter() {
+        let (ns, dep_name) = match config.application_id.split_once('/') {
+            Some(pair) => pair,
+            None => continue,
+        };
+
+        if !state.is_namespace_allowed(ns) {
+            continue;
+        }
+
+        let job_name = match config.last_build_job.as_deref() {
+            Some(j) if !j.is_empty() => j,
+            _ => continue,
+        };
+
+        // Check the Job status in Kubernetes.
         let jobs_api: Api<Job> = Api::namespaced(state.kube_client.clone(), ns);
-        let jobs = jobs_api
-            .list(&ListParams::default().labels("deckwatch.io/build=true"))
-            .await?;
+        let job = match jobs_api.get(job_name).await {
+            Ok(j) => j,
+            Err(_) => continue,
+        };
 
-        for job in jobs.items.iter() {
-            let dep_name = job
-                .metadata
-                .labels
-                .as_ref()
-                .and_then(|l| l.get("deckwatch.io/deployment"))
-                .cloned()
-                .unwrap_or_default();
+        let status = job.status.as_ref();
+        let succeeded = status.and_then(|s| s.succeeded).unwrap_or(0);
+        let failed = status.and_then(|s| s.failed).unwrap_or(0);
 
-            if dep_name.is_empty() {
-                continue;
-            }
+        if succeeded == 0 && failed == 0 {
+            continue;
+        }
 
-            let status = job.status.as_ref();
-            let succeeded = status.and_then(|s| s.succeeded).unwrap_or(0);
-            let failed = status.and_then(|s| s.failed).unwrap_or(0);
+        let now = now_utc();
 
-            if succeeded == 0 && failed == 0 {
-                continue;
-            }
+        if succeeded > 0 {
+            let oci_repo = &config.oci_repository;
+            let commit_sha = config.last_commit_sha.as_deref().unwrap_or("");
+            let short_sha = &commit_sha[..7.min(commit_sha.len())];
+            let new_image = format!("{oci_repo}:{short_sha}");
 
+            tracing::info!(
+                deployment = %dep_name,
+                image = %new_image,
+                "build succeeded, updating deployment image"
+            );
+
+            // Update the Deployment's image in K8s (this stays in K8s).
             let dep_api = state.deployments_api(ns)?;
-            let dep = match dep_api.get(&dep_name).await {
-                Ok(d) => d,
-                Err(_) => continue,
-            };
-
-            let current_status = get_ann(&dep, "last-build-status").unwrap_or("");
-            if current_status != "building" {
-                continue;
-            }
-
-            if succeeded > 0 {
-                let oci_repo = get_oci_repository(&dep).unwrap_or("");
-                let commit_sha = get_ann(&dep, "last-commit-sha").unwrap_or("");
-                let short_sha = &commit_sha[..7.min(commit_sha.len())];
-                let new_image = format!("{oci_repo}:{short_sha}");
-
-                tracing::info!(
-                    deployment = %dep_name,
-                    image = %new_image,
-                    "build succeeded, updating deployment image"
-                );
-
-                let image_patch = serde_json::json!({
-                    "spec": {
-                        "template": {
-                            "spec": {
-                                "containers": [{
-                                    "name": dep_name,
-                                    "image": new_image,
-                                }]
-                            }
+            let image_patch = serde_json::json!({
+                "spec": {
+                    "template": {
+                        "spec": {
+                            "containers": [{
+                                "name": dep_name,
+                                "image": new_image,
+                            }]
                         }
                     }
-                });
-                let _ = dep_api
-                    .patch(
-                        &dep_name,
-                        &PatchParams::default(),
-                        &Patch::Strategic(image_patch),
-                    )
-                    .await;
-
-                update_annotation(state, ns, &dep_name, "last-build-status", "success").await?;
-                metrics::record_gitops_build(ns, "success");
-            } else {
-                tracing::warn!(deployment = %dep_name, "build failed");
-                update_annotation(state, ns, &dep_name, "last-build-status", "failed").await?;
-                update_annotation(
-                    state,
-                    ns,
-                    &dep_name,
-                    "last-build-error",
-                    "Kaniko build job failed",
+                }
+            });
+            let _ = dep_api
+                .patch(
+                    dep_name,
+                    &PatchParams::default(),
+                    &Patch::Strategic(image_patch),
                 )
-                .await?;
-                metrics::record_gitops_build(ns, "failure");
-            }
+                .await;
+
+            // Update the gitops_configs row.
+            update_gitops_config_field(&state.db, &config.application_id, |active| {
+                active.last_build_status = Set(Some("success".to_string()));
+                active.last_build_time = Set(Some(now));
+                active.last_build_error = Set(None);
+                active.updated_at = Set(now);
+            })
+            .await?;
+            metrics::record_gitops_build(ns, "success");
+
+            // Update the builds DB row.
+            update_build_status(&state.db, job_name, "succeeded", None).await;
+        } else {
+            tracing::warn!(deployment = %dep_name, "build failed");
+
+            // Update the gitops_configs row.
+            update_gitops_config_field(&state.db, &config.application_id, |active| {
+                active.last_build_status = Set(Some("failed".to_string()));
+                active.last_build_error = Set(Some("Kaniko build job failed".to_string()));
+                active.last_build_time = Set(Some(now));
+                active.updated_at = Set(now);
+            })
+            .await?;
+            metrics::record_gitops_build(ns, "failure");
+
+            // Update the builds DB row.
+            update_build_status(
+                &state.db,
+                job_name,
+                "failed",
+                Some("Kaniko build job failed"),
+            )
+            .await;
         }
     }
 
     Ok(())
 }
 
-async fn update_annotation(
-    state: &AppState,
-    ns: &str,
-    dep_name: &str,
-    key: &str,
-    value: &str,
-) -> anyhow::Result<()> {
-    let dep_api = state.deployments_api(ns)?;
-    let patch = serde_json::json!({
-        "metadata": {
-            "annotations": {
-                ann(key): value
+/// Load the gitops_configs row for the given application_id, apply the
+/// provided mutations to the active model, and save it back. Returns an
+/// error if the row is not found.
+async fn update_gitops_config_field<F>(
+    db: &sea_orm::DatabaseConnection,
+    application_id: &str,
+    mutate: F,
+) -> anyhow::Result<()>
+where
+    F: FnOnce(&mut gitops_configs::ActiveModel),
+{
+    use sea_orm::QueryFilter;
+
+    let row = gitops_configs::Entity::find()
+        .filter(gitops_configs::Column::ApplicationId.eq(application_id))
+        .one(db)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("no gitops config found for {application_id}"))?;
+
+    let mut active: gitops_configs::ActiveModel = row.into();
+    mutate(&mut active);
+    active.update(db).await?;
+
+    Ok(())
+}
+
+/// Update a build row in the database by job name. Fire-and-forget — logs a
+/// warning on failure so the watcher loop is not interrupted.
+async fn update_build_status(
+    db: &sea_orm::DatabaseConnection,
+    job_name: &str,
+    status: &str,
+    error_message: Option<&str>,
+) {
+    use sea_orm::QueryFilter;
+
+    let row = match builds::Entity::find()
+        .filter(builds::Column::JobName.eq(job_name))
+        .one(db)
+        .await
+    {
+        Ok(Some(r)) => r,
+        Ok(None) => {
+            tracing::debug!(job_name, "no builds DB row found for job; skipping update");
+            return;
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, job_name, "failed to query builds table");
+            return;
+        }
+    };
+
+    let now_utc = now_utc();
+    let mut active: builds::ActiveModel = row.into();
+    active.status = Set(status.to_string());
+    active.completed_at = Set(Some(now_utc));
+    active.error_message = Set(error_message.map(|s| s.to_string()));
+
+    if let Err(e) = active.update(db).await {
+        tracing::warn!(error = %e, job_name, "failed to update build row in database");
+    }
+}
+
+/// Refresh all resource-count gauges. Runs once per poll cycle.
+///
+/// For deployments we break down by (namespace, status) so Prometheus can
+/// alert on degraded/failed counts. For ingresses we break down by namespace.
+/// The gitops watcher count is a simple scalar.
+async fn update_resource_gauges(state: &AppState) {
+    // ---- gitops watchers gauge ----
+    match gitops_configs::Entity::find().count(&state.db).await {
+        Ok(count) => metrics::set_gitops_watchers(count as f64),
+        Err(e) => tracing::debug!(error = %e, "failed to count gitops configs"),
+    }
+
+    // Determine which namespaces to scan.
+    let namespaces: Vec<String> = if state.allowed_namespaces.is_empty() {
+        // All namespaces mode: list namespaces from the cluster.
+        let ns_api = state.namespaces_api();
+        match ns_api.list(&ListParams::default()).await {
+            Ok(ns_list) => ns_list
+                .iter()
+                .filter_map(|ns| ns.metadata.name.clone())
+                .collect(),
+            Err(e) => {
+                tracing::debug!(error = %e, "failed to list namespaces for gauge update");
+                return;
             }
         }
-    });
-    dep_api
-        .patch(dep_name, &PatchParams::default(), &Patch::Merge(patch))
-        .await?;
-    Ok(())
+    } else {
+        state.allowed_namespaces.clone()
+    };
+
+    // Phase labels used for the deployment gauge. Order matches DeploymentPhase.
+    let phase_labels = [
+        "available",
+        "progressing",
+        "degraded",
+        "failed",
+        "scaled_to_zero",
+    ];
+
+    for ns in &namespaces {
+        // ---- deployments gauge ----
+        let dep_api: Api<Deployment> = Api::namespaced(state.kube_client.clone(), ns);
+        match dep_api.list(&ListParams::default()).await {
+            Ok(deps) => {
+                let mut counts: HashMap<&str, f64> = HashMap::new();
+                for label in &phase_labels {
+                    counts.insert(label, 0.0);
+                }
+                for dep in deps.iter() {
+                    let phase = deployment_phase(dep);
+                    let label = match phase {
+                        crate::kube_ext::DeploymentPhase::Available => "available",
+                        crate::kube_ext::DeploymentPhase::Progressing => "progressing",
+                        crate::kube_ext::DeploymentPhase::Degraded => "degraded",
+                        crate::kube_ext::DeploymentPhase::Failed => "failed",
+                        crate::kube_ext::DeploymentPhase::ScaledToZero => "scaled_to_zero",
+                    };
+                    *counts.entry(label).or_insert(0.0) += 1.0;
+                }
+                for (status, count) in &counts {
+                    metrics::set_deployments_managed(ns, status, *count);
+                }
+            }
+            Err(e) => {
+                tracing::debug!(namespace = %ns, error = %e, "failed to list deployments for gauge");
+            }
+        }
+
+        // ---- ingresses gauge ----
+        let ing_api: Api<k8s_openapi::api::networking::v1::Ingress> =
+            Api::namespaced(state.kube_client.clone(), ns);
+        match ing_api.list(&ListParams::default()).await {
+            Ok(ingresses) => {
+                metrics::set_ingresses_managed(ns, ingresses.items.len() as f64);
+            }
+            Err(e) => {
+                tracing::debug!(namespace = %ns, error = %e, "failed to list ingresses for gauge");
+            }
+        }
+    }
 }

@@ -30,26 +30,48 @@ struct DocPage {
 
 macro_rules! doc_page {
     ($slug:expr, $title:expr, $path:expr) => {
-        DocPage { slug: $slug, title: $title, body: include_str!($path) }
+        DocPage {
+            slug: $slug,
+            title: $title,
+            body: include_str!($path),
+        }
     };
 }
 
 const PAGES: &[DocPage] = &[
-    doc_page!("architecture",           "Architecture",              "../../docs/ARCHITECTURE.md"),
-    doc_page!("architecture-decision",  "Architecture Decision",     "../../docs/ARCHITECTURE_DECISION.md"),
-    doc_page!("product-roadmap",        "Product Roadmap",           "../../docs/PRODUCT_ROADMAP.md"),
-    doc_page!("auth",                   "Authentication",            "../../docs/AUTH.md"),
-    doc_page!("gitops",                 "GitOps",                    "../../docs/GITOPS.md"),
-    doc_page!("registry",               "OCI Registry",              "../../docs/REGISTRY.md"),
-    doc_page!("templates",              "Deployment Templates",      "../../docs/TEMPLATES.md"),
-    doc_page!("rollback",               "Rollback",                  "../../docs/ROLLBACK.md"),
-    doc_page!("settings",               "Settings",                  "../../docs/SETTINGS.md"),
-    doc_page!("metrics",                "Metrics",                   "../../docs/METRICS.md"),
-    doc_page!("metrics-visualization",  "Metrics Visualization",     "../../docs/METRICS_VISUALIZATION.md"),
-    doc_page!("prometheus-integration", "Prometheus Integration",    "../../docs/PROMETHEUS_INTEGRATION.md"),
-    doc_page!("ai-diagnostics",         "AI Diagnostics",            "../../docs/AI_DIAGNOSTICS.md"),
-    doc_page!("ux-improvements",        "UX Improvements",           "../../docs/UX_IMPROVEMENTS.md"),
-    doc_page!("testing",                "Testing",                   "../../docs/TESTING.md"),
+    doc_page!("architecture", "Architecture", "../../docs/ARCHITECTURE.md"),
+    doc_page!(
+        "architecture-decision",
+        "Architecture Decision",
+        "../../docs/ARCHITECTURE_DECISION.md"
+    ),
+    doc_page!("auth", "Authentication", "../../docs/AUTH.md"),
+    doc_page!("gitops", "GitOps", "../../docs/GITOPS.md"),
+    doc_page!("registry", "OCI Registry", "../../docs/REGISTRY.md"),
+    doc_page!(
+        "templates",
+        "Deployment Templates",
+        "../../docs/TEMPLATES.md"
+    ),
+    doc_page!("rollback", "Rollback", "../../docs/ROLLBACK.md"),
+    doc_page!("settings", "Settings", "../../docs/SETTINGS.md"),
+    doc_page!("metrics", "Metrics", "../../docs/METRICS.md"),
+    doc_page!(
+        "metrics-visualization",
+        "Metrics Visualization",
+        "../../docs/METRICS_VISUALIZATION.md"
+    ),
+    doc_page!(
+        "prometheus-integration",
+        "Prometheus Integration",
+        "../../docs/PROMETHEUS_INTEGRATION.md"
+    ),
+    doc_page!(
+        "ai-diagnostics",
+        "AI Diagnostics",
+        "../../docs/AI_DIAGNOSTICS.md"
+    ),
+    doc_page!("testing", "Testing", "../../docs/TESTING.md"),
 ];
 
 #[derive(Serialize)]
@@ -113,7 +135,10 @@ pub async fn list_pages() -> Json<DocsIndexResponse> {
     Json(DocsIndexResponse {
         pages: PAGES
             .iter()
-            .map(|p| DocsIndexEntry { slug: p.slug, title: p.title })
+            .map(|p| DocsIndexEntry {
+                slug: p.slug,
+                title: p.title,
+            })
             .collect(),
     })
 }

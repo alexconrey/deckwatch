@@ -5,6 +5,20 @@ import type {
   IngressListResponse,
 } from "@/types/api";
 
+export interface IngressClassInfo {
+  name: string;
+  is_default: boolean;
+}
+
+export interface IngressClassListResponse {
+  classes: IngressClassInfo[];
+}
+
+export const ingressClassesApi = {
+  list: () =>
+    apiFetch<IngressClassListResponse>("/ingressclasses"),
+};
+
 export const ingressesApi = {
   list: (ns: string) =>
     apiFetch<IngressListResponse>(`/namespaces/${ns}/ingresses`),

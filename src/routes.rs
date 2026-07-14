@@ -1,17 +1,19 @@
+use axum::extract::FromRequest;
 use axum::routing::{get, post};
 use axum::Router;
-use axum::extract::FromRequest;
 use tower_http::compression::CompressionLayer;
 use tower_http::cors::CorsLayer;
 use tower_http::services::{ServeDir, ServeFile};
 use tower_http::trace::TraceLayer;
 
+use crate::audit;
 use crate::auth::{self, AuthConfig};
 use crate::handlers::registry::RegistryStore;
-use crate::handlers::{ admission, promote, preview, tracing_handler, license, ai_fix, autoscaling, monitoring, docs, exec, portforward,
-    addons, applications, configmaps_ui, cronjobs, deployments, deployments_ux, diagnostics,
-    events, git, gitops, health, ingresses, logs, namespaces, nodes, pods, registry, registry_ui,
-    resource_metrics, secrets, settings, templates,
+use crate::handlers::{
+    addons, admission, ai_fix, applications, autoscaling, configmaps_ui, cronjobs, deployments,
+    deployments_ux, diagnostics, docs, events, exec, git, gitops, health, ingresses, license, logs,
+    monitoring, namespaces, nodes, pods, portforward, preview, promote, registry, registry_ui,
+    resource_metrics, secrets, settings, templates, tracing_handler,
 };
 use crate::metrics;
 use crate::state::AppState;
@@ -27,10 +29,7 @@ pub fn build_router(
     // the same auth surface. `/v2/*` OCI paths stay unlayered because docker
     // clients speak the OCI token flow (`WWW-Authenticate: Bearer realm=...`)
     // and would break if we intercepted them with a JWT check.
-    let auth_layer = axum::middleware::from_fn_with_state(
-        auth_config,
-        auth::require_auth,
-    );
+    let auth_layer = axum::middleware::from_fn_with_state(auth_config, auth::require_auth);
 
     // Public API routes (health, docs, settings-read for auth bootstrap,
     // frontend-metrics ingestion). These must remain reachable without a
@@ -41,8 +40,12 @@ pub fn build_router(
     // which is a no-op when `auth_config.enabled` is false.
     let public_api = Router::new()
         .route("/api/healthz", get(health::healthz))
+        .route("/api/features", get(health::features))
         .route("/api/readyz", get(health::readyz))
-        .route("/api/frontend-metrics", post(metrics::ingest_frontend_metrics))
+        .route(
+            "/api/frontend-metrics",
+            post(metrics::ingest_frontend_metrics),
+        )
         .route("/api/settings", get(settings::get_settings))
         .route("/api/openapi.yaml", get(docs::openapi_yaml))
         .route("/api/docs", get(docs::swagger_ui))
@@ -51,7 +54,10 @@ pub fn build_router(
         .with_state(state.clone());
 
     let private_api = Router::new()
-        .route("/api/namespaces", get(namespaces::list_namespaces).post(namespaces::create_namespace))
+        .route(
+            "/api/namespaces",
+            get(namespaces::list_namespaces).post(namespaces::create_namespace),
+        )
         .route(
             "/api/namespaces/{ns}/deployments",
             get(deployments::list).post(deployments::create),
@@ -90,6 +96,7 @@ pub fn build_router(
             "/api/namespaces/{ns}/deployments/{name}/pods",
             get(pods::list_for_deployment),
         )
+        .route("/api/ingressclasses", get(ingresses::list_classes))
         .route(
             "/api/namespaces/{ns}/ingresses",
             get(ingresses::list).post(ingresses::create),
@@ -114,10 +121,7 @@ pub fn build_router(
             "/api/namespaces/{ns}/deployments/{name}/gitops/builds",
             get(gitops::list_builds),
         )
-        .route(
-            "/api/namespaces/{ns}/pods/{pod_name}",
-            get(pods::get),
-        )
+        .route("/api/namespaces/{ns}/pods/{pod_name}", get(pods::get))
         .route(
             "/api/namespaces/{ns}/pods/{pod_name}/logs",
             get(logs::stream_logs),
@@ -133,9 +137,14 @@ pub fn build_router(
         .route("/api/addons", get(addons::list))
         .route(
             "/api/namespaces/{ns}/deployments/{name}/addons/{addon_id}",
-            post(addons::attach).patch(addons::update).delete(addons::detach),
+            post(addons::attach)
+                .patch(addons::update)
+                .delete(addons::detach),
         )
-        .route("/api/templates", get(templates::list).put(templates::update))
+        .route(
+            "/api/templates",
+            get(templates::list).put(templates::update),
+        )
         .route(
             "/api/namespaces/{ns}/deployments/{name}/history",
             get(deployments_ux::history),
@@ -162,15 +171,11 @@ pub fn build_router(
         )
         .route(
             "/api/namespaces/{ns}/diagnostics/{job_name}/result",
-            get(diagnostics::get_diagnostic_result))
-        .route("/api/namespaces/{ns}/diagnostics/{job_name}/stream", get(diagnostics::stream_diagnostic_output),
+            get(diagnostics::get_diagnostic_result),
         )
-        // Shared per-namespace AI-job quota (diagnostics + ai-fix combined).
-        // Cheap read; the frontend polls this before rendering the button so
-        // operators see a live "N remaining" chip.
         .route(
-            "/api/namespaces/{ns}/ai-quota",
-            get(diagnostics::get_ai_quota),
+            "/api/namespaces/{ns}/diagnostics/{job_name}/stream",
+            get(diagnostics::stream_diagnostic_output),
         )
         .route(
             "/api/namespaces/{ns}/applications",
@@ -197,35 +202,91 @@ pub fn build_router(
             "/api/namespaces/{ns}/pods/metrics",
             get(resource_metrics::list_pod_metrics),
         )
-        .route("/api/nodes/metrics", get(resource_metrics::list_node_metrics))
-        .route("/api/namespaces/{ns}/secrets", get(secrets::list).post(secrets::create))
-        .route("/api/namespaces/{ns}/secrets/{name}", get(secrets::get).put(secrets::update).delete(secrets::delete))
-        .route("/api/namespaces/{ns}/configmaps", get(configmaps_ui::list).post(configmaps_ui::create))
-        .route("/api/namespaces/{ns}/configmaps/{name}", get(configmaps_ui::get).put(configmaps_ui::update).delete(configmaps_ui::delete))
+        .route(
+            "/api/nodes/metrics",
+            get(resource_metrics::list_node_metrics),
+        )
+        .route(
+            "/api/namespaces/{ns}/secrets",
+            get(secrets::list).post(secrets::create),
+        )
+        .route(
+            "/api/namespaces/{ns}/secrets/{name}",
+            get(secrets::get)
+                .put(secrets::update)
+                .delete(secrets::delete),
+        )
+        .route(
+            "/api/namespaces/{ns}/configmaps",
+            get(configmaps_ui::list).post(configmaps_ui::create),
+        )
+        .route(
+            "/api/namespaces/{ns}/configmaps/{name}",
+            get(configmaps_ui::get)
+                .put(configmaps_ui::update)
+                .delete(configmaps_ui::delete),
+        )
         // Job pods (for build logs)
-        .route("/api/namespaces/{ns}/jobs/{job_name}/pods", get(gitops::list_job_pods))
+        .route(
+            "/api/namespaces/{ns}/jobs/{job_name}/pods",
+            get(gitops::list_job_pods),
+        )
         // Revision YAML
-        .route("/api/namespaces/{ns}/deployments/{name}/history/{revision}/yaml", get(deployments_ux::revision_yaml))
+        .route(
+            "/api/namespaces/{ns}/deployments/{name}/history/{revision}/yaml",
+            get(deployments_ux::revision_yaml),
+        )
+        // Validate update (dry-run for edit-existing flow)
+        .route(
+            "/api/namespaces/{ns}/deployments/{name}/validate",
+            post(deployments_ux::validate_update),
+        )
+        // Auto-rollback toggle
+        .route(
+            "/api/namespaces/{ns}/deployments/{name}/auto-rollback",
+            post(deployments_ux::set_auto_rollback),
+        )
         // AI Fix
-        .route("/api/namespaces/{ns}/applications/{name}/ai-fix", post(ai_fix::create_ai_fix))
-        // Prometheus Monitoring
+        .route(
+            "/api/namespaces/{ns}/applications/{name}/ai-fix",
+            post(ai_fix::create_ai_fix),
+        )
+        // Prometheus Monitoring (runtime-gated via settings ConfigMap)
         .route(
             "/api/namespaces/{ns}/deployments/{name}/monitor",
-            get(monitoring::get).put(monitoring::upsert).delete(monitoring::delete),
+            get(monitoring::get)
+                .put(monitoring::upsert)
+                .delete(monitoring::delete),
         )
         // HPA Autoscaling
         .route(
             "/api/namespaces/{ns}/deployments/{name}/hpa",
-            get(autoscaling::get).put(autoscaling::upsert).delete(autoscaling::delete),
+            get(autoscaling::get)
+                .put(autoscaling::upsert)
+                .delete(autoscaling::delete),
         )
         // Port forward
-        .route("/api/namespaces/{ns}/pods/{pod_name}/portforward", get(portforward::portforward_ws))
-        .route("/api/namespaces/{ns}/pods/{pod_name}/proxy/{port}", axum::routing::any(portforward::portforward_http_root))
-        .route("/api/namespaces/{ns}/pods/{pod_name}/proxy/{port}/{*rest}", axum::routing::any(portforward::portforward_http))
+        .route(
+            "/api/namespaces/{ns}/pods/{pod_name}/portforward",
+            get(portforward::portforward_ws),
+        )
+        .route(
+            "/api/namespaces/{ns}/pods/{pod_name}/proxy/{port}",
+            axum::routing::any(portforward::portforward_http_root),
+        )
+        .route(
+            "/api/namespaces/{ns}/pods/{pod_name}/proxy/{port}/{*rest}",
+            axum::routing::any(portforward::portforward_http),
+        )
         // Container exec
-        .route("/api/namespaces/{ns}/pods/{pod_name}/exec", get(exec::exec_ws))
+        .route(
+            "/api/namespaces/{ns}/pods/{pod_name}/exec",
+            get(exec::exec_ws),
+        )
         // Notifications
         .route("/api/notifications/test", post(settings::test_notification))
+        // Audit log
+        .route("/api/audit", get(audit::list_audit_logs))
         .with_state(state)
         .layer(auth_layer.clone());
 
@@ -260,10 +321,7 @@ pub fn build_router(
 
     if let Some(store) = registry_store {
         let oci = Router::new()
-            .route(
-                "/v2/",
-                get(oci_root).head(oci_root),
-            )
+            .route("/v2/", get(oci_root).head(oci_root))
             .route(
                 "/v2/{*rest}",
                 get(oci_dispatch_get)
@@ -284,8 +342,7 @@ pub fn build_router(
     // `append_index_html_on_directories(true)` makes `/docs/book/` serve
     // `index.html` instead of a directory listing.
     if std::path::Path::new(book_dir).is_dir() {
-        let book = ServeDir::new(book_dir)
-            .append_index_html_on_directories(true);
+        let book = ServeDir::new(book_dir).append_index_html_on_directories(true);
         router = router.nest_service("/docs/book", book);
     } else {
         tracing::warn!(
@@ -296,8 +353,7 @@ pub fn build_router(
     }
 
     let index_file = format!("{frontend_dir}/index.html");
-    let spa = ServeDir::new(frontend_dir)
-        .not_found_service(ServeFile::new(index_file));
+    let spa = ServeDir::new(frontend_dir).not_found_service(ServeFile::new(index_file));
 
     router
         .fallback_service(spa)
@@ -307,7 +363,9 @@ pub fn build_router(
         .layer(TraceLayer::new_for_http())
 }
 
-async fn oci_root(axum::extract::State(_): axum::extract::State<RegistryStore>) -> axum::response::Response {
+async fn oci_root(
+    axum::extract::State(_): axum::extract::State<RegistryStore>,
+) -> axum::response::Response {
     registry::v2_root().await
 }
 
@@ -368,7 +426,10 @@ fn split_oci_path(rest: &str) -> Option<(String, OciAction)> {
         if name.is_empty() || reference.is_empty() {
             return None;
         }
-        return Some((name.to_string(), OciAction::Manifests(reference.to_string())));
+        return Some((
+            name.to_string(),
+            OciAction::Manifests(reference.to_string()),
+        ));
     }
     if let Some(name) = rest.strip_suffix("/tags/list") {
         if !name.is_empty() {
@@ -403,9 +464,7 @@ async fn oci_dispatch_get(
         OciAction::Manifests(reference) => {
             registry::get_manifest(State(store), AxumPath((name, reference))).await
         }
-        OciAction::Blob(digest) => {
-            registry::get_blob(State(store), AxumPath((name, digest))).await
-        }
+        OciAction::Blob(digest) => registry::get_blob(State(store), AxumPath((name, digest))).await,
         OciAction::TagsList => registry::list_tags(State(store), AxumPath(name)).await,
         OciAction::UploadSession(uuid) => {
             registry::get_upload_status(State(store), AxumPath((name, uuid))).await
@@ -442,7 +501,9 @@ async fn oci_dispatch_post(
         return route_not_found();
     };
     match action {
-        OciAction::Uploads => registry::start_upload(State(store), AxumPath(name), Query(q), body).await,
+        OciAction::Uploads => {
+            registry::start_upload(State(store), AxumPath(name), Query(q), body).await
+        }
         _ => route_not_found(),
     }
 }
@@ -478,7 +539,13 @@ async fn oci_dispatch_put(
     };
     match action {
         OciAction::Manifests(reference) => {
-            registry::put_manifest(State(store), AxumPath((name, reference)), HeaderMap::new(), body).await
+            registry::put_manifest(
+                State(store),
+                AxumPath((name, reference)),
+                HeaderMap::new(),
+                body,
+            )
+            .await
         }
         OciAction::UploadSession(uuid) => {
             let Some(q) = query else {
@@ -533,15 +600,15 @@ async fn registry_ui_dispatch_get(
     AxumPath(rest): AxumPath<String>,
 ) -> Response {
     match split_ui_path(&rest) {
-        Some(UiAction::Tags(name)) => {
-            registry_ui::list_tags(State(store), AxumPath(name)).await
-        }
+        Some(UiAction::Tags(name)) => registry_ui::list_tags(State(store), AxumPath(name)).await,
         Some(UiAction::Manifest(name, tag)) => {
             registry_ui::get_manifest_detail(State(store), AxumPath((name, tag))).await
         }
         None => (
             StatusCode::NOT_FOUND,
-            axum::Json(serde_json::json!({"error":"not_found","message":"unknown registry UI path"})),
+            axum::Json(
+                serde_json::json!({"error":"not_found","message":"unknown registry UI path"}),
+            ),
         )
             .into_response(),
     }

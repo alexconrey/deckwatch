@@ -23,11 +23,21 @@ const emit = defineEmits<{
   "open-portforward": [podName: string]; "open-terminal": [payload: { podName: string; containers: ContainerStatusSummary[] }];
 }>();
 
-const expandedPod = ref<string | null>(null);
+const expandedLogPods = ref<Set<string>>(new Set());
 const expanded = ref<string[]>([]);
 
 const toggleLogs = (podName: string) => {
-  expandedPod.value = expandedPod.value === podName ? null : podName;
+  const next = new Set(expandedLogPods.value);
+  if (next.has(podName)) {
+    next.delete(podName);
+  } else {
+    next.add(podName);
+    // Ensure the row is also expanded so the expanded-row slot renders
+    if (!expanded.value.includes(podName)) {
+      expanded.value = [...expanded.value, podName];
+    }
+  }
+  expandedLogPods.value = next;
 };
 
 const openPod = (podName: string) => {
@@ -303,7 +313,7 @@ const stateColor = (state: string): string => {
         icon="mdi-console"
         size="x-small"
         variant="text"
-        :color="expandedPod === item.name ? 'primary' : undefined"
+        :color="expandedLogPods.has(item.name) ? 'primary' : undefined"
         @click="toggleLogs(item.name)"
       />
     </template>
@@ -375,14 +385,16 @@ const stateColor = (state: string): string => {
               <span v-else class="text-secondary">0</span>
             </template>
           </v-data-table>
+
+          <div v-if="expandedLogPods.has(item.name)" class="mt-3">
+            <LogViewer
+              :namespace="namespace"
+              :pod-name="item.name"
+              :pod-phase="item.phase"
+            />
+          </div>
         </td>
       </tr>
-    </template>
-
-    <template v-slot:bottom>
-      <div v-if="expandedPod">
-        <LogViewer :namespace="namespace" :pod-name="expandedPod" />
-      </div>
     </template>
   </v-data-table>
 </template>

@@ -180,9 +180,7 @@ pub async fn get_manifest_detail(
         return not_found("manifest not readable");
     };
 
-    let config = manifest
-        .get("config")
-        .and_then(|c| layer_from_json(c));
+    let config = manifest.get("config").and_then(|c| layer_from_json(c));
 
     let layers: Vec<LayerSummary> = manifest
         .get("layers")
@@ -190,8 +188,8 @@ pub async fn get_manifest_detail(
         .map(|arr| arr.iter().filter_map(layer_from_json).collect())
         .unwrap_or_default();
 
-    let total_size = config.as_ref().map(|c| c.size).unwrap_or(0)
-        + layers.iter().map(|l| l.size).sum::<u64>();
+    let total_size =
+        config.as_ref().map(|c| c.size).unwrap_or(0) + layers.iter().map(|l| l.size).sum::<u64>();
 
     Json(ManifestDetailResponse {
         name,
@@ -235,8 +233,15 @@ fn layer_from_json(v: &serde_json::Value) -> Option<LayerSummary> {
     })
 }
 
-fn accumulate_blob_sizes(manifest: &serde_json::Value, out: &mut std::collections::BTreeSet<String>) {
-    if let Some(config) = manifest.get("config").and_then(|c| c.get("digest")).and_then(|d| d.as_str()) {
+fn accumulate_blob_sizes(
+    manifest: &serde_json::Value,
+    out: &mut std::collections::BTreeSet<String>,
+) {
+    if let Some(config) = manifest
+        .get("config")
+        .and_then(|c| c.get("digest"))
+        .and_then(|d| d.as_str())
+    {
         out.insert(config.to_string());
     }
     if let Some(layers) = manifest.get("layers").and_then(|l| l.as_array()) {

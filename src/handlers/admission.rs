@@ -12,8 +12,8 @@
 //! server — the handler must never *deny* through a bug.
 
 use axum::extract::State;
-use axum::Json;
 use axum::response::IntoResponse;
+use axum::Json;
 use k8s_openapi::api::apps::v1::Deployment;
 use k8s_openapi::api::core::v1::{Container, ResourceRequirements};
 use k8s_openapi::api::networking::v1::Ingress;
@@ -267,8 +267,7 @@ fn evaluate(req: &AdmissionRequest, cfg: &WebhookConfig) -> AdmissionResponse {
 }
 
 fn is_deckwatch_actor(user: &UserInfo) -> bool {
-    (user.username.starts_with("system:serviceaccount:")
-        && user.username.contains("deckwatch"))
+    (user.username.starts_with("system:serviceaccount:") && user.username.contains("deckwatch"))
         || user.username == DECKWATCH_FIELD_MANAGER
 }
 
@@ -278,8 +277,12 @@ fn check_deployment(dep: &Deployment, cfg: &WebhookPolicies, warnings: &mut Vec<
     let name = dep.metadata.name.as_deref().unwrap_or("(unnamed)");
     let ns = dep.metadata.namespace.as_deref().unwrap_or("(no-ns)");
 
-    let Some(spec) = dep.spec.as_ref() else { return; };
-    let Some(pod_spec) = spec.template.spec.as_ref() else { return; };
+    let Some(spec) = dep.spec.as_ref() else {
+        return;
+    };
+    let Some(pod_spec) = spec.template.spec.as_ref() else {
+        return;
+    };
 
     for container in &pod_spec.containers {
         if cfg.memory_limit_lt_request {

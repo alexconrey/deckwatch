@@ -34,7 +34,7 @@ use serde::Serialize;
 
 use crate::error::AppError;
 use crate::handlers::git_provider::{
-    detect_provider, normalize_repo_url, GitHub, GitLab, Bitbucket, GitProvider, WebhookError,
+    detect_provider, normalize_repo_url, Bitbucket, GitHub, GitLab, GitProvider, WebhookError,
     WebhookEvent,
 };
 use crate::handlers::gitops::webhook_secret_name;
@@ -151,26 +151,25 @@ pub async fn receive(
             // configured, refuse — accepting an unsigned webhook that
             // triggers a build would let anyone kick a deploy just by
             // knowing the repo URL.
-            let secret_value =
-                match load_webhook_secret(&state, ns, &dep_name).await {
-                    Ok(Some(s)) => s,
-                    Ok(None) => {
-                        skipped.push(SkippedDeployment {
-                            namespace: ns.clone(),
-                            deployment: dep_name.clone(),
-                            reason: "no webhook secret configured".to_string(),
-                        });
-                        continue;
-                    }
-                    Err(e) => {
-                        skipped.push(SkippedDeployment {
-                            namespace: ns.clone(),
-                            deployment: dep_name.clone(),
-                            reason: format!("failed to load secret: {e}"),
-                        });
-                        continue;
-                    }
-                };
+            let secret_value = match load_webhook_secret(&state, ns, &dep_name).await {
+                Ok(Some(s)) => s,
+                Ok(None) => {
+                    skipped.push(SkippedDeployment {
+                        namespace: ns.clone(),
+                        deployment: dep_name.clone(),
+                        reason: "no webhook secret configured".to_string(),
+                    });
+                    continue;
+                }
+                Err(e) => {
+                    skipped.push(SkippedDeployment {
+                        namespace: ns.clone(),
+                        deployment: dep_name.clone(),
+                        reason: format!("failed to load secret: {e}"),
+                    });
+                    continue;
+                }
+            };
 
             // Now do the *authoritative* signature check against this
             // deployment's secret. This is the only check that gates a
@@ -208,14 +207,8 @@ pub async fn receive(
             // Signature OK. Kick off a build using the same helper the
             // manual trigger endpoint uses, so bookkeeping stays uniform.
             let token = load_git_token(&state, ns, dep).await;
-            match crate::watcher::trigger_build_public(
-                &state,
-                ns,
-                dep,
-                &event.commit_sha,
-                &token,
-            )
-            .await
+            match crate::watcher::trigger_build_public(&state, ns, dep, &event.commit_sha, &token)
+                .await
             {
                 Ok(job_name) => {
                     metrics::record_gitops_build(ns, "started");

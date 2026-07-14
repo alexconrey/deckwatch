@@ -1,9 +1,8 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, onUnmounted, watch } from "vue";
+import { computed, ref, onUnmounted, watch } from "vue";
 import { diagnosticsApi } from "@/api/diagnostics";
 import { ApiError } from "@/api/client";
 import type {
-  AiQuotaSnapshot,
   DiagAgent,
   DiagStatus,
   DiagnosticStatusResponse,
@@ -43,15 +42,6 @@ const jobDetail = ref<DiagnosticStatusResponse | null>(null);
 const jobOutput = ref<string>("");
 const streamPhase = ref<string | null>(null);
 const streaming = ref(false);
-// Rate-limit snapshot for this namespace. Fetched on mount so the chip
-// renders immediately with the truth from the server; refreshed after
-// every submit (successful or 429) so the operator can see the counter
-// tick down or the retry window shrink.
-const quota = ref<AiQuotaSnapshot | null>(null);
-// 429 error path: keep the message + retry countdown separate from
-// submitError so we can render it as a distinct "over quota" affordance
-// rather than a generic red banner.
-const rateLimitedUntil = ref<number | null>(null); // ms epoch
 let source: EventSource | null = null;
 let pollHandle: ReturnType<typeof setInterval> | null = null;
 // True once the SSE stream has produced at least one useful event. Guards
@@ -119,66 +109,6 @@ const outputDisplay = computed(() => {
   return "";
 });
 
-// Quota chip cosmetics: neutral when there's plenty of headroom, warning
-// as it approaches empty, error once the limiter is going to reject. The
-// chip is intentionally always visible when the feature is available so
-// operators build a mental model of the cap before hitting it.
-const quotaColor = computed(() => {
-  const q = quota.value;
-  if (!q) return "info";
-  if (q.remaining === 0) return "error";
-  if (q.remaining <= Math.max(1, Math.floor(q.limit * 0.25))) return "warning";
-  return "info";
-});
-
-const quotaLabel = computed(() => {
-  const q = quota.value;
-  if (!q) return "";
-  return `${q.remaining}/${q.limit} AI jobs left this hour`;
-});
-
-const rateLimitCountdown = ref<string | null>(null);
-let countdownHandle: ReturnType<typeof setInterval> | null = null;
-
-function startCountdown(untilMs: number) {
-  stopCountdown();
-  const tick = () => {
-    const remaining = Math.max(0, Math.floor((untilMs - Date.now()) / 1000));
-    if (remaining === 0) {
-      rateLimitCountdown.value = null;
-      rateLimitedUntil.value = null;
-      stopCountdown();
-      // The window has probably freed up a slot — refresh so the chip
-      // updates without waiting for the operator to try again.
-      void loadQuota();
-      return;
-    }
-    const mins = Math.floor(remaining / 60);
-    const secs = remaining % 60;
-    rateLimitCountdown.value =
-      mins > 0 ? `${mins}m ${secs}s` : `${secs}s`;
-  };
-  tick();
-  countdownHandle = setInterval(tick, 1000);
-}
-
-function stopCountdown() {
-  if (countdownHandle) {
-    clearInterval(countdownHandle);
-    countdownHandle = null;
-  }
-}
-
-async function loadQuota() {
-  try {
-    quota.value = await diagnosticsApi.quota(props.namespace);
-  } catch {
-    // Non-fatal: chip just stays hidden. Don't blast an error dialog for
-    // a quota lookup — the operator will still see a real 429 on submit
-    // if the limiter engages.
-  }
-}
-
 function selectAgent(agent: DiagAgent) {
   if (agent === "codex" && !codexEnabled.value) return;
   if (agent === "claude" && !claudeEnabled.value) return;
@@ -196,11 +126,6 @@ function changeAgent() {
 
 function onDiagnoseClick() {
   submitError.value = null;
-  if (rateLimitedUntil.value && rateLimitedUntil.value > Date.now()) {
-    // Guard against double-clicks while over quota — the button is disabled
-    // in that state anyway, but a fast keyboard user could beat the render.
-    return;
-  }
   if (savedAgent.value) {
     void submitDiagnostic(savedAgent.value);
   } else {
@@ -228,46 +153,14 @@ async function submitDiagnostic(agent: DiagAgent) {
     });
     jobName.value = resp.job_name;
     jobStatus.value = resp.status;
-    quota.value = resp.quota;
     connectStream(resp.job_name);
   } catch (e) {
-    if (e instanceof ApiError && e.status === 429) {
-      // Backend enforces the sliding-window cap. It returns the retry
-      // window in the JSON body AND in the Retry-After header — we only
-      // see the body here (fetch doesn't surface headers unless caller
-      // switches to raw fetch), which is fine because the body is
-      // authoritative.
-      const body = e.body as unknown as {
-        retry_after_secs?: number;
-        limit?: number;
-        used?: number;
-        message?: string;
-      };
-      const retrySecs = body.retry_after_secs ?? 60;
-      rateLimitedUntil.value = Date.now() + retrySecs * 1000;
-      startCountdown(rateLimitedUntil.value);
-      submitError.value =
-        body.message ??
-        `AI job quota exceeded for this namespace. Try again in ${retrySecs}s.`;
-      // Reflect the exhausted state immediately without a round-trip.
-      if (body.limit !== undefined && body.used !== undefined) {
-        quota.value = {
-          limit: body.limit,
-          used: body.used,
-          remaining: 0,
-          reset_in_secs: retrySecs,
-        };
-      } else {
-        void loadQuota();
-      }
-    } else {
-      submitError.value =
-        e instanceof ApiError
-          ? e.body?.message ?? e.message
-          : e instanceof Error
-            ? e.message
-            : "Failed to start diagnostic";
-    }
+    submitError.value =
+      e instanceof ApiError
+        ? e.body?.message ?? e.message
+        : e instanceof Error
+          ? e.message
+          : "Failed to start diagnostic";
   } finally {
     submitting.value = false;
   }
@@ -461,101 +354,36 @@ const agentLabel = (a: DiagAgent | null | undefined) => {
   return "";
 };
 
-const buttonDisabled = computed(
-  () =>
-    submitting.value ||
-    (quota.value?.remaining === 0) ||
-    (rateLimitedUntil.value !== null && rateLimitedUntil.value > Date.now()),
-);
+const buttonDisabled = computed(() => submitting.value);
 
-const disabledTooltip = computed(() => {
-  if (rateLimitedUntil.value && rateLimitCountdown.value) {
-    return `AI job quota exhausted — retry in ${rateLimitCountdown.value}`;
-  }
-  if (quota.value?.remaining === 0) {
-    return `AI job quota exhausted for this namespace (${quota.value.used}/${quota.value.limit} used this hour)`;
-  }
-  return "";
-});
-
-// Reset any active job if the pod/container context changes; the namespace
-// change also invalidates the quota chip, so refetch when that flips.
+// Reset any active job if the pod/container context changes.
 watch(
   () => `${props.namespace}/${props.podName}/${props.container ?? ""}`,
   () => {
     dismissResult();
-    void loadQuota();
   },
 );
-
-onMounted(() => {
-  // Only bother loading the quota if the feature is even visible to this
-  // user — no need to poke the endpoint from every pod list row.
-  if (showButton.value) {
-    void loadQuota();
-  }
-});
-
-// Load the quota lazily when the button becomes visible: some pods only
-// transition into a crash state after mount, and we don't want to prefetch
-// for every healthy pod on the page.
-watch(showButton, (v) => {
-  if (v && !quota.value) {
-    void loadQuota();
-  }
-});
 
 onUnmounted(() => {
   disconnectStream();
   stopPolling();
-  stopCountdown();
 });
 </script>
 
 <template>
   <div v-if="showButton" class="diagnose-container">
     <div class="d-flex align-center flex-wrap ga-2">
-      <v-tooltip
-        :text="disabledTooltip"
-        location="bottom"
-        :disabled="!buttonDisabled || !disabledTooltip"
-      >
-        <template #activator="{ props: tipProps }">
-          <div v-bind="tipProps" class="d-inline-block">
-            <v-btn
-              color="primary"
-              variant="tonal"
-              prepend-icon="mdi-robot"
-              :loading="submitting"
-              :disabled="buttonDisabled"
-              size="small"
-              @click="onDiagnoseClick"
-            >
-              Diagnose with AI
-            </v-btn>
-          </div>
-        </template>
-      </v-tooltip>
-
-      <v-chip
-        v-if="quota"
-        :color="quotaColor"
-        size="x-small"
+      <v-btn
+        color="primary"
         variant="tonal"
-        :prepend-icon="quota.remaining === 0 ? 'mdi-timer-sand' : 'mdi-counter'"
+        prepend-icon="mdi-robot"
+        :loading="submitting"
+        :disabled="buttonDisabled"
+        size="small"
+        @click="onDiagnoseClick"
       >
-        {{ quotaLabel }}
-      </v-chip>
-
-      <v-chip
-        v-if="rateLimitCountdown"
-        color="error"
-        size="x-small"
-        variant="flat"
-        prepend-icon="mdi-timer-outline"
-      >
-        Retry in {{ rateLimitCountdown }}
-      </v-chip>
+        Diagnose with AI
+      </v-btn>
 
       <v-chip
         v-if="savedAgent"

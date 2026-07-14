@@ -137,7 +137,8 @@ pub async fn create_preview(
 
     if get_ann(&source, "git-enabled") != Some("true") {
         return Err(AppError::BadRequest(
-            "preview environments require GitOps to be enabled on the source deployment".to_string(),
+            "preview environments require GitOps to be enabled on the source deployment"
+                .to_string(),
         ));
     }
 
@@ -166,11 +167,7 @@ pub async fn create_preview(
     let mut cloned = source.clone();
     cloned.status = None;
 
-    let mut labels: BTreeMap<String, String> = source
-        .metadata
-        .labels
-        .clone()
-        .unwrap_or_default();
+    let mut labels: BTreeMap<String, String> = source.metadata.labels.clone().unwrap_or_default();
     labels.insert("app".to_string(), preview_name.clone());
     labels.insert(
         "app.kubernetes.io/managed-by".to_string(),
@@ -264,10 +261,7 @@ pub async fn create_preview(
     }
 
     let created = dep_api.get(&preview_name).await?;
-    Ok((
-        StatusCode::CREATED,
-        Json(summarize_preview(&created, &ns)),
-    ))
+    Ok((StatusCode::CREATED, Json(summarize_preview(&created, &ns))))
 }
 
 /// `GET /api/namespaces/{ns}/previews` — list all preview envs in the ns.
@@ -341,9 +335,7 @@ pub async fn delete_preview(
 
 fn summarize_preview(dep: &Deployment, ns: &str) -> PreviewSummary {
     let anns = dep.metadata.annotations.as_ref();
-    let get = |k: &str| -> Option<String> {
-        anns.and_then(|a| a.get(&ann(k))).cloned()
-    };
+    let get = |k: &str| -> Option<String> { anns.and_then(|a| a.get(&ann(k))).cloned() };
 
     // If the annotation was scrubbed but the naming convention holds,
     // fall back to the `{source}-preview-{branch}` prefix so preview
@@ -404,7 +396,10 @@ pub async fn delete_preview_resources(
 
     let ing_api = state.ingresses_api(ns)?;
     let ingress_name = preview_ingress_name(preview_name);
-    match ing_api.delete(&ingress_name, &DeleteParams::default()).await {
+    match ing_api
+        .delete(&ingress_name, &DeleteParams::default())
+        .await
+    {
         Ok(_) => {}
         Err(kube::Error::Api(e)) if e.code == 404 => {}
         Err(e) => return Err(e.into()),
@@ -484,8 +479,7 @@ fn preview_ingress_name(preview_name: &str) -> String {
 /// carrying them into a preview confuses the rollout controller.
 fn strip_managed_annotations(mut a: BTreeMap<String, String>) -> BTreeMap<String, String> {
     a.retain(|k, _| {
-        !k.starts_with("deployment.kubernetes.io/")
-            && !k.starts_with("kubectl.kubernetes.io/")
+        !k.starts_with("deployment.kubernetes.io/") && !k.starts_with("kubectl.kubernetes.io/")
     });
     a
 }

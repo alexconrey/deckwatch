@@ -183,7 +183,10 @@ mod tests {
             assert!(catalog.contains(f), "catalog missing Pro feature {f}");
         }
         for f in Tier::Enterprise.default_features() {
-            assert!(catalog.contains(f), "catalog missing Enterprise feature {f}");
+            assert!(
+                catalog.contains(f),
+                "catalog missing Enterprise feature {f}"
+            );
         }
     }
 

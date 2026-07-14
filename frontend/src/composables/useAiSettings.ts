@@ -1,66 +1,94 @@
-import { computed, ref } from "vue";
+import { ref, computed } from "vue";
+import { settingsApi } from "@/api/settings";
+import type { DiagAgent } from "@/types/api";
 
-// Persisted-in-localStorage toggles for which AI providers are enabled.
-// Kept as module-scoped refs so every caller sees the same reactive state
-// without extra plumbing (Pinia store, provide/inject, etc.).
+// Server-backed AI provider toggles. These are loaded once from
+// /api/settings on first use and cached module-wide so every consumer
+// (DiagnoseButton, AiFixButton, SettingsPage) sees the same reactive state.
 
-const STORAGE_KEY = "deckwatch-ai-settings";
+const _claudeEnabled = ref<boolean>(true);
+const _codexEnabled = ref<boolean>(true);
+let _loaded = false;
+let _loadPromise: Promise<void> | null = null;
 
-type PersistedShape = {
-  claude?: boolean;
-  codex?: boolean;
-};
+function loadFromServer(): Promise<void> {
+  if (_loaded) return Promise.resolve();
+  if (_loadPromise) return _loadPromise;
+  _loadPromise = settingsApi
+    .get()
+    .then((s) => {
+      _claudeEnabled.value = s.ai_claude_enabled ?? true;
+      _codexEnabled.value = s.ai_codex_enabled ?? true;
+      _loaded = true;
+    })
+    .catch(() => {
+      // On failure, keep the defaults (both enabled). The next call
+      // to loadFromServer() will retry.
+      _loadPromise = null;
+    });
+  return _loadPromise;
+}
 
-function readInitial(): PersistedShape {
+// Kick off the fetch as soon as the module is imported so the values are
+// ready by the time a component renders.
+void loadFromServer();
+
+// --- Per-browser preferred provider (the only thing that stays local) ---
+
+const PREFERRED_KEY = "deckwatch-ai-preferred-provider";
+
+function readPreferred(): DiagAgent | null {
   try {
-    const raw = localStorage.getItem(STORAGE_KEY);
-    if (!raw) return {};
-    const parsed = JSON.parse(raw) as PersistedShape;
-    return parsed ?? {};
+    const raw = localStorage.getItem(PREFERRED_KEY);
+    if (raw === "claude" || raw === "codex") return raw;
+    return null;
   } catch {
-    return {};
+    return null;
   }
 }
 
-const initial = readInitial();
+const _preferredProvider = ref<DiagAgent | null>(readPreferred());
 
-// Claude defaults ON (the shipping provider). Codex is not selectable yet.
-const _claudeEnabled = ref<boolean>(initial.claude ?? true);
-const _codexEnabled = ref<boolean>(false);
-
-function persist() {
-  const payload: PersistedShape = {
-    claude: _claudeEnabled.value,
-    codex: _codexEnabled.value,
-  };
+function persistPreferred() {
   try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(payload));
+    if (_preferredProvider.value) {
+      localStorage.setItem(PREFERRED_KEY, _preferredProvider.value);
+    } else {
+      localStorage.removeItem(PREFERRED_KEY);
+    }
   } catch {
-    // Storage may be unavailable (private mode, disabled quota). Ignore —
-    // toggles will still work in-memory for the session.
+    // Storage unavailable; preference works in-memory for the session.
   }
 }
 
 export function useAiSettings() {
-  const claudeEnabled = computed<boolean>({
-    get: () => _claudeEnabled.value,
+  // Read-only views of the server-side toggles. Components that need to
+  // write (SettingsPage) manage their own refs and PUT back to the server;
+  // these refs update on the next loadFromServer() call.
+  const claudeEnabled = computed(() => _claudeEnabled.value);
+  const codexEnabled = computed(() => _codexEnabled.value);
+
+  const preferredProvider = computed<DiagAgent | null>({
+    get: () => _preferredProvider.value,
     set: (v) => {
-      _claudeEnabled.value = v;
-      persist();
+      _preferredProvider.value = v;
+      persistPreferred();
     },
   });
 
-  // Codex remains hard-locked to false until the backend supports it. Writes
-  // are ignored so the toggle in Settings can bind to it without accidentally
-  // flipping it on.
-  const codexEnabled = computed<boolean>({
-    get: () => _codexEnabled.value,
-    set: () => {},
-  });
+  /** Force a re-fetch from the server (call after saving settings). */
+  function refresh() {
+    _loaded = false;
+    _loadPromise = null;
+    return loadFromServer();
+  }
 
   return {
     claudeEnabled,
     codexEnabled,
+    preferredProvider,
+    refresh,
+    /** @deprecated kept for backward compat; Codex is not selectable yet */
     codexComingSoon: true as const,
   };
 }

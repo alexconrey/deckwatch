@@ -8,7 +8,7 @@ const props = defineProps<{
   confirmText?: string;
   confirmColor?: string;
   loading?: boolean;
-  requireTypeConfirm?: string;
+  confirmInput?: string;
 }>();
 
 const emit = defineEmits<{
@@ -28,7 +28,7 @@ watch(
 );
 
 const typeMatches = computed(
-  () => !props.requireTypeConfirm || typedConfirm.value === props.requireTypeConfirm,
+  () => !props.confirmInput || typedConfirm.value === props.confirmInput,
 );
 </script>
 
@@ -42,9 +42,9 @@ const typeMatches = computed(
       <v-card-title>{{ title }}</v-card-title>
       <v-card-text>
         <div>{{ message }}</div>
-        <template v-if="requireTypeConfirm">
+        <template v-if="confirmInput">
           <div class="mt-3 text-body-2">
-            Type <code>{{ requireTypeConfirm }}</code> to confirm:
+            Type <code>{{ confirmInput }}</code> to confirm:
           </div>
           <v-text-field
             v-model="typedConfirm"

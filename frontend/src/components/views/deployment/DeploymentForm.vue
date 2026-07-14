@@ -412,6 +412,103 @@ const onReplicasInput = (v: unknown) => {
     typeof v === "number" ? v : typeof v === "string" ? Number(v) : NaN;
   form.value.replicas = clampReplicas(Number.isNaN(parsed) ? 0 : parsed);
 };
+
+// ---- Client-side validation helpers ----
+
+/** Parse a Kubernetes memory string (e.g. "128Mi", "1Gi") into mebibytes. */
+function parseMemoryMi(s: string): number | null {
+  const m = s.trim().match(/^(\d+(?:\.\d+)?)\s*(Mi|Gi|Ki|M|G|K|Ti|T)?$/i);
+  if (!m) return null;
+  const val = parseFloat(m[1]);
+  switch ((m[2] ?? "").toLowerCase()) {
+    case "ki":
+    case "k":
+      return val / 1024;
+    case "mi":
+    case "m":
+      return val;
+    case "gi":
+    case "g":
+      return val * 1024;
+    case "ti":
+    case "t":
+      return val * 1024 * 1024;
+    default:
+      // bare number = bytes
+      return val / (1024 * 1024);
+  }
+}
+
+/** Parse a Kubernetes CPU string (e.g. "100m", "0.5", "1") into millicores. */
+function parseCpuMillis(s: string): number | null {
+  const trimmed = s.trim();
+  if (!trimmed) return null;
+  if (trimmed.endsWith("m")) {
+    const val = parseFloat(trimmed.slice(0, -1));
+    return Number.isNaN(val) ? null : val;
+  }
+  const val = parseFloat(trimmed);
+  return Number.isNaN(val) ? null : val * 1000;
+}
+
+const imageRules = [
+  (v: string) => !!v || "Required",
+  (v: string) => !v || v.trim() === v || "Image must not have leading or trailing whitespace",
+];
+
+const imageHint = computed(() => {
+  const img = form.value.image.trim();
+  if (!img) return "";
+  // Warn if no tag or digest is specified
+  if (!img.includes(":") && !img.includes("@")) {
+    return "No tag specified -- 'latest' will be used";
+  }
+  return "";
+});
+
+const cpuLimitRules = computed(() => {
+  const rules: ((v: string) => true | string)[] = [];
+  if (form.value.cpuLimit && form.value.cpuRequest) {
+    rules.push(() => {
+      const limit = parseCpuMillis(form.value.cpuLimit);
+      const request = parseCpuMillis(form.value.cpuRequest);
+      if (limit !== null && request !== null && limit < request) {
+        return "CPU limit is less than CPU request";
+      }
+      return true;
+    });
+  }
+  return rules;
+});
+
+const memoryLimitRules = computed(() => {
+  const rules: ((v: string) => true | string)[] = [];
+  if (form.value.memoryLimit && form.value.memoryRequest) {
+    rules.push(() => {
+      const limit = parseMemoryMi(form.value.memoryLimit);
+      const request = parseMemoryMi(form.value.memoryRequest);
+      if (limit !== null && request !== null && limit < request) {
+        return "Memory limit is less than memory request";
+      }
+      return true;
+    });
+  }
+  return rules;
+});
+
+const replicasHint = computed(() => {
+  if (form.value.replicas === 0) {
+    return "Setting replicas to 0 will stop all instances";
+  }
+  return "Number of identical copies of your app to run";
+});
+
+/** Map from probe key to its tooltip hint text. */
+const probeHints: Record<string, string> = {
+  livenessProbe: "Checks if the app is alive -- restarts it if this fails",
+  readinessProbe: "Checks if the app is ready to receive traffic",
+  startupProbe: "Gives slow-starting apps extra time before liveness checks begin",
+};
 </script>
 
 <template>
@@ -423,6 +520,8 @@ const onReplicasInput = (v: unknown) => {
           label="Deployment Name"
           :disabled="isEdit"
           :rules="[(v: string) => !!v || 'Required']"
+          hint="A unique name for your app (lowercase, hyphens allowed)"
+          persistent-hint
           required
         />
       </v-col>
@@ -431,7 +530,9 @@ const onReplicasInput = (v: unknown) => {
           v-model="form.image"
           label="Container Image"
           placeholder="nginx:latest"
-          :rules="[(v: string) => !!v || 'Required']"
+          :rules="imageRules"
+          :hint="imageHint || 'Docker image to run, e.g. nginx:latest or ghcr.io/org/app:v1.0'"
+          persistent-hint
           required
         >
           <template #append-inner>
@@ -475,7 +576,8 @@ const onReplicasInput = (v: unknown) => {
           min="0"
           :max="REPLICAS_MAX"
           density="compact"
-          hide-details
+          :hint="replicasHint"
+          :persistent-hint="form.replicas === 0"
           @update:model-value="onReplicasInput"
         />
       </v-col>
@@ -497,7 +599,7 @@ const onReplicasInput = (v: unknown) => {
           min="1"
           max="65535"
           density="compact"
-          hide-details
+          hint="The port your app listens on inside the container"
           :rules="[
             (v: unknown) =>
               (typeof v === 'number' && v >= 1 && v <= 65535) ||
@@ -597,6 +699,7 @@ const onReplicasInput = (v: unknown) => {
           v-model="form.cpuRequest"
           label="CPU Request"
           placeholder="e.g. 100m"
+          hint="Minimum CPU guaranteed (e.g. 0.1 = 10% of one core)"
           density="compact"
         />
       </v-col>
@@ -605,6 +708,7 @@ const onReplicasInput = (v: unknown) => {
           v-model="form.memoryRequest"
           label="Memory Request"
           placeholder="e.g. 128Mi"
+          hint="Minimum memory guaranteed (e.g. 128Mi = 128 megabytes)"
           density="compact"
         />
       </v-col>
@@ -613,6 +717,8 @@ const onReplicasInput = (v: unknown) => {
           v-model="form.cpuLimit"
           label="CPU Limit"
           placeholder="e.g. 500m"
+          hint="Maximum CPU allowed before throttling"
+          :rules="cpuLimitRules"
           density="compact"
         />
       </v-col>
@@ -621,6 +727,8 @@ const onReplicasInput = (v: unknown) => {
           v-model="form.memoryLimit"
           label="Memory Limit"
           placeholder="e.g. 256Mi"
+          hint="Maximum memory allowed before the container is killed"
+          :rules="memoryLimitRules"
           density="compact"
         />
       </v-col>
@@ -680,7 +788,8 @@ const onReplicasInput = (v: unknown) => {
           v-model="(form as any)[probeKey].enabled"
           :label="probeLabel"
           color="primary"
-          hide-details
+          :hint="probeHints[probeKey]"
+          persistent-hint
           density="compact"
         />
         <template v-if="(form as any)[probeKey].enabled">

@@ -3,11 +3,16 @@ import { ref, computed, watch } from "vue";
 import { useRouter } from "vue-router";
 import { deploymentsApi } from "@/api/deployments";
 import { ingressesApi } from "@/api/ingresses";
+import { ingressClassesApi } from "@/api/ingresses";
+import type { IngressClassInfo } from "@/api/ingresses";
+import { autoscalingApi } from "@/api/autoscaling";
 import { usePolling } from "@/composables/usePolling";
 import type {
   ContainerStatusSummary,
   DeploymentDetailResponse,
   CreateDeploymentRequest,
+  HpaResponse,
+  HpaConfigRequest,
 } from "@/types/api";
 import StatusChip from "@/components/common/StatusChip.vue";
 import ReplicaGauge from "@/components/views/deployment/ReplicaGauge.vue";
@@ -21,7 +26,7 @@ import PortForwardDialog from "@/components/common/PortForwardDialog.vue";
 import MetricSparkline from "@/components/common/MetricSparkline.vue";
 import { usePodMetrics } from "@/composables/useResourceMetrics";
 import MonitorSettingsCard from "@/components/views/deployment/MonitorSettingsCard.vue";
-import AutoscalingCard from "@/components/views/deployment/AutoscalingCard.vue";
+import { useFeatures } from "@/composables/useFeatures";
 import GitOpsCard from "@/components/views/deployment/GitOpsCard.vue";
 import YamlViewer from "@/components/common/YamlViewer.vue";
 import { formatAge } from "@/utils/format";
@@ -29,6 +34,7 @@ import YamlEditor from "@/components/common/YamlEditor.vue";
 import AddonsCard from "@/components/views/deployment/AddonsCard.vue";
 import SidecarManager from "@/components/views/deployment/SidecarManager.vue";
 import MetricsDetailCard from "@/components/views/deployment/MetricsDetailCard.vue";
+import HistoryCard from "@/components/views/deployment/HistoryCard.vue";
 
 const props = defineProps<{
   namespace: string;
@@ -36,6 +42,7 @@ const props = defineProps<{
 }>();
 
 const router = useRouter();
+const { features } = useFeatures();
 const detail = ref<DeploymentDetailResponse | null>(null);
 const loading = ref(true);
 const error = ref<string | null>(null);
@@ -49,6 +56,35 @@ const terminalPod = ref<string | null>(null);
 const showRestartDialog = ref(false);
 const showEditDialog = ref(false);
 const showMetricsDetail = ref(false);
+const showDiagDrawer = ref(false);
+
+// Autoscaling (HPA) state
+const hpa = ref<HpaResponse | null>(null);
+const hpaError = ref<string | null>(null);
+const hpaEnabled = computed(() => hpa.value !== null);
+
+// Autoscaling form state for edit dialog
+const hpaForm = ref({
+  enabled: false,
+  minReplicas: 1,
+  maxReplicas: 3,
+  cpuEnabled: true,
+  cpuTarget: 80,
+  memoryEnabled: false,
+  memoryTarget: 80,
+});
+
+const fetchHpa = async () => {
+  try {
+    hpa.value = await autoscalingApi.get(props.namespace, props.name);
+    hpaError.value = null;
+  } catch (e) {
+    hpaError.value =
+      e instanceof Error ? e.message : "Failed to fetch autoscaling config";
+  }
+};
+
+usePolling(fetchHpa, 5000);
 
 // YAML view/edit state
 const showYamlViewDialog = ref(false);
@@ -110,13 +146,37 @@ watch(selectedLogPod, () => {
 const showIngressDialog = ref(false);
 const editingIngressName = ref<string | null>(null);
 const deleteIngressName = ref<string | null>(null);
+const ingressClasses = ref<IngressClassInfo[]>([]);
+const ingressClassNames = ref<string[]>([]);
 const ingressForm = ref({
   name: "",
   host: "",
   path: "/",
   pathType: "Prefix",
   port: 80,
-  ingressClass: "traefik",
+  ingressClass: "",
+});
+
+const fetchIngressClasses = async () => {
+  try {
+    const res = await ingressClassesApi.list();
+    ingressClasses.value = res.classes;
+    ingressClassNames.value = res.classes.map((c) => c.name);
+  } catch {
+    // Non-critical; fall back to manual entry via combobox
+  }
+};
+
+// Derive the first container port from the deployment's probe config or
+// fall back to the default 80. The deployment detail doesn't expose raw
+// containerPort, so probes are the best signal available.
+const firstContainerPort = computed<number>(() => {
+  if (!detail.value) return 80;
+  const probePort =
+    detail.value.liveness_probe?.port ??
+    detail.value.readiness_probe?.port ??
+    detail.value.startup_probe?.port;
+  return probePort ?? 80;
 });
 
 const fetchDetail = async () => {
@@ -227,6 +287,47 @@ const editInitialValues = computed(
   },
 );
 
+// Diagnostic drill-down: conditions and failing pod info for the status drawer.
+const failedConditions = computed(() => {
+  if (!detail.value) return [];
+  return detail.value.conditions.filter((c) => c.status !== "True");
+});
+
+const failingPodStatuses = computed(() => {
+  if (!detail.value) return [];
+  const statuses: { podName: string; containerName: string; state: string; reason: string; summary: string }[] = [];
+  for (const pod of detail.value.pods) {
+    for (const cs of pod.container_statuses) {
+      if (cs.state_reason) {
+        statuses.push({
+          podName: pod.name,
+          containerName: cs.name,
+          state: cs.state,
+          reason: cs.state_reason,
+          summary: stateReasonToAdvice(cs.state_reason),
+        });
+      }
+    }
+  }
+  return statuses;
+});
+
+function stateReasonToAdvice(reason: string): string {
+  const map: Record<string, string> = {
+    CrashLoopBackOff: "Your app is crashing on startup. Check the logs for stack traces or missing config.",
+    ImagePullBackOff: "The container image could not be pulled. Verify the image name, tag, and registry credentials.",
+    ErrImagePull: "Failed to pull the container image. Check the image reference and network connectivity.",
+    OOMKilled: "The container was killed because it exceeded its memory limit. Increase the memory limit or fix a memory leak.",
+    CreateContainerConfigError: "Invalid container configuration. Check environment variables, secrets, and config map references.",
+    RunContainerError: "The container failed to start. Check the command, entrypoint, and volume mounts.",
+    ContainerCannotRun: "The container cannot run. Verify the entrypoint binary exists and is executable.",
+    Completed: "The container exited successfully. If this is unexpected, check if the process is meant to run as a long-lived service.",
+    Error: "The container exited with an error. Check the logs for details.",
+    InvalidImageName: "The image name is malformed. Verify the repository URL and tag format.",
+  };
+  return map[reason] ?? `Container is in '${reason}' state. Check the logs and events for more details.`;
+}
+
 const handleDelete = async () => {
   actionLoading.value = true;
   try {
@@ -273,6 +374,30 @@ const handleEdit = async (values: CreateDeploymentRequest) => {
       readiness_probe: values.readiness_probe,
       startup_probe: values.startup_probe,
     });
+
+    // Save or delete HPA alongside the deployment update
+    if (hpaForm.value.enabled) {
+      const body: HpaConfigRequest = {
+        min_replicas: hpaForm.value.minReplicas,
+        max_replicas: hpaForm.value.maxReplicas,
+        target_cpu_utilization: hpaForm.value.cpuEnabled
+          ? hpaForm.value.cpuTarget
+          : undefined,
+        target_memory_utilization: hpaForm.value.memoryEnabled
+          ? hpaForm.value.memoryTarget
+          : undefined,
+      };
+      hpa.value = await autoscalingApi.upsert(
+        props.namespace,
+        props.name,
+        body,
+      );
+    } else if (hpaEnabled.value) {
+      // Was enabled, user toggled it off -- delete
+      await autoscalingApi.delete(props.namespace, props.name);
+      hpa.value = null;
+    }
+
     showEditDialog.value = false;
     await fetchDetail();
   } catch (e) {
@@ -304,6 +429,30 @@ const openEditDialog = () => {
   editMode.value = "form";
   yamlEditContent.value = "";
   yamlEditError.value = null;
+
+  // Prefill autoscaling form from current HPA state
+  if (hpa.value) {
+    hpaForm.value = {
+      enabled: true,
+      minReplicas: hpa.value.min_replicas ?? 1,
+      maxReplicas: hpa.value.max_replicas,
+      cpuEnabled: hpa.value.target_cpu_utilization !== null,
+      cpuTarget: hpa.value.target_cpu_utilization ?? 80,
+      memoryEnabled: hpa.value.target_memory_utilization !== null,
+      memoryTarget: hpa.value.target_memory_utilization ?? 80,
+    };
+  } else {
+    hpaForm.value = {
+      enabled: false,
+      minReplicas: 1,
+      maxReplicas: 3,
+      cpuEnabled: true,
+      cpuTarget: 80,
+      memoryEnabled: false,
+      memoryTarget: 80,
+    };
+  }
+
   showEditDialog.value = true;
 };
 
@@ -355,15 +504,18 @@ const handleSidecarChanged = async (updated?: DeploymentDetailResponse) => {
   }
 };
 
-const openCreateIngress = () => {
+const openCreateIngress = async () => {
   editingIngressName.value = null;
+  await fetchIngressClasses();
+  const defaultClass =
+    ingressClasses.value.find((c) => c.is_default)?.name ?? "";
   ingressForm.value = {
     name: `${props.name}-ingress`,
     host: "",
     path: "/",
     pathType: "Prefix",
-    port: 80,
-    ingressClass: "traefik",
+    port: firstContainerPort.value,
+    ingressClass: defaultClass,
   };
   showIngressDialog.value = true;
 };
@@ -371,6 +523,7 @@ const openCreateIngress = () => {
 const openEditIngress = async (ingressName: string) => {
   actionLoading.value = true;
   try {
+    await fetchIngressClasses();
     const ing = await ingressesApi.get(props.namespace, ingressName);
     const firstRule = ing.rules[0];
     const firstPath = firstRule?.paths[0];
@@ -380,8 +533,8 @@ const openEditIngress = async (ingressName: string) => {
       host: firstRule?.host ?? "",
       path: firstPath?.path ?? "/",
       pathType: firstPath?.path_type ?? "Prefix",
-      port: firstPath?.service_port ?? 80,
-      ingressClass: ing.ingress_class ?? "traefik",
+      port: firstPath?.service_port ?? firstContainerPort.value,
+      ingressClass: ing.ingress_class ?? "",
     };
     showIngressDialog.value = true;
   } catch (e) {
@@ -511,7 +664,7 @@ const handleDeleteIngress = async () => {
       <!-- Status Overview (with inline resource sparklines) -->
       <v-card class="mb-4 pa-4">
         <div class="d-flex align-center ga-4 flex-wrap">
-          <StatusChip :status="detail.status" />
+          <StatusChip :status="detail.status" @click="showDiagDrawer = true" />
           <ReplicaGauge :replicas="detail.replicas" />
           <v-chip variant="outlined" size="small">
             <v-icon icon="mdi-docker" start size="small" />
@@ -581,6 +734,41 @@ const handleDeleteIngress = async () => {
           >
             <v-icon icon="mdi-rocket-launch" start size="x-small" />
             Startup ({{ detail.startup_probe.probe_type }})
+          </v-chip>
+        </div>
+        <div
+          v-if="hpaEnabled && hpa"
+          class="d-flex align-center ga-2 mt-3"
+        >
+          <span class="text-caption text-secondary mr-1">HPA:</span>
+          <v-chip size="x-small" variant="outlined">
+            <v-icon icon="mdi-arrow-collapse" start size="x-small" />
+            Min {{ hpa.min_replicas ?? "-" }}
+          </v-chip>
+          <v-chip size="x-small" variant="outlined">
+            <v-icon icon="mdi-arrow-expand" start size="x-small" />
+            Max {{ hpa.max_replicas }}
+          </v-chip>
+          <v-chip
+            v-if="hpa.target_cpu_utilization !== null"
+            size="x-small"
+            variant="outlined"
+            color="primary"
+          >
+            <v-icon icon="mdi-chip" start size="x-small" />
+            CPU {{ hpa.current_cpu_utilization ?? "-" }}% / {{ hpa.target_cpu_utilization }}%
+          </v-chip>
+          <v-chip
+            v-if="hpa.target_memory_utilization !== null"
+            size="x-small"
+            variant="outlined"
+            color="secondary"
+          >
+            <v-icon icon="mdi-memory" start size="x-small" />
+            Mem {{ hpa.current_memory_utilization ?? "-" }}% / {{ hpa.target_memory_utilization }}%
+          </v-chip>
+          <v-chip size="x-small" variant="flat" color="info">
+            {{ hpa.current_replicas ?? "?" }} / {{ hpa.desired_replicas ?? "?" }} replicas
           </v-chip>
         </div>
         <v-alert
@@ -684,11 +872,8 @@ const handleDeleteIngress = async () => {
         </div>
       </v-card>
 
-      <!-- Monitoring -->
-      <MonitorSettingsCard :namespace="namespace" :deployment-name="name" />
-
-      <!-- Autoscaling -->
-      <AutoscalingCard :namespace="namespace" :deployment-name="name" />
+      <!-- Monitoring (gated by prometheus feature flag) -->
+      <MonitorSettingsCard v-if="features?.prometheus" :namespace="namespace" :deployment-name="name" />
 
       <!-- GitOps -->
       <GitOpsCard :namespace="namespace" :deployment-name="name" />
@@ -707,6 +892,13 @@ const handleDeleteIngress = async () => {
         :deployment-name="name"
         :containers="sidecarContainers"
         @changed="handleSidecarChanged"
+      />
+
+      <!-- Rollout History -->
+      <HistoryCard
+        :namespace="namespace"
+        :name="name"
+        @rolled-back="fetchDetail"
       />
 
       <!-- Pods -->
@@ -815,7 +1007,7 @@ const handleDeleteIngress = async () => {
       title="Delete Deployment"
       :message="`Are you sure you want to delete '${name}'? This action cannot be undone.`"
       confirm-text="Delete"
-      :require-type-confirm="name"
+      :confirm-input="name"
       :loading="actionLoading"
       @confirm="handleDelete"
     />
@@ -858,6 +1050,102 @@ const handleDeleteIngress = async () => {
               :loading="actionLoading"
               @submit="handleEdit"
             />
+
+            <!-- Autoscaling section in edit dialog -->
+            <v-divider class="my-4" />
+            <div class="text-subtitle-2 mb-3 d-flex align-center">
+              <v-icon icon="mdi-arrow-expand-vertical" size="small" class="mr-2" />
+              Autoscaling
+            </div>
+            <v-alert v-if="hpaError" type="error" density="compact" class="mb-2" closable>
+              {{ hpaError }}
+            </v-alert>
+            <v-switch
+              v-model="hpaForm.enabled"
+              label="Enable Horizontal Pod Autoscaler"
+              density="compact"
+              hide-details
+              color="primary"
+              class="mb-3"
+            />
+            <template v-if="hpaForm.enabled">
+              <v-row dense>
+                <v-col cols="6">
+                  <v-text-field
+                    v-model.number="hpaForm.minReplicas"
+                    label="Min Replicas"
+                    type="number"
+                    min="1"
+                    density="compact"
+                    hide-details
+                  />
+                </v-col>
+                <v-col cols="6">
+                  <v-text-field
+                    v-model.number="hpaForm.maxReplicas"
+                    label="Max Replicas"
+                    type="number"
+                    :min="hpaForm.minReplicas"
+                    density="compact"
+                    hide-details
+                  />
+                </v-col>
+              </v-row>
+              <div class="text-body-2 mt-3 mb-2">Metric Targets</div>
+              <div class="d-flex align-center ga-3 mb-2">
+                <v-switch
+                  v-model="hpaForm.cpuEnabled"
+                  label="CPU"
+                  density="compact"
+                  hide-details
+                  color="primary"
+                  style="max-width: 120px"
+                />
+                <v-text-field
+                  v-model.number="hpaForm.cpuTarget"
+                  label="Target CPU %"
+                  type="number"
+                  min="1"
+                  max="100"
+                  density="compact"
+                  hide-details
+                  :disabled="!hpaForm.cpuEnabled"
+                  suffix="%"
+                  style="max-width: 180px"
+                />
+              </div>
+              <div class="d-flex align-center ga-3">
+                <v-switch
+                  v-model="hpaForm.memoryEnabled"
+                  label="Memory"
+                  density="compact"
+                  hide-details
+                  color="secondary"
+                  style="max-width: 120px"
+                />
+                <v-text-field
+                  v-model.number="hpaForm.memoryTarget"
+                  label="Target Memory %"
+                  type="number"
+                  min="1"
+                  max="100"
+                  density="compact"
+                  hide-details
+                  :disabled="!hpaForm.memoryEnabled"
+                  suffix="%"
+                  style="max-width: 180px"
+                />
+              </div>
+              <v-alert
+                v-if="hpaForm.enabled && !hpaForm.cpuEnabled && !hpaForm.memoryEnabled"
+                type="warning"
+                density="compact"
+                variant="tonal"
+                class="mt-3"
+              >
+                At least one metric target must be enabled.
+              </v-alert>
+            </template>
           </template>
           <template v-else>
             <v-alert v-if="yamlEditError" type="error" density="compact" class="mb-2">
@@ -946,10 +1234,12 @@ const handleDeleteIngress = async () => {
               />
             </v-col>
           </v-row>
-          <v-text-field
+          <v-combobox
             v-model="ingressForm.ingressClass"
+            :items="ingressClassNames"
             label="Ingress Class"
-            placeholder="traefik"
+            placeholder="Select or type a class"
+            clearable
           />
         </v-card-text>
         <v-card-actions>
@@ -994,5 +1284,84 @@ const handleDeleteIngress = async () => {
       :namespace="namespace"
       :pod-name="terminalPod"
     />
+
+    <!-- Diagnostic drill-down drawer (StatusChip click) -->
+    <v-navigation-drawer
+      v-model="showDiagDrawer"
+      location="right"
+      temporary
+      width="480"
+    >
+      <v-card flat>
+        <v-card-title class="d-flex align-center">
+          <v-icon icon="mdi-stethoscope" class="mr-2" size="small" />
+          Deployment Diagnostics
+          <v-spacer />
+          <v-btn icon="mdi-close" variant="text" size="small" @click="showDiagDrawer = false" />
+        </v-card-title>
+        <v-card-text>
+          <!-- Overall status -->
+          <div class="mb-4">
+            <StatusChip v-if="detail" :status="detail.status" />
+          </div>
+
+          <!-- Failed Conditions -->
+          <div class="text-subtitle-2 mb-2">Failed Conditions</div>
+          <div v-if="failedConditions.length === 0" class="text-body-2 text-secondary mb-4">
+            All conditions are healthy.
+          </div>
+          <v-card
+            v-for="c in failedConditions"
+            :key="c.condition_type"
+            variant="outlined"
+            class="mb-2"
+            color="error"
+          >
+            <v-card-text class="py-2 px-3">
+              <div class="d-flex align-center mb-1">
+                <v-icon icon="mdi-close-circle" color="error" size="small" class="mr-2" />
+                <span class="font-weight-medium">{{ c.condition_type }}</span>
+                <v-spacer />
+                <v-chip size="x-small" variant="tonal" color="error">{{ c.status }}</v-chip>
+              </div>
+              <div v-if="c.reason" class="text-caption font-weight-medium">{{ c.reason }}</div>
+              <div v-if="c.message" class="text-caption text-secondary mt-1">{{ c.message }}</div>
+            </v-card-text>
+          </v-card>
+
+          <!-- Failing Containers -->
+          <div class="text-subtitle-2 mt-4 mb-2">Failing Containers</div>
+          <div v-if="failingPodStatuses.length === 0" class="text-body-2 text-secondary mb-4">
+            No containers are reporting errors.
+          </div>
+          <v-card
+            v-for="(fs, i) in failingPodStatuses"
+            :key="i"
+            variant="outlined"
+            class="mb-3"
+            color="warning"
+          >
+            <v-card-text class="py-2 px-3">
+              <div class="d-flex align-center mb-1">
+                <v-icon icon="mdi-cube-outline" size="small" class="mr-2" />
+                <span class="text-caption font-weight-medium">{{ fs.podName }}</span>
+                <v-chip size="x-small" variant="tonal" class="ml-2">{{ fs.containerName }}</v-chip>
+              </div>
+              <v-chip size="x-small" color="error" variant="flat" class="mb-2">
+                {{ fs.reason }}
+              </v-chip>
+              <v-alert
+                type="info"
+                density="compact"
+                variant="tonal"
+                class="text-caption"
+              >
+                {{ fs.summary }}
+              </v-alert>
+            </v-card-text>
+          </v-card>
+        </v-card-text>
+      </v-card>
+    </v-navigation-drawer>
   </div>
 </template>

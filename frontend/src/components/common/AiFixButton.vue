@@ -1,7 +1,6 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from "vue";
-import { diagnosticsApi } from "@/api/diagnostics";
-import type { AiQuotaSnapshot, DiagAgent } from "@/types/api";
+import { computed, ref, watch } from "vue";
+import type { DiagAgent } from "@/types/api";
 import { useAiSettings } from "@/composables/useAiSettings";
 
 // Reusable "Fix with AI" trigger.
@@ -14,11 +13,6 @@ import { useAiSettings } from "@/composables/useAiSettings";
 // /api/namespaces/{ns}/applications/{name}/ai-fix endpoint. The parent
 // component is responsible for making that call and handling the response —
 // this component just resolves an agent and emits `fix`.
-//
-// When `namespace` is provided, the button additionally polls the shared
-// AI-job quota endpoint and renders a chip with the remaining slots. Both
-// AI-fix and diagnostics jobs share one bucket per namespace, so the number
-// operators see here matches what the DiagnoseButton would show.
 
 const props = defineProps<{
   // Text displayed on the button. Defaults to "Fix with AI".
@@ -31,9 +25,6 @@ const props = defineProps<{
   // Optional: skip the chooser and go straight to `fix` when this agent is
   // already known to be selected. Callers can persist a preference elsewhere.
   preselectedAgent?: DiagAgent | null;
-  // When provided, enables the "N of M left" quota chip and disables the
-  // button when the namespace has burned through its hourly cap.
-  namespace?: string;
 }>();
 
 const emit = defineEmits<{
@@ -72,44 +63,13 @@ watch(
   { immediate: true },
 );
 
-const quota = ref<AiQuotaSnapshot | null>(null);
-
-async function loadQuota() {
-  if (!props.namespace) return;
-  try {
-    quota.value = await diagnosticsApi.quota(props.namespace);
-  } catch {
-    // Silent — the parent still gets to submit and receive the real 429.
-  }
-}
-
-const quotaExhausted = computed(() => quota.value?.remaining === 0);
-
-const quotaColor = computed(() => {
-  const q = quota.value;
-  if (!q) return "info";
-  if (q.remaining === 0) return "error";
-  if (q.remaining <= Math.max(1, Math.floor(q.limit * 0.25))) return "warning";
-  return "info";
-});
-
-const quotaLabel = computed(() => {
-  const q = quota.value;
-  if (!q) return "";
-  return `${q.remaining}/${q.limit} AI jobs left this hour`;
-});
-
 const effectiveDisabled = computed(
-  () => props.disabled || !anyProviderEnabled.value || quotaExhausted.value,
+  () => props.disabled || !anyProviderEnabled.value,
 );
 
 const effectiveReason = computed(() => {
   if (!anyProviderEnabled.value) {
     return "Enable an AI provider under Settings → AI Integrations.";
-  }
-  if (quotaExhausted.value && quota.value) {
-    const secs = quota.value.reset_in_secs ?? 60;
-    return `AI job quota exhausted for this namespace (${quota.value.used}/${quota.value.limit} this hour). Retry in ~${secs}s.`;
   }
   return props.disabledReason ?? "";
 });
@@ -132,25 +92,6 @@ function onClick() {
   }
 }
 
-// Callers that just submitted a fix should tell us to refresh; expose a
-// method via defineExpose so the parent can call `.refreshQuota()` after
-// awaiting its own POST. Keeps this component decoupled from the fix API.
-function refreshQuota() {
-  void loadQuota();
-}
-defineExpose({ refreshQuota });
-
-onMounted(() => {
-  if (props.namespace) void loadQuota();
-});
-
-watch(
-  () => props.namespace,
-  (ns) => {
-    if (ns) void loadQuota();
-    else quota.value = null;
-  },
-);
 </script>
 
 <template>
@@ -175,17 +116,6 @@ watch(
         </div>
       </template>
     </v-tooltip>
-
-    <v-chip
-      v-if="quota"
-      :color="quotaColor"
-      size="x-small"
-      variant="tonal"
-      class="ml-2"
-      :prepend-icon="quota.remaining === 0 ? 'mdi-timer-sand' : 'mdi-counter'"
-    >
-      {{ quotaLabel }}
-    </v-chip>
 
     <v-dialog v-model="showChooser" max-width="640">
       <v-card>

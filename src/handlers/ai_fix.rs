@@ -13,7 +13,7 @@ use kube::ResourceExt;
 use serde::{Deserialize, Serialize};
 
 use crate::error::AppError;
-use crate::handlers::diagnostics::{DiagAgent, DiagStatus, QuotaSnapshotResponse};
+use crate::handlers::diagnostics::{DiagAgent, DiagStatus};
 use crate::kube_ext::ApplicationGitConfig;
 use crate::log_sanitize::{sanitize_logs, wrap_prompt};
 use crate::state::AppState;
@@ -69,9 +69,6 @@ pub struct AiFixResponse {
     pub job_name: String,
     pub status: DiagStatus,
     pub agent: DiagAgent,
-    /// Post-record quota snapshot so the UI can update the AI-Fix chip
-    /// without a follow-up GET. Same shape as the diagnostics response.
-    pub quota: QuotaSnapshotResponse,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -88,18 +85,6 @@ pub async fn create_ai_fix(
     Path((ns, name)): Path<(String, String)>,
     Json(req): Json<AiFixRequest>,
 ) -> Result<Json<AiFixResponse>, AppError> {
-    // Rate-limit gate BEFORE any k8s reads/writes. AI-fix and diagnose share
-    // one hourly bucket per namespace — a chatty deployment might use both.
-    let pre = state.ai_rate_limiter.check(&ns);
-    if pre.exceeded() {
-        return Err(AppError::RateLimited {
-            namespace: ns.clone(),
-            limit: pre.limit,
-            used: pre.used,
-            retry_after_secs: pre.reset_in_secs.unwrap_or(60),
-        });
-    }
-
     // 1. Load the application record from its managed ConfigMap.
     let cm_api = state.configmaps_api(&ns)?;
     let app_cm = cm_api.get(&cm_name(&name)).await?;
@@ -138,9 +123,8 @@ pub async fn create_ai_fix(
         .unwrap_or_default();
 
     let agent = req.agent;
-    let sanitized_app = sanitize_name_segment(&name);
     let ts = jiff::Timestamp::now().as_second();
-    let job_name = format!("deckwatch-aifix-{}-{}-{}", agent.as_str(), sanitized_app, ts);
+    let job_name = make_short_name("dw-aifix", agent.as_str(), &name, ts);
     let context_cm_name = format!("{job_name}-ctx");
 
     let context_md = build_context_markdown(
@@ -185,16 +169,10 @@ pub async fn create_ai_fix(
         return Err(e);
     }
 
-    // Record only after successful Job creation — same rationale as
-    // diagnostics::create_diagnostic.
-    state.ai_rate_limiter.record(&ns);
-    let post = state.ai_rate_limiter.snapshot(&ns);
-
     Ok(Json(AiFixResponse {
         job_name,
         status: DiagStatus::Pending,
         agent,
-        quota: post.into(),
     }))
 }
 
@@ -227,11 +205,7 @@ fn agent_api_key_secret(agent: DiagAgent) -> String {
     }
 }
 
-async fn gather_crash_logs(
-    state: &AppState,
-    ns: &str,
-    app_name: &str,
-) -> Result<String, AppError> {
+async fn gather_crash_logs(state: &AppState, ns: &str, app_name: &str) -> Result<String, AppError> {
     let pods_api = state.pods_api(ns)?;
     // Same selector convention applications.rs uses for its own member queries.
     let lp = ListParams::default().labels(&member_selector(app_name));
@@ -367,9 +341,7 @@ fn build_context_markdown(
          {crash_section}\n"
     );
 
-    let header = format!(
-        "# Deckwatch AI Fix Context\n\nApplication: {app_name}\nNamespace: {ns}"
-    );
+    let header = format!("# Deckwatch AI Fix Context\n\nApplication: {app_name}\nNamespace: {ns}");
 
     wrap_prompt(AI_FIX_PROMPT, &header, &untrusted_body)
 }
@@ -385,9 +357,18 @@ async fn create_context_configmap(
 ) -> Result<(), AppError> {
     let mut labels = BTreeMap::new();
     labels.insert(AI_FIX_LABEL_KEY.to_string(), "true".to_string());
-    labels.insert(AI_FIX_AGENT_LABEL_KEY.to_string(), agent.as_str().to_string());
-    labels.insert(AI_FIX_APP_LABEL_KEY.to_string(), sanitize_name_segment(app_name));
+    labels.insert(
+        AI_FIX_AGENT_LABEL_KEY.to_string(),
+        agent.as_str().to_string(),
+    );
+    labels.insert(
+        AI_FIX_APP_LABEL_KEY.to_string(),
+        truncate_label_value(&sanitize_name_segment(app_name)),
+    );
     labels.insert("deckwatch.io/ai-fix-job".to_string(), job_name.to_string());
+
+    let mut annotations = BTreeMap::new();
+    annotations.insert("deckwatch.io/application".to_string(), app_name.to_string());
 
     let mut data = BTreeMap::new();
     data.insert(CONTEXT_FILE_NAME.to_string(), context_md.to_string());
@@ -397,6 +378,7 @@ async fn create_context_configmap(
             name: Some(cm_name_str.to_string()),
             namespace: Some(ns.to_string()),
             labels: Some(labels),
+            annotations: Some(annotations),
             ..Default::default()
         },
         data: Some(data),
@@ -422,8 +404,17 @@ async fn create_ai_fix_job(
 ) -> Result<(), AppError> {
     let mut labels = BTreeMap::new();
     labels.insert(AI_FIX_LABEL_KEY.to_string(), "true".to_string());
-    labels.insert(AI_FIX_AGENT_LABEL_KEY.to_string(), agent.as_str().to_string());
-    labels.insert(AI_FIX_APP_LABEL_KEY.to_string(), sanitize_name_segment(app_name));
+    labels.insert(
+        AI_FIX_AGENT_LABEL_KEY.to_string(),
+        agent.as_str().to_string(),
+    );
+    labels.insert(
+        AI_FIX_APP_LABEL_KEY.to_string(),
+        truncate_label_value(&sanitize_name_segment(app_name)),
+    );
+
+    let mut annotations = BTreeMap::new();
+    annotations.insert("deckwatch.io/application".to_string(), app_name.to_string());
 
     let mut env = vec![
         EnvVar {
@@ -489,14 +480,8 @@ async fn create_ai_fix_job(
     // Operators who want stricter isolation should attach a NetworkPolicy
     // to the diagnostic/ai-fix Job pods. See docs/AI_SAFETY.md.
     let (cli, cli_flags): (&str, String) = match agent {
-        DiagAgent::Claude => (
-            "claude",
-            "-p --dangerously-skip-permissions".to_string(),
-        ),
-        DiagAgent::Codex => (
-            "codex",
-            "exec --sandbox workspace-write --".to_string(),
-        ),
+        DiagAgent::Claude => ("claude", "-p --dangerously-skip-permissions".to_string()),
+        DiagAgent::Codex => ("codex", "exec --sandbox workspace-write --".to_string()),
     };
 
     // Clone URL construction matches watcher::trigger_build: strip scheme,
@@ -563,6 +548,7 @@ cat "$DECKWATCH_AIFIX_CONTEXT_PATH" | {cli} {cli_flags}
             name: Some(job_name.to_string()),
             namespace: Some(ns.to_string()),
             labels: Some(labels),
+            annotations: Some(annotations),
             ..Default::default()
         },
         spec: Some(JobSpec {
@@ -576,7 +562,10 @@ cat "$DECKWATCH_AIFIX_CONTEXT_PATH" | {cli} {cli_flags}
                     labels: Some({
                         let mut l = BTreeMap::new();
                         l.insert(AI_FIX_LABEL_KEY.to_string(), "true".to_string());
-                        l.insert(AI_FIX_AGENT_LABEL_KEY.to_string(), agent.as_str().to_string());
+                        l.insert(
+                            AI_FIX_AGENT_LABEL_KEY.to_string(),
+                            agent.as_str().to_string(),
+                        );
                         l
                     }),
                     ..Default::default()
@@ -636,5 +625,34 @@ fn sanitize_name_segment(input: &str) -> String {
         .collect();
     let trimmed = cleaned.trim_matches('-');
     let s = if trimmed.is_empty() { "app" } else { trimmed };
-    if s.len() > 40 { s[..40].to_string() } else { s.to_string() }
+    if s.len() > 40 {
+        s[..40].to_string()
+    } else {
+        s.to_string()
+    }
+}
+
+/// Maximum length for Kubernetes label values.
+const K8S_LABEL_VALUE_MAX: usize = 63;
+
+/// Truncate a string to fit within the K8s label value limit (63 chars).
+fn truncate_label_value(s: &str) -> String {
+    if s.len() <= K8S_LABEL_VALUE_MAX {
+        return s.to_string();
+    }
+    s[..K8S_LABEL_VALUE_MAX].trim_end_matches('-').to_string()
+}
+
+/// Build a short, K8s-safe resource name. Same scheme as diagnostics.rs.
+fn make_short_name(prefix: &str, agent: &str, source: &str, ts: i64) -> String {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+
+    let mut hasher = DefaultHasher::new();
+    source.hash(&mut hasher);
+    ts.hash(&mut hasher);
+    let hash = hasher.finish();
+    let short_hash = format!("{:016x}", hash);
+
+    format!("{}-{}-{}", prefix, agent, &short_hash[..8])
 }

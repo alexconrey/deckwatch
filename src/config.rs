@@ -4,7 +4,12 @@ use clap::Parser;
 #[command(name = "deckwatch", about = "Kubernetes deployment lifecycle manager")]
 pub struct Config {
     /// Comma-separated list of namespaces to manage. Empty = all namespaces.
-    #[arg(long, env = "DECKWATCH_NAMESPACES", value_delimiter = ',', default_value = "")]
+    #[arg(
+        long,
+        env = "DECKWATCH_NAMESPACES",
+        value_delimiter = ',',
+        default_value = ""
+    )]
     pub namespaces: Vec<String>,
 
     /// Port to listen on.
@@ -25,7 +30,11 @@ pub struct Config {
     #[arg(long, env = "DECKWATCH_SETTINGS_NAMESPACE")]
     pub settings_namespace: Option<String>,
 
-    #[arg(long, env = "DECKWATCH_SETTINGS_CONFIGMAP", default_value = "deckwatch-config")]
+    #[arg(
+        long,
+        env = "DECKWATCH_SETTINGS_CONFIGMAP",
+        default_value = "deckwatch-config"
+    )]
     pub settings_configmap_name: String,
 
     /// Enable the embedded OCI registry. When set, the `/v2/*` endpoints
@@ -45,7 +54,11 @@ pub struct Config {
     /// On-disk root for the embedded OCI registry. Only read when
     /// `registry_enabled` is true and `registry_storage == "filesystem"`.
     /// Should be a PVC mount in production so blobs survive pod restarts.
-    #[arg(long, env = "DECKWATCH_REGISTRY_ROOT", default_value = "/data/registry")]
+    #[arg(
+        long,
+        env = "DECKWATCH_REGISTRY_ROOT",
+        default_value = "/data/registry"
+    )]
     pub registry_root: String,
 
     /// S3 bucket for the embedded registry. Required when
@@ -60,7 +73,11 @@ pub struct Config {
 
     /// AWS region for the S3 bucket. Ignored by MinIO / R2 (they use the
     /// endpoint), but the SDK still needs a value.
-    #[arg(long, env = "DECKWATCH_REGISTRY_S3_REGION", default_value = "us-east-1")]
+    #[arg(
+        long,
+        env = "DECKWATCH_REGISTRY_S3_REGION",
+        default_value = "us-east-1"
+    )]
     pub registry_s3_region: String,
 
     /// Custom S3 endpoint for MinIO / Ceph RGW / Cloudflare R2. Empty =
@@ -70,7 +87,11 @@ pub struct Config {
 
     /// Force path-style S3 addressing when talking to AWS itself. Ignored
     /// (already true) when a custom endpoint is set.
-    #[arg(long, env = "DECKWATCH_REGISTRY_S3_PATH_STYLE", default_value = "false")]
+    #[arg(
+        long,
+        env = "DECKWATCH_REGISTRY_S3_PATH_STYLE",
+        default_value = "false"
+    )]
     pub registry_s3_path_style: bool,
 
     /// Public URL the registry is reachable at, used to populate the
@@ -80,6 +101,18 @@ pub struct Config {
     /// in-cluster kaniko builds.
     #[arg(long, env = "DECKWATCH_REGISTRY_PUBLIC_URL", default_value = "")]
     pub registry_public_url: String,
+
+    /// Database URL. Defaults to SQLite file.
+    /// Examples:
+    ///   sqlite:///data/deckwatch.db?mode=rwc
+    ///   postgres://user:pass@host:5432/deckwatch
+    ///   mysql://user:pass@host:3306/deckwatch
+    #[arg(
+        long,
+        env = "DECKWATCH_DATABASE_URL",
+        default_value = "sqlite:///app/deckwatch.db?mode=rwc"
+    )]
+    pub database_url: String,
 }
 
 impl Config {

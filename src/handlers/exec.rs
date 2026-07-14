@@ -63,7 +63,9 @@ async fn run_exec(
 
     // Kubernetes' exec API takes an argv slice; running `/bin/sh -c /bin/sh` would be silly, so
     // pass the command as a single argv element and let PID 1 in the container handle it.
-    let mut attached = pods_api.exec(&pod_name, [command.as_str()], &params).await?;
+    let mut attached = pods_api
+        .exec(&pod_name, [command.as_str()], &params)
+        .await?;
 
     let mut stdout = attached
         .stdout()
@@ -116,10 +118,12 @@ async fn run_exec(
                 Message::Binary(b) if b.first() == Some(&0x04) => {
                     if let Some(ref mut tx) = resize_tx {
                         if let Ok(size) = serde_json::from_slice::<ClientTerminalSize>(&b[1..]) {
-                            let _ = tx.send(TerminalSize {
-                                width: size.cols,
-                                height: size.rows,
-                            }).await;
+                            let _ = tx
+                                .send(TerminalSize {
+                                    width: size.cols,
+                                    height: size.rows,
+                                })
+                                .await;
                         }
                     }
                 }

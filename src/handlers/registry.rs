@@ -239,11 +239,19 @@ fn oci_error(status: StatusCode, code: &str, message: &str) -> Response {
 }
 
 fn name_invalid() -> Response {
-    oci_error(StatusCode::BAD_REQUEST, "NAME_INVALID", "invalid repository name")
+    oci_error(
+        StatusCode::BAD_REQUEST,
+        "NAME_INVALID",
+        "invalid repository name",
+    )
 }
 
 fn blob_unknown() -> Response {
-    oci_error(StatusCode::NOT_FOUND, "BLOB_UNKNOWN", "blob unknown to registry")
+    oci_error(
+        StatusCode::NOT_FOUND,
+        "BLOB_UNKNOWN",
+        "blob unknown to registry",
+    )
 }
 
 fn manifest_unknown() -> Response {
@@ -303,7 +311,8 @@ pub async fn head_manifest(
     let mut headers = HeaderMap::new();
     headers.insert(
         header::CONTENT_TYPE,
-        HeaderValue::from_str(&meta.media_type).unwrap_or(HeaderValue::from_static("application/octet-stream")),
+        HeaderValue::from_str(&meta.media_type)
+            .unwrap_or(HeaderValue::from_static("application/octet-stream")),
     );
     headers.insert(
         "Docker-Content-Digest",
@@ -767,16 +776,15 @@ pub async fn patch_upload(
             let Some(path) = fs.upload_path(&uuid) else {
                 return upload_unknown();
             };
-            let mut file = match tokio::fs::OpenOptions::new()
-                .append(true)
-                .open(&path)
-                .await
-            {
+            let mut file = match tokio::fs::OpenOptions::new().append(true).open(&path).await {
                 Ok(f) => f,
                 Err(_) => return upload_unknown(),
             };
 
-            let mut written: u64 = tokio::fs::metadata(&path).await.map(|m| m.len()).unwrap_or(0);
+            let mut written: u64 = tokio::fs::metadata(&path)
+                .await
+                .map(|m| m.len())
+                .unwrap_or(0);
             let mut stream = body.into_data_stream();
             while let Some(chunk) = stream.next().await {
                 let chunk = match chunk {
@@ -1016,7 +1024,13 @@ struct CatalogResponse {
 
 pub async fn list_catalog(State(store): State<RegistryStore>) -> Response {
     let repos = list_repositories(&store).await;
-    (StatusCode::OK, axum::Json(CatalogResponse { repositories: repos })).into_response()
+    (
+        StatusCode::OK,
+        axum::Json(CatalogResponse {
+            repositories: repos,
+        }),
+    )
+        .into_response()
 }
 
 #[derive(Debug, Serialize)]
@@ -1033,11 +1047,7 @@ pub async fn list_tags(
         return name_invalid();
     }
     let tags = list_tags_for(&store, &name).await;
-    (
-        StatusCode::OK,
-        axum::Json(TagListResponse { name, tags }),
-    )
-        .into_response()
+    (StatusCode::OK, axum::Json(TagListResponse { name, tags })).into_response()
 }
 
 /// Walks the manifest tree collecting every directory (S3: prefix) that
