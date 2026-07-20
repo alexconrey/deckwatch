@@ -1,3 +1,4 @@
+#![allow(dead_code, unused_imports)]
 //! `POST /api/webhooks/gitops` — GitHub / GitLab / Bitbucket delivery
 //! receiver. Runs unauthenticated because the provider drives it: security
 //! is entirely the shared-secret signature check that

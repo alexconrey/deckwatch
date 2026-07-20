@@ -1,3 +1,4 @@
+#![allow(dead_code, unused_imports)]
 //! Creates/updates the cluster-scoped `ValidatingWebhookConfiguration`
 //! on startup so the API server knows to route Deployment and Ingress
 //! admissions to our HTTPS listener.

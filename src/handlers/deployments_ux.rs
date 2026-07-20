@@ -99,7 +99,7 @@ pub async fn history(
 
     // Newest revision first — this is what operators expect from
     // `kubectl rollout history`.
-    revisions.sort_by(|a, b| b.revision.cmp(&a.revision));
+    revisions.sort_by_key(|r| std::cmp::Reverse(r.revision));
 
     Ok(Json(HistoryResponse { revisions }))
 }

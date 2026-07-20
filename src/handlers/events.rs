@@ -1,3 +1,4 @@
+#![allow(dead_code, unused_imports)]
 use axum::extract::{Path, Query, State};
 use axum::Json;
 use kube::api::ListParams;
@@ -59,7 +60,7 @@ pub async fn list_namespaced(
     t.finish(list.is_ok());
     let list = list?;
     let mut events: Vec<EventSummary> = list.iter().map(event_summary).collect();
-    events.sort_by(|a, b| sort_key(b).cmp(&sort_key(a)));
+    events.sort_by_key(|e| std::cmp::Reverse(sort_key(e)));
     Ok(Json(EventListResponse { events }))
 }
 
@@ -96,6 +97,6 @@ pub async fn list_cluster(
         })
         .map(event_summary)
         .collect();
-    events.sort_by(|a, b| sort_key(b).cmp(&sort_key(a)));
+    events.sort_by_key(|e| std::cmp::Reverse(sort_key(e)));
     Ok(Json(EventListResponse { events }))
 }

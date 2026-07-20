@@ -1,3 +1,4 @@
+#![allow(dead_code, unused_imports)]
 //! Self-signed TLS bootstrap for the admission webhook listener.
 //!
 //! Every startup mints a fresh CA + server cert with `rcgen`. The pair
