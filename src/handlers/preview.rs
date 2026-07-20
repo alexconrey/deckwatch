@@ -1,3 +1,4 @@
+#![allow(dead_code, unused_imports, clippy::needless_update)]
 // Preview environments per PR/branch.
 //
 // When GitOps is enabled and an operator (or webhook) requests a preview

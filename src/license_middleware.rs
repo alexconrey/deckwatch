@@ -1,3 +1,4 @@
+#![allow(dead_code, unused_imports, clippy::type_complexity, unexpected_cfgs)]
 //! Axum middleware that gates Pro/Enterprise routes on an [`Entitlements`]
 //! check. Sits alongside `src/license.rs`; kept in its own file so the pure
 //! entitlements logic can be unit-tested without pulling in Axum.

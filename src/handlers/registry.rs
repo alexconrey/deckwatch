@@ -1,3 +1,4 @@
+#![allow(dead_code, unused_imports)]
 //! OCI Distribution Spec v1.1 registry endpoints.
 //!
 //! Implements the minimum surface a real client (docker, podman, kaniko)

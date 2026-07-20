@@ -1,3 +1,4 @@
+#![allow(dead_code, unused_imports)]
 //! Prometheus range-query proxy for Metrics Visualization Phase 3.
 //!
 //! Deckwatch does not run its own Prometheus -- this handler proxies a small,

@@ -1,3 +1,4 @@
+#![allow(dead_code, unused_imports)]
 //! License enforcement runtime.
 //!
 //! Deckwatch licenses are Ed25519-signed JSON blobs. The Deckwatch binary

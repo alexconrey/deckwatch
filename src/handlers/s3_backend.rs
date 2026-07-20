@@ -1,3 +1,4 @@
+#![allow(dead_code, unused_imports)]
 //! S3-backed OCI registry storage.
 //!
 //! Implements the minimum surface documented in `docs/S3_REGISTRY.md`

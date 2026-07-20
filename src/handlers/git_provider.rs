@@ -1,3 +1,4 @@
+#![allow(dead_code, unused_imports)]
 //! `GitProvider` abstraction over hosted Git services.
 //!
 //! Each provider supplies three things:

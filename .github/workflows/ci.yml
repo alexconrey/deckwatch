@@ -32,7 +32,7 @@ jobs:
         run: cargo check --locked
 
       - name: cargo clippy
-        run: cargo clippy -- -W clippy::all
+        run: cargo clippy -- -D warnings
 
       - name: cargo fmt
         run: cargo fmt --check

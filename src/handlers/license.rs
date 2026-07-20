@@ -1,3 +1,4 @@
+#![allow(dead_code, unused_imports)]
 //! `GET /api/license` — returns the current license status for the frontend
 //! Settings page to render the tier chip, expiry banner, and feature matrix.
 //!

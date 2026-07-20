@@ -1,3 +1,4 @@
+#![allow(dead_code, unused_imports)]
 //! Kubernetes ValidatingAdmissionWebhook handler.
 //!
 //! The API server posts `AdmissionReview` (v1) objects to

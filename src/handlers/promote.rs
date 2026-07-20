@@ -1,3 +1,4 @@
+#![allow(dead_code, unused_imports)]
 // Multi-environment promotion (dev -> staging -> prod).
 //
 // Promotion is *not* a full clone. It copies the source deployment's

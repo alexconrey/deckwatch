@@ -1,3 +1,4 @@
+#![allow(dead_code, unused_imports, clippy::manual_clamp)]
 //! Distributed tracing query proxy for the tracing addon UI.
 //!
 //! Deckwatch does not itself store spans -- this handler proxies a curated

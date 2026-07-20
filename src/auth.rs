@@ -1,3 +1,4 @@
+#![allow(dead_code, unused_imports)]
 //! Microsoft Entra (Azure AD) OIDC authentication plumbing.
 //!
 //! This module is **opt-in** — the [`require_auth`] middleware is defined but

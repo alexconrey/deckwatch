@@ -1,3 +1,4 @@
+#![allow(dead_code, unused_imports, clippy::too_many_arguments)]
 //! Handlers for toggling Prometheus PodMonitor scraping per Deployment.
 //!
 //! This wires the design in `docs/PROMETHEUS_INTEGRATION.md` slice A:

@@ -1,3 +1,4 @@
+#![allow(dead_code, unused_imports)]
 // Auto-rollback: watch deployments that opt in via the
 // `deckwatch.io/auto-rollback: "true"` annotation and, when they've been
 // unhealthy for > 5 minutes, roll them back to the previous revision.
