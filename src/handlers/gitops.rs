@@ -696,3 +696,7 @@ pub async fn list_job_pods(
         .collect();
     Ok(Json(JobPodListResponse { pods: summaries }))
 }
+
+#[cfg(test)]
+#[path = "../handlers_gitops_tests.rs"]
+mod tests;
