@@ -299,3 +299,7 @@ fn build_promote_patch(source: &Deployment, change_cause: Option<&str>) -> serde
         }
     })
 }
+
+#[cfg(test)]
+#[path = "../handlers_promote_tests.rs"]
+mod handlers_promote_tests;
