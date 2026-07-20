@@ -94,6 +94,7 @@ async fn main() {
         } else {
             Some(config.registry_public_url.clone())
         },
+        registry_enabled: config.registry_enabled,
         ai_rate_limiter,
         db,
     };

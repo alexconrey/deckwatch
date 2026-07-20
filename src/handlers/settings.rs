@@ -62,11 +62,6 @@ pub struct DeckwatchSettings {
     /// in the settings pane.
     #[serde(default = "default_true")]
     pub prometheus_enabled: bool,
-    /// Runtime toggle for the embedded container registry UI. When false,
-    /// the Registry nav link is hidden and the registry page is
-    /// inaccessible. Defaults to false so the feature is opt-in.
-    #[serde(default)]
-    pub registry_enabled: bool,
     /// Runtime toggle for the Claude AI diagnostic provider. When false,
     /// the "Diagnose with AI" / "Fix with AI" buttons hide Claude as an
     /// option across all users. Defaults to true (the shipping provider).
@@ -389,7 +384,6 @@ fn default_settings(state: &AppState) -> DeckwatchSettings {
         git_token_secrets: Vec::new(),
         tracing: Some(TracingSettings::default()),
         prometheus_enabled: true,
-        registry_enabled: false,
         ai_claude_enabled: true,
         ai_codex_enabled: true,
     }
