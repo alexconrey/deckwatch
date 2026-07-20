@@ -487,3 +487,7 @@ mod tests {
         assert!(resp.allowed);
     }
 }
+
+#[cfg(test)]
+#[path = "../handlers_admission_tests.rs"]
+mod handlers_admission_tests;
