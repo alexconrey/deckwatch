@@ -372,3 +372,7 @@ async fn ensure_service(
     res?;
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "../handlers_ingresses_tests.rs"]
+mod tests;
