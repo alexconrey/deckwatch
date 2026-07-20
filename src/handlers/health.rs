@@ -13,7 +13,7 @@ pub async fn features(State(state): State<AppState>) -> Json<Value> {
     let settings = crate::handlers::settings::load_settings_from_db(&state).await;
     Json(json!({
         "prometheus": settings.prometheus_enabled,
-        "registry": settings.registry_enabled,
+        "registry": state.registry_enabled,
     }))
 }
 

@@ -511,7 +511,6 @@ export interface DeckwatchSettings {
   oci_registries: OciRegistry[];
   git_token_secrets: GitTokenSecret[];
   prometheus_enabled?: boolean;
-  registry_enabled?: boolean;
   ai_claude_enabled?: boolean;
   ai_codex_enabled?: boolean;
   cost?: CostSettings | null;

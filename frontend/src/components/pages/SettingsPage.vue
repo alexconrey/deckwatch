@@ -99,7 +99,6 @@ const { refresh: refreshAiSettings } = useAiSettings();
 
 // Managed lists.
 const prometheusEnabled = ref(true);
-const registryEnabled = ref(false);
 
 // AI provider toggles are now server-side settings, persisted alongside the
 // rest of DeckwatchSettings so an admin toggle applies to all users.
@@ -177,7 +176,6 @@ function applySettings(s: DeckwatchSettings) {
   ociRegistries.value = s.oci_registries ?? [];
   gitTokenSecrets.value = s.git_token_secrets ?? [];
   prometheusEnabled.value = s.prometheus_enabled ?? true;
-  registryEnabled.value = s.registry_enabled ?? false;
   aiClaudeEnabled.value = s.ai_claude_enabled ?? true;
   aiCodexEnabled.value = s.ai_codex_enabled ?? true;
 }
@@ -233,7 +231,6 @@ function buildPayload(): DeckwatchSettings {
     git_token_secrets: gitTokenSecrets.value,
     cost: hasAnyCostRate() ? costSettings.value : null,
     prometheus_enabled: prometheusEnabled.value,
-    registry_enabled: registryEnabled.value,
     ai_claude_enabled: aiClaudeEnabled.value,
     ai_codex_enabled: aiCodexEnabled.value,
   };
@@ -601,21 +598,6 @@ onMounted(load);
               </v-col>
             </v-row>
 
-            <v-divider class="my-6" />
-
-            <h3 class="text-h6 mb-2">Container Registry</h3>
-            <p class="text-body-2 text-secondary mb-3">
-              When enabled, the Registry page is accessible from the
-              navigation bar. Disable to hide the registry UI entirely.
-            </p>
-            <v-switch
-              v-model="registryEnabled"
-              color="primary"
-              label="Enable container registry"
-              hide-details
-              inset
-              density="compact"
-            />
 
             <v-divider class="my-6" />
 

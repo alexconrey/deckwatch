@@ -22,6 +22,7 @@ pub struct AppState {
     /// registries dropdown) and by watcher.rs (decides whether kaniko
     /// needs `--insecure` for pushes to the local registry).
     pub registry_public_url: Option<String>,
+    pub registry_enabled: bool,
     /// Per-namespace rate limiter for AI-agent jobs (diagnostics + ai-fix).
     /// Shared across all handlers via `AppState` clones — the limiter
     /// itself is an `Arc<Mutex<..>>` internally so counters are consistent
