@@ -474,3 +474,7 @@ mod tests {
         assert_eq!(s.root_span_name, "unknown");
     }
 }
+
+#[cfg(test)]
+#[path = "../handlers_tracing_handler_tests.rs"]
+mod handlers_tracing_handler_tests;

@@ -521,3 +521,7 @@ mod tests {
         assert_eq!(fallback_metric_name(QueryKind::CpuUsage), "");
     }
 }
+
+#[cfg(test)]
+#[path = "../handlers_prometheus_query_tests.rs"]
+mod handlers_prometheus_query_tests;
