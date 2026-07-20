@@ -695,3 +695,7 @@ fn make_short_name(prefix: &str, agent: &str, source: &str, ts: i64) -> String {
 
     format!("{}-{}-{}", prefix, agent, &short_hash[..8])
 }
+
+#[cfg(test)]
+#[path = "../handlers_ai_fix_tests.rs"]
+mod handlers_ai_fix_tests;
