@@ -881,3 +881,7 @@ pub async fn set_auto_rollback(
 // The frontend reads the current state directly from the Deployment's
 // `annotations` map (already surfaced in DeploymentDetail via
 // `kube_ext::deployment_detail`) — no separate GET endpoint is needed.
+
+#[cfg(test)]
+#[path = "../handlers_deployments_ux_tests.rs"]
+mod handlers_deployments_ux_tests;

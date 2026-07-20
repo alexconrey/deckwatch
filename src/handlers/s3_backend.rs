@@ -617,3 +617,7 @@ fn strip_prefix(child: &OPath, base: &OPath) -> Option<String> {
 // with a thin match at each handler call site. When you later hoist to
 // the `dyn StorageBackend` trait per the design doc, both variants
 // collapse into `Arc<dyn StorageBackend>` and the match disappears.
+
+#[cfg(test)]
+#[path = "../handlers_s3_backend_tests.rs"]
+mod handlers_s3_backend_tests;
