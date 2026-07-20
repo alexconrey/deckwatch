@@ -776,7 +776,7 @@ const probeHints: Record<string, string> = {
     <div class="text-subtitle-2 mb-2">Health Checks</div>
 
     <template
-      v-for="(probeKey, probeLabel) in {
+      v-for="(probeLabel, probeKey) in {
         livenessProbe: 'Liveness Probe',
         readinessProbe: 'Readiness Probe',
         startupProbe: 'Startup Probe',
