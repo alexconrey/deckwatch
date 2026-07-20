@@ -315,43 +315,5 @@ fn templates_equal(a: &DeploymentTemplate, b: &DeploymentTemplate) -> bool {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn merge_appends_custom_entries() {
-        let defaults = default_catalog();
-        let defaults_len = defaults.len();
-        let custom = vec![DeploymentTemplate {
-            id: "custom-thing".to_string(),
-            name: "Custom".to_string(),
-            description: "d".to_string(),
-            icon: "mdi-star".to_string(),
-            category: TemplateCategory::WebApp,
-            payload: serde_json::json!({"name": ""}),
-            builtin: false,
-        }];
-        let merged = merge_catalog(defaults, custom);
-        assert_eq!(merged.len(), defaults_len + 1);
-        assert_eq!(merged.last().unwrap().id, "custom-thing");
-        assert!(!merged.last().unwrap().builtin);
-    }
-
-    #[test]
-    fn merge_overrides_builtin_in_place() {
-        let defaults = default_catalog();
-        let overrides = vec![DeploymentTemplate {
-            id: "web-app".to_string(),
-            name: "Custom Web App".to_string(),
-            description: "d".to_string(),
-            icon: "mdi-web".to_string(),
-            category: TemplateCategory::WebApp,
-            payload: serde_json::json!({"image": "custom:latest"}),
-            builtin: false,
-        }];
-        let merged = merge_catalog(defaults, overrides);
-        let web = merged.iter().find(|t| t.id == "web-app").unwrap();
-        assert_eq!(web.name, "Custom Web App");
-        assert!(web.builtin, "overridden default should retain builtin=true");
-    }
-}
+#[path = "../handlers_templates_tests.rs"]
+mod handlers_templates_tests;
