@@ -982,3 +982,7 @@ fn make_short_name(prefix: &str, agent: &str, source: &str, ts: i64) -> String {
     // negligible in practice (different ts values for the same pod).
     format!("{}-{}-{}", prefix, agent, &short_hash[..8])
 }
+
+#[cfg(test)]
+#[path = "../handlers_diagnostics_tests.rs"]
+mod handlers_diagnostics_tests;

@@ -173,7 +173,7 @@ fn feature_catalog() -> Vec<FeatureCatalogEntry> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::license::{License, LicensePayload, Limits};
+    use crate::license::{Entitlements, License, LicensePayload, Limits, Tier};
 
     #[test]
     fn catalog_covers_every_pro_and_enterprise_default_feature() {
