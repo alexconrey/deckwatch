@@ -10,10 +10,10 @@ use crate::audit;
 use crate::auth::{self, AuthConfig};
 use crate::handlers::registry::RegistryStore;
 use crate::handlers::{
-    addons, ai_fix, applications, autoscaling, configmaps_ui, cronjobs, deployments,
-    deployments_ux, diagnostics, docs, events, exec, git, gitops, health, ingresses, logs,
-    monitoring, namespaces, nodes, pods, portforward, registry, registry_ui, resource_metrics,
-    secrets, settings, templates,
+    addons, admission, ai_fix, applications, autoscaling, configmaps_ui, cronjobs, deployments,
+    deployments_ux, diagnostics, docs, events, exec, git, gitops, health, ingresses, license, logs,
+    monitoring, namespaces, nodes, pods, portforward, prometheus_query, promote, registry,
+    registry_ui, resource_metrics, secrets, settings, templates, tracing_handler, webhooks,
 };
 use crate::metrics;
 use crate::state::AppState;
@@ -51,6 +51,13 @@ pub fn build_router(
         .route("/api/docs", get(docs::swagger_ui))
         .route("/api/docs/pages", get(docs::list_pages))
         .route("/api/docs/pages/{slug}", get(docs::get_page))
+        .route("/api/license", get(license::get_license))
+        .route("/api/webhooks/git", post(webhooks::receive))
+        // Kubernetes ValidatingAdmissionWebhook endpoint. K8s sends
+        // AdmissionReview requests directly, so this must be public (no auth
+        // layer). The webhook config uses `failurePolicy: Ignore`, so the
+        // handler is fail-open by design.
+        .route("/api/admission/validate", post(admission::validate))
         .with_state(state.clone());
 
     let private_api = Router::new()
@@ -258,6 +265,11 @@ pub fn build_router(
                 .put(monitoring::upsert)
                 .delete(monitoring::delete),
         )
+        // Prometheus range-query proxy (PromQL via curated query catalog)
+        .route(
+            "/api/prometheus/query_range",
+            get(prometheus_query::query_range),
+        )
         // HPA Autoscaling
         .route(
             "/api/namespaces/{ns}/deployments/{name}/hpa",
@@ -285,6 +297,16 @@ pub fn build_router(
         )
         // Notifications
         .route("/api/notifications/test", post(settings::test_notification))
+        // Cross-namespace deployment promotion
+        .route(
+            "/api/namespaces/{ns}/deployments/{name}/promote",
+            post(promote::promote),
+        )
+        // Distributed tracing query proxy (Tempo / Jaeger)
+        .route(
+            "/api/namespaces/{ns}/deployments/{name}/traces",
+            get(tracing_handler::list_traces),
+        )
         // Audit log
         .route("/api/audit", get(audit::list_audit_logs))
         .with_state(state)
