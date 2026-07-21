@@ -1,3 +1,4 @@
+mod anthropic;
 pub mod audit;
 mod auth;
 mod auto_rollback;

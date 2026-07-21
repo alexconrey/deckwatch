@@ -224,3 +224,124 @@ fn cm_name_formats_correctly() {
 fn member_selector_formats_correctly() {
     assert_eq!(member_selector("web"), "deckwatch.io/application=web");
 }
+
+// ---- Tests for direct Anthropic API integration ----
+
+#[test]
+fn test_ai_fix_prompt_includes_context() {
+    // AI_FIX_PROMPT is the system instruction. Verify it contains the
+    // expected keywords for Kubernetes application analysis.
+    assert!(!AI_FIX_PROMPT.is_empty());
+    assert!(
+        AI_FIX_PROMPT.contains("Kubernetes"),
+        "AI_FIX_PROMPT should mention Kubernetes"
+    );
+    assert!(
+        AI_FIX_PROMPT.contains("Deckwatch"),
+        "AI_FIX_PROMPT should mention Deckwatch"
+    );
+    assert!(
+        AI_FIX_PROMPT.contains("fix") || AI_FIX_PROMPT.contains("fixes"),
+        "AI_FIX_PROMPT should mention fixes"
+    );
+    assert!(
+        AI_FIX_PROMPT.contains("Dockerfile") || AI_FIX_PROMPT.contains("health"),
+        "AI_FIX_PROMPT should mention common K8s issues"
+    );
+}
+
+#[test]
+fn test_ai_fix_request_agent_variants() {
+    // Verify AiFixRequest deserializes with both agent variants.
+    let claude_json = serde_json::json!({ "agent": "claude" });
+    let codex_json = serde_json::json!({ "agent": "codex" });
+
+    let claude_req: AiFixRequest = serde_json::from_value(claude_json).unwrap();
+    assert_eq!(claude_req.agent, DiagAgent::Claude);
+
+    let codex_req: AiFixRequest = serde_json::from_value(codex_json).unwrap();
+    assert_eq!(codex_req.agent, DiagAgent::Codex);
+
+    // Unknown agents should be rejected.
+    let unknown_json = serde_json::json!({ "agent": "gpt" });
+    assert!(serde_json::from_value::<AiFixRequest>(unknown_json).is_err());
+}
+
+#[test]
+fn test_gather_context_structure() {
+    // build_context_markdown is the function that assembles the prompt
+    // context. Verify its output contains expected section headers.
+    let context = build_context_markdown(
+        "my-app",
+        "production",
+        "A web application",
+        "https://github.com/example/my-app",
+        "main",
+        "### Pod `my-app-abc123` (restarts: 5)\n\n```\nOOMKilled\n```\n",
+        "- `my-app`: 1/3 ready, 1 available, image=`my-app:v1.2.3`\n",
+    );
+
+    assert!(
+        context.contains("my-app"),
+        "context should contain the app name"
+    );
+    assert!(
+        context.contains("production"),
+        "context should contain the namespace"
+    );
+    assert!(
+        context.contains("https://github.com/example/my-app"),
+        "context should contain the repo URL"
+    );
+    assert!(
+        context.contains("Deployment status"),
+        "context should have a deployment status section"
+    );
+    assert!(
+        context.contains("crash logs"),
+        "context should have a crash logs section"
+    );
+    assert!(
+        context.contains("OOMKilled"),
+        "context should include the crash log content"
+    );
+    assert!(
+        context.contains("1/3 ready"),
+        "context should include deployment status details"
+    );
+}
+
+#[test]
+fn test_build_context_markdown_empty_description() {
+    // When description is empty, the context should show a placeholder.
+    let context = build_context_markdown(
+        "bare-app",
+        "default",
+        "",
+        "https://github.com/example/bare",
+        "main",
+        "",
+        "(no deployments)",
+    );
+
+    assert!(
+        context.contains("(no description)"),
+        "empty description should show placeholder"
+    );
+    assert!(
+        context.contains("(no recent crash logs collected)"),
+        "empty crash logs should show placeholder"
+    );
+}
+
+#[test]
+fn test_build_context_markdown_empty_crash_logs() {
+    // When crash logs are empty/whitespace, a placeholder should appear.
+    let context =
+        build_context_markdown("app", "ns", "desc", "https://repo", "main", "   ", "status");
+
+    assert!(
+        context.contains("(no recent crash logs collected)"),
+        "whitespace-only crash logs should show placeholder"
+    );
+}
