@@ -6,6 +6,8 @@ import { useAiSettings } from "@/composables/useAiSettings";
 import { useClusterAlertSettings } from "@/composables/useClusterAlertSettings";
 import AuditLogPage from "@/components/pages/AuditLogPage.vue";
 import type {
+  AiProviderConfig,
+  AiProviderType,
   AuthSettings,
   CostSettings,
   DeckwatchSettings,
@@ -105,6 +107,17 @@ const prometheusEnabled = ref(true);
 const aiClaudeEnabled = ref(true);
 const aiCodexEnabled = ref(true);
 
+const AI_PROVIDER_OPTIONS: { value: AiProviderType; title: string; description: string }[] = [
+  { value: "native", title: "Anthropic (Native)", description: "Direct API via api.anthropic.com" },
+  { value: "vertex_ai", title: "Google Vertex AI", description: "Anthropic models via GCP Vertex AI" },
+  { value: "bedrock", title: "AWS Bedrock", description: "Anthropic models via AWS Bedrock (coming soon)" },
+];
+
+const aiProvider = ref<AiProviderConfig>({
+  type: "native",
+  api_key_secret: "deckwatch-anthropic-api-key",
+});
+
 const gitRepositories = ref<GitRepository[]>([]);
 const ociRegistries = ref<OciRegistry[]>([]);
 const gitTokenSecrets = ref<GitTokenSecret[]>([]);
@@ -178,6 +191,10 @@ function applySettings(s: DeckwatchSettings) {
   prometheusEnabled.value = s.prometheus_enabled ?? true;
   aiClaudeEnabled.value = s.ai_claude_enabled ?? true;
   aiCodexEnabled.value = s.ai_codex_enabled ?? true;
+  aiProvider.value = s.ai_provider ?? {
+    type: "native",
+    api_key_secret: "deckwatch-anthropic-api-key",
+  };
 }
 
 async function load() {
@@ -233,6 +250,7 @@ function buildPayload(): DeckwatchSettings {
     prometheus_enabled: prometheusEnabled.value,
     ai_claude_enabled: aiClaudeEnabled.value,
     ai_codex_enabled: aiCodexEnabled.value,
+    ai_provider: aiProvider.value,
   };
 }
 
@@ -838,6 +856,109 @@ onMounted(load);
               />
             </div>
           </v-card>
+
+          <v-divider class="my-6" />
+
+          <h3 class="text-h6 mb-2">Claude API Provider</h3>
+          <p class="text-body-2 text-secondary mb-4">
+            Select how Deckwatch connects to the Claude API. Native uses the
+            Anthropic API directly. Vertex AI routes through Google Cloud.
+            Bedrock routes through AWS (coming soon).
+          </p>
+
+          <v-select
+            :model-value="aiProvider.type"
+            :items="AI_PROVIDER_OPTIONS"
+            item-title="title"
+            item-value="value"
+            label="Provider"
+            variant="outlined"
+            density="comfortable"
+            class="mb-4"
+            @update:model-value="(v: AiProviderType) => {
+              if (v === 'native') {
+                aiProvider = { type: 'native', api_key_secret: 'deckwatch-anthropic-api-key' };
+              } else if (v === 'vertex_ai') {
+                aiProvider = { type: 'vertex_ai', project_id: '', region: 'us-central1', sa_key_secret: 'deckwatch-gcp-sa-key' };
+              } else {
+                aiProvider = { type: 'bedrock', region: 'us-east-1', model_id: 'anthropic.claude-sonnet-4-20250514-v1:0' };
+              }
+            }"
+          />
+
+          <!-- Native provider fields -->
+          <template v-if="aiProvider.type === 'native'">
+            <v-text-field
+              v-model="aiProvider.api_key_secret"
+              label="API key Secret name"
+              placeholder="deckwatch-anthropic-api-key"
+              variant="outlined"
+              density="comfortable"
+              hint="Name of the Kubernetes Secret containing the 'api-key' data key"
+              persistent-hint
+            />
+          </template>
+
+          <!-- Vertex AI provider fields -->
+          <template v-if="aiProvider.type === 'vertex_ai'">
+            <v-row>
+              <v-col cols="12" md="6">
+                <v-text-field
+                  v-model="aiProvider.project_id"
+                  label="GCP Project ID"
+                  placeholder="my-gcp-project"
+                  variant="outlined"
+                  density="comfortable"
+                />
+              </v-col>
+              <v-col cols="12" md="6">
+                <v-text-field
+                  v-model="aiProvider.region"
+                  label="Region"
+                  placeholder="us-central1"
+                  variant="outlined"
+                  density="comfortable"
+                />
+              </v-col>
+            </v-row>
+            <v-text-field
+              v-model="aiProvider.sa_key_secret"
+              label="Service account key Secret name"
+              placeholder="deckwatch-gcp-sa-key"
+              variant="outlined"
+              density="comfortable"
+              hint="Name of the Kubernetes Secret containing the 'gcp-sa-key' data key (JSON service account key)"
+              persistent-hint
+            />
+          </template>
+
+          <!-- Bedrock provider fields -->
+          <template v-if="aiProvider.type === 'bedrock'">
+            <v-alert type="info" variant="tonal" class="mb-4">
+              AWS Bedrock support is coming soon. SigV4 request signing is
+              required and not yet implemented.
+            </v-alert>
+            <v-row>
+              <v-col cols="12" md="6">
+                <v-text-field
+                  v-model="aiProvider.region"
+                  label="AWS Region"
+                  placeholder="us-east-1"
+                  variant="outlined"
+                  density="comfortable"
+                />
+              </v-col>
+              <v-col cols="12" md="6">
+                <v-text-field
+                  v-model="aiProvider.model_id"
+                  label="Model ID"
+                  placeholder="anthropic.claude-sonnet-4-20250514-v1:0"
+                  variant="outlined"
+                  density="comfortable"
+                />
+              </v-col>
+            </v-row>
+          </template>
         </div>
 
         <!-- Observability -->

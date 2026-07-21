@@ -72,6 +72,50 @@ pub struct DeckwatchSettings {
     /// once the backend wiring ships.
     #[serde(default = "default_true")]
     pub ai_codex_enabled: bool,
+    /// Selects which AI backend provider to use for Claude API calls.
+    /// Supports native Anthropic API, Google Vertex AI, and AWS Bedrock.
+    /// Defaults to `native` with the standard API key secret.
+    #[serde(default)]
+    pub ai_provider: AiProviderConfig,
+}
+
+/// Configuration for the AI provider backend. Tagged enum so the JSON
+/// representation includes a `"type"` discriminator and only the fields
+/// relevant to the chosen provider are present.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum AiProviderConfig {
+    Native {
+        #[serde(default = "default_native_secret")]
+        api_key_secret: String,
+    },
+    VertexAi {
+        project_id: String,
+        region: String,
+        #[serde(default = "default_vertex_secret")]
+        sa_key_secret: String,
+    },
+    Bedrock {
+        region: String,
+        #[serde(default)]
+        model_id: String,
+    },
+}
+
+impl Default for AiProviderConfig {
+    fn default() -> Self {
+        Self::Native {
+            api_key_secret: default_native_secret(),
+        }
+    }
+}
+
+fn default_native_secret() -> String {
+    "deckwatch-anthropic-api-key".to_string()
+}
+
+fn default_vertex_secret() -> String {
+    "deckwatch-gcp-sa-key".to_string()
 }
 
 fn default_true() -> bool {
@@ -386,6 +430,7 @@ fn default_settings(state: &AppState) -> DeckwatchSettings {
         prometheus_enabled: true,
         ai_claude_enabled: true,
         ai_codex_enabled: true,
+        ai_provider: AiProviderConfig::default(),
     }
 }
 

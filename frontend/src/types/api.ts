@@ -482,6 +482,19 @@ export interface CloneResponse extends DeploymentDetailResponse {
 }
 
 
+// --- AI Provider Config ---
+
+export type AiProviderType = "native" | "vertex_ai" | "bedrock";
+
+export interface AiProviderConfig {
+  type: AiProviderType;
+  api_key_secret?: string;
+  project_id?: string;
+  region?: string;
+  sa_key_secret?: string;
+  model_id?: string;
+}
+
 // --- Settings ---
 
 export interface ResourceDefaults {
@@ -513,6 +526,7 @@ export interface DeckwatchSettings {
   prometheus_enabled?: boolean;
   ai_claude_enabled?: boolean;
   ai_codex_enabled?: boolean;
+  ai_provider?: AiProviderConfig;
   cost?: CostSettings | null;
   tracing?: TracingSettings | null;
 }
