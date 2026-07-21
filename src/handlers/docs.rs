@@ -51,6 +51,7 @@ const PAGES: &[DocPage] = &[
     doc_page!("settings", "Settings", "../../docs/SETTINGS.md"),
     doc_page!("metrics", "Metrics", "../../docs/METRICS.md"),
     doc_page!("tracing", "Tracing", "../../docs/TRACING.md"),
+    doc_page!("mcp", "MCP Integration", "../../docs/MCP.md"),
     doc_page!(
         "ai-diagnostics",
         "AI Diagnostics",

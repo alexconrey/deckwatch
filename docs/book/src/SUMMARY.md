@@ -18,11 +18,15 @@
 - [GitOps](../../GITOPS.md)
 - [Embedded OCI Registry](../../REGISTRY.md)
 
+# AI & Integrations
+
+- [MCP Integration](../../MCP.md)
+- [AI Diagnostics](../../AI_DIAGNOSTICS.md)
+
 # Observability
 
 - [Metrics](../../METRICS.md)
 - [Tracing](../../TRACING.md)
-- [AI Diagnostics](../../AI_DIAGNOSTICS.md)
 
 # Contributing
 
