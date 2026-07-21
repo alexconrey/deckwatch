@@ -716,3 +716,7 @@ fn method_not_found(request: &JsonRpcRequest) -> JsonRpcResponse {
         &format!("Method not found: {}", request.method),
     )
 }
+
+#[cfg(test)]
+#[path = "../handlers_mcp_tests.rs"]
+mod tests;
