@@ -12,7 +12,7 @@ use crate::handlers::registry::RegistryStore;
 use crate::handlers::{
     addons, admission, ai_fix, applications, autoscaling, configmaps_ui, cronjobs, deployments,
     deployments_ux, diagnostics, docs, events, exec, git, gitops, health, ingresses, license, logs,
-    monitoring, namespaces, nodes, pods, portforward, prometheus_query, promote, registry,
+    mcp, monitoring, namespaces, nodes, pods, portforward, prometheus_query, promote, registry,
     registry_ui, resource_metrics, secrets, settings, templates, tracing_handler, webhooks,
 };
 use crate::metrics;
@@ -58,6 +58,9 @@ pub fn build_router(
         // layer). The webhook config uses `failurePolicy: Ignore`, so the
         // handler is fail-open by design.
         .route("/api/admission/validate", post(admission::validate))
+        // MCP (Model Context Protocol) server endpoint. Public so MCP
+        // clients (e.g. Claude Code) can connect without a bearer token.
+        .route("/mcp", post(mcp::handle_mcp))
         .with_state(state.clone());
 
     let private_api = Router::new()
