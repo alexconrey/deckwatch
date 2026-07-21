@@ -38,6 +38,26 @@ macro_rules! doc_page {
 }
 
 const PAGES: &[DocPage] = &[
+    // User guides
+    doc_page!(
+        "getting-started",
+        "Getting Started",
+        "../../docs/GETTING_STARTED.md"
+    ),
+    doc_page!("deployments", "Deployments", "../../docs/DEPLOYMENTS.md"),
+    doc_page!("applications", "Applications", "../../docs/APPLICATIONS.md"),
+    doc_page!("ingress", "Ingress", "../../docs/INGRESS.md"),
+    doc_page!(
+        "logs-and-debugging",
+        "Logs and Debugging",
+        "../../docs/LOGS_AND_DEBUGGING.md"
+    ),
+    doc_page!(
+        "gitops-user-guide",
+        "GitOps for Developers",
+        "../../docs/GITOPS_USER_GUIDE.md"
+    ),
+    // Operator / reference docs
     doc_page!("architecture", "Architecture", "../../docs/ARCHITECTURE.md"),
     doc_page!("auth", "Authentication", "../../docs/AUTH.md"),
     doc_page!("gitops", "GitOps", "../../docs/GITOPS.md"),
