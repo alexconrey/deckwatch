@@ -56,6 +56,7 @@ async fn build_state() -> AppState {
         registry_enabled: false,
         ai_rate_limiter: RateLimiter::default(),
         db,
+        encryption_key: String::new(),
     }
 }
 

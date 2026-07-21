@@ -12,6 +12,7 @@ import type {
   CostSettings,
   DeckwatchSettings,
   DeploymentTemplate,
+  EncryptedCredentials,
   GitRepository,
   GitTokenSecret,
   NotificationEventType,
@@ -118,6 +119,18 @@ const aiProvider = ref<AiProviderConfig>({
   api_key_secret: "deckwatch-anthropic-api-key",
 });
 
+// Encrypted credentials stored in the DB. The GET response returns
+// "configured" (not the actual key) when a value is set, or null when empty.
+const credentialStatus = ref<EncryptedCredentials>({
+  anthropic_api_key: null,
+  gcp_sa_key: null,
+});
+// Input fields for new credential values. These are never pre-filled --
+// the user types a new key and clicks Save Credentials to encrypt + store.
+const anthropicKeyInput = ref("");
+const gcpSaKeyInput = ref("");
+const savingCredentials = ref(false);
+
 const gitRepositories = ref<GitRepository[]>([]);
 const ociRegistries = ref<OciRegistry[]>([]);
 const gitTokenSecrets = ref<GitTokenSecret[]>([]);
@@ -194,6 +207,10 @@ function applySettings(s: DeckwatchSettings) {
   aiProvider.value = s.ai_provider ?? {
     type: "native",
     api_key_secret: "deckwatch-anthropic-api-key",
+  };
+  credentialStatus.value = s.credentials ?? {
+    anthropic_api_key: null,
+    gcp_sa_key: null,
   };
 }
 
@@ -356,6 +373,65 @@ async function testNotification() {
     snackbar.value = true;
   } finally {
     testingNotification.value = false;
+  }
+}
+
+async function saveCredentials() {
+  savingCredentials.value = true;
+  try {
+    const req: Record<string, string> = {};
+    if (anthropicKeyInput.value) {
+      req.anthropic_api_key = anthropicKeyInput.value;
+    }
+    if (gcpSaKeyInput.value) {
+      req.gcp_sa_key = gcpSaKeyInput.value;
+    }
+    if (Object.keys(req).length === 0) {
+      snackbarMessage.value = "No credentials to save";
+      snackbarColor.value = "error";
+      snackbar.value = true;
+      return;
+    }
+    const result = await settingsApi.setCredentials(req);
+    credentialStatus.value = {
+      anthropic_api_key: result.anthropic_api_key,
+      gcp_sa_key: result.gcp_sa_key,
+    };
+    // Clear inputs after successful save.
+    anthropicKeyInput.value = "";
+    gcpSaKeyInput.value = "";
+    snackbarMessage.value = "Credentials saved and encrypted";
+    snackbarColor.value = "success";
+    snackbar.value = true;
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : "Failed to save credentials";
+    snackbarMessage.value = msg;
+    snackbarColor.value = "error";
+    snackbar.value = true;
+  } finally {
+    savingCredentials.value = false;
+  }
+}
+
+async function clearCredential(key: "anthropic_api_key" | "gcp_sa_key") {
+  savingCredentials.value = true;
+  try {
+    const req: Record<string, string> = { [key]: "" };
+    const result = await settingsApi.setCredentials(req);
+    credentialStatus.value = {
+      anthropic_api_key: result.anthropic_api_key,
+      gcp_sa_key: result.gcp_sa_key,
+    };
+    snackbarMessage.value = "Credential removed";
+    snackbarColor.value = "success";
+    snackbar.value = true;
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : "Failed to clear credential";
+    snackbarMessage.value = msg;
+    snackbarColor.value = "error";
+    snackbar.value = true;
+  } finally {
+    savingCredentials.value = false;
   }
 }
 
@@ -959,6 +1035,116 @@ onMounted(load);
               </v-col>
             </v-row>
           </template>
+
+          <v-divider class="my-6" />
+
+          <h3 class="text-h6 mb-2">API Credentials</h3>
+          <p class="text-body-2 text-secondary mb-4">
+            Store API keys encrypted in the database so they can be rotated via
+            this UI without a redeployment. When set, these take priority over
+            the Kubernetes Secret references above. Keys are encrypted with
+            AES-256-GCM before storage and never returned to the browser.
+          </p>
+
+          <!-- Anthropic API key -->
+          <v-card variant="outlined" class="mb-3 pa-4">
+            <div class="d-flex align-center mb-2">
+              <v-icon icon="mdi-key-variant" color="deep-purple" class="mr-2" />
+              <span class="text-subtitle-2">Anthropic API Key</span>
+              <v-spacer />
+              <v-chip
+                v-if="credentialStatus.anthropic_api_key"
+                size="small"
+                color="success"
+                variant="tonal"
+              >
+                Configured
+              </v-chip>
+              <v-chip v-else size="small" color="warning" variant="tonal">
+                Not set
+              </v-chip>
+            </div>
+            <v-text-field
+              v-model="anthropicKeyInput"
+              label="New API key"
+              placeholder="sk-ant-api03-..."
+              variant="outlined"
+              density="comfortable"
+              type="password"
+              hint="Paste a new key to replace the current one. Leave blank to keep existing."
+              persistent-hint
+              class="mb-2"
+            />
+            <div class="d-flex">
+              <v-btn
+                v-if="credentialStatus.anthropic_api_key"
+                variant="text"
+                color="error"
+                size="small"
+                prepend-icon="mdi-delete"
+                :loading="savingCredentials"
+                @click="clearCredential('anthropic_api_key')"
+              >
+                Remove
+              </v-btn>
+            </div>
+          </v-card>
+
+          <!-- GCP Service Account Key -->
+          <v-card variant="outlined" class="mb-3 pa-4">
+            <div class="d-flex align-center mb-2">
+              <v-icon icon="mdi-key-variant" color="blue" class="mr-2" />
+              <span class="text-subtitle-2">GCP Service Account Key (Vertex AI)</span>
+              <v-spacer />
+              <v-chip
+                v-if="credentialStatus.gcp_sa_key"
+                size="small"
+                color="success"
+                variant="tonal"
+              >
+                Configured
+              </v-chip>
+              <v-chip v-else size="small" color="warning" variant="tonal">
+                Not set
+              </v-chip>
+            </div>
+            <v-textarea
+              v-model="gcpSaKeyInput"
+              label="New service account JSON key"
+              placeholder='{"type": "service_account", ...}'
+              variant="outlined"
+              density="comfortable"
+              rows="3"
+              auto-grow
+              hint="Paste the full JSON key file contents. Leave blank to keep existing."
+              persistent-hint
+              class="mb-2"
+            />
+            <div class="d-flex">
+              <v-btn
+                v-if="credentialStatus.gcp_sa_key"
+                variant="text"
+                color="error"
+                size="small"
+                prepend-icon="mdi-delete"
+                :loading="savingCredentials"
+                @click="clearCredential('gcp_sa_key')"
+              >
+                Remove
+              </v-btn>
+            </div>
+          </v-card>
+
+          <v-btn
+            color="primary"
+            variant="tonal"
+            prepend-icon="mdi-lock"
+            :loading="savingCredentials"
+            :disabled="!anthropicKeyInput && !gcpSaKeyInput"
+            @click="saveCredentials"
+          >
+            Save Credentials
+          </v-btn>
         </div>
 
         <!-- Observability -->

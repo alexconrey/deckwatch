@@ -97,16 +97,55 @@ async fn read_secret_key(
     Ok(value)
 }
 
+/// Try to read a credential from the encrypted DB store first; fall back to
+/// the Kubernetes Secret if no DB credential is configured.
+async fn read_credential(
+    state: &AppState,
+    ns: &str,
+    credential_type: &str,
+) -> Result<String, AppError> {
+    let settings = load_settings_from_db(state).await;
+    if let Some(creds) = &settings.credentials {
+        let encrypted = match credential_type {
+            "anthropic" => creds.anthropic_api_key.as_deref(),
+            "gcp_sa" => creds.gcp_sa_key.as_deref(),
+            _ => None,
+        };
+        if let Some(enc) = encrypted {
+            if let Ok(decrypted) = crate::crypto::decrypt(&state.encryption_key, enc) {
+                return Ok(decrypted);
+            }
+        }
+    }
+    // Fallback to K8s Secret.
+    let (secret_name, data_key) = match credential_type {
+        "anthropic" => ("deckwatch-anthropic-api-key", "api-key"),
+        "gcp_sa" => ("deckwatch-gcp-sa-key", "gcp-sa-key"),
+        _ => {
+            return Err(AppError::BadRequest(format!(
+                "Unknown credential type: {credential_type}"
+            )))
+        }
+    };
+    read_secret_key(state, ns, secret_name, data_key).await
+}
+
 /// Build an `AnthropicClient` configured for the provider selected in settings.
 async fn build_ai_client(state: &AppState, ns: &str) -> Result<AnthropicClient, AppError> {
     let settings = load_settings_from_db(state).await;
     match &settings.ai_provider {
         AiProviderConfig::Native { api_key_secret } => {
-            // Allow env-var override for backward compat with existing deployments.
-            let secret_name = std::env::var("DECKWATCH_AIFIX_CLAUDE_SECRET")
-                .or_else(|_| std::env::var("DECKWATCH_DIAG_CLAUDE_SECRET"))
-                .unwrap_or_else(|_| api_key_secret.clone());
-            let key = read_secret_key(state, ns, &secret_name, "api-key").await?;
+            // Try DB-stored encrypted credential first, then env-var override,
+            // then the configured K8s Secret name.
+            let key = match read_credential(state, ns, "anthropic").await {
+                Ok(k) => k,
+                Err(_) => {
+                    let secret_name = std::env::var("DECKWATCH_AIFIX_CLAUDE_SECRET")
+                        .or_else(|_| std::env::var("DECKWATCH_DIAG_CLAUDE_SECRET"))
+                        .unwrap_or_else(|_| api_key_secret.clone());
+                    read_secret_key(state, ns, &secret_name, "api-key").await?
+                }
+            };
             Ok(AnthropicClient::native(key))
         }
         AiProviderConfig::VertexAi {
@@ -114,7 +153,10 @@ async fn build_ai_client(state: &AppState, ns: &str) -> Result<AnthropicClient, 
             region,
             sa_key_secret,
         } => {
-            let sa_json = read_secret_key(state, ns, sa_key_secret, "gcp-sa-key").await?;
+            let sa_json = match read_credential(state, ns, "gcp_sa").await {
+                Ok(k) => k,
+                Err(_) => read_secret_key(state, ns, sa_key_secret, "gcp-sa-key").await?,
+            };
             let token = crate::anthropic::exchange_sa_key_for_token(&sa_json)
                 .await
                 .map_err(|e| AppError::BadRequest(format!("GCP token exchange failed: {e}")))?;

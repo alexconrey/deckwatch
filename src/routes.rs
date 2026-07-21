@@ -298,6 +298,8 @@ pub fn build_router(
             "/api/namespaces/{ns}/pods/{pod_name}/exec",
             get(exec::exec_ws),
         )
+        // Encrypted credential management (API keys stored in DB)
+        .route("/api/settings/credentials", post(settings::set_credentials))
         // Notifications
         .route("/api/notifications/test", post(settings::test_notification))
         // Cross-namespace deployment promotion
