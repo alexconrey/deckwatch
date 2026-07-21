@@ -3,6 +3,7 @@ pub mod audit;
 mod auth;
 mod auto_rollback;
 mod config;
+mod crypto;
 mod db;
 mod entities;
 mod error;
@@ -98,6 +99,7 @@ async fn main() {
         registry_enabled: config.registry_enabled,
         ai_rate_limiter,
         db,
+        encryption_key: config.encryption_key.clone(),
     };
 
     let watcher_state = state.clone();

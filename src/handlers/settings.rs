@@ -77,6 +77,23 @@ pub struct DeckwatchSettings {
     /// Defaults to `native` with the standard API key secret.
     #[serde(default)]
     pub ai_provider: AiProviderConfig,
+    /// Encrypted API credentials stored in the database. Values are
+    /// AES-256-GCM encrypted with the `DECKWATCH_ENCRYPTION_KEY`. On GET,
+    /// non-null entries are masked as `"configured"` -- the actual key is
+    /// never returned to the frontend.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credentials: Option<EncryptedCredentials>,
+}
+
+/// Encrypted credential storage. Each field holds an AES-256-GCM ciphertext
+/// (base64 encoded) produced by [`crate::crypto::encrypt`]. Stored as-is in
+/// the settings JSON blob in the database.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct EncryptedCredentials {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub anthropic_api_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gcp_sa_key: Option<String>,
 }
 
 /// Configuration for the AI provider backend. Tagged enum so the JSON
@@ -254,7 +271,23 @@ pub async fn get_settings(
 ) -> Result<Json<DeckwatchSettings>, AppError> {
     let mut settings = load_settings_from_db(&state).await;
     inject_builtin_registry(&state, &mut settings);
+    // Never return actual encrypted keys to the frontend. Replace non-null
+    // values with the sentinel "configured" so the UI can show a badge.
+    mask_credentials(&mut settings);
     Ok(Json(settings))
+}
+
+/// Replace actual encrypted credential values with `"configured"` so the
+/// API never leaks ciphertext (or plaintext) to the frontend.
+fn mask_credentials(settings: &mut DeckwatchSettings) {
+    if let Some(creds) = &mut settings.credentials {
+        if creds.anthropic_api_key.is_some() {
+            creds.anthropic_api_key = Some("configured".to_string());
+        }
+        if creds.gcp_sa_key.is_some() {
+            creds.gcp_sa_key = Some("configured".to_string());
+        }
+    }
 }
 
 /// Load settings from the database. If the DB row doesn't exist yet, attempt
@@ -431,7 +464,115 @@ fn default_settings(state: &AppState) -> DeckwatchSettings {
         ai_claude_enabled: true,
         ai_codex_enabled: true,
         ai_provider: AiProviderConfig::default(),
+        credentials: None,
     }
+}
+
+// ---- Credential management ----
+
+/// Request body for `POST /api/settings/credentials`. The frontend sends
+/// plaintext values; we encrypt them before persisting.
+#[derive(Debug, Deserialize)]
+pub struct SetCredentialsRequest {
+    #[serde(default)]
+    pub anthropic_api_key: Option<String>,
+    #[serde(default)]
+    pub gcp_sa_key: Option<String>,
+}
+
+/// Response returned after setting credentials -- mirrors what GET returns
+/// (masked values, never the ciphertext).
+#[derive(Debug, Serialize)]
+pub struct SetCredentialsResponse {
+    pub anthropic_api_key: Option<String>,
+    pub gcp_sa_key: Option<String>,
+}
+
+/// `POST /api/settings/credentials` -- encrypt and store API keys.
+///
+/// Only the keys present in the request body are updated; omitted keys are
+/// left unchanged so the frontend can update one provider without clearing
+/// the other. Sending an explicit empty string (`""`) clears that key.
+pub async fn set_credentials(
+    State(state): State<AppState>,
+    Json(req): Json<SetCredentialsRequest>,
+) -> Result<Json<SetCredentialsResponse>, AppError> {
+    if state.encryption_key.is_empty() {
+        return Err(AppError::BadRequest(
+            "DECKWATCH_ENCRYPTION_KEY is not set — cannot store encrypted credentials".to_string(),
+        ));
+    }
+
+    let mut settings = load_settings_from_db(&state).await;
+    let mut creds = settings.credentials.take().unwrap_or_default();
+
+    // Anthropic API key.
+    if let Some(raw) = &req.anthropic_api_key {
+        if raw.is_empty() {
+            creds.anthropic_api_key = None;
+        } else {
+            let encrypted = crate::crypto::encrypt(&state.encryption_key, raw)
+                .map_err(|e| AppError::BadRequest(format!("encryption failed: {e}")))?;
+            creds.anthropic_api_key = Some(encrypted);
+        }
+    }
+
+    // GCP service account key.
+    if let Some(raw) = &req.gcp_sa_key {
+        if raw.is_empty() {
+            creds.gcp_sa_key = None;
+        } else {
+            let encrypted = crate::crypto::encrypt(&state.encryption_key, raw)
+                .map_err(|e| AppError::BadRequest(format!("encryption failed: {e}")))?;
+            creds.gcp_sa_key = Some(encrypted);
+        }
+    }
+
+    let has_any = creds.anthropic_api_key.is_some() || creds.gcp_sa_key.is_some();
+    settings.credentials = if has_any { Some(creds) } else { None };
+
+    upsert_settings_to_db(&state.db, &settings)
+        .await
+        .map_err(|e| AppError::BadRequest(format!("failed to save credentials: {e}")))?;
+
+    if let Err(e) = crate::audit::log_action(
+        &state.db,
+        "update",
+        "settings",
+        "credentials",
+        "",
+        "updated encrypted credentials",
+    )
+    .await
+    {
+        tracing::warn!(error = %e, "failed to write audit log for credential update");
+    }
+
+    // Return masked values.
+    let resp = SetCredentialsResponse {
+        anthropic_api_key: if settings
+            .credentials
+            .as_ref()
+            .and_then(|c| c.anthropic_api_key.as_ref())
+            .is_some()
+        {
+            Some("configured".to_string())
+        } else {
+            None
+        },
+        gcp_sa_key: if settings
+            .credentials
+            .as_ref()
+            .and_then(|c| c.gcp_sa_key.as_ref())
+            .is_some()
+        {
+            Some("configured".to_string())
+        } else {
+            None
+        },
+    };
+
+    Ok(Json(resp))
 }
 
 pub async fn test_notification(

@@ -515,6 +515,21 @@ export interface NotificationSettings {
   webhook_url: string;
 }
 
+export interface EncryptedCredentials {
+  anthropic_api_key: string | null;
+  gcp_sa_key: string | null;
+}
+
+export interface SetCredentialsRequest {
+  anthropic_api_key?: string;
+  gcp_sa_key?: string;
+}
+
+export interface SetCredentialsResponse {
+  anthropic_api_key: string | null;
+  gcp_sa_key: string | null;
+}
+
 export interface DeckwatchSettings {
   allowed_namespaces: string[];
   default_resource_limits: ResourceDefaults | null;
@@ -529,6 +544,7 @@ export interface DeckwatchSettings {
   ai_provider?: AiProviderConfig;
   cost?: CostSettings | null;
   tracing?: TracingSettings | null;
+  credentials?: EncryptedCredentials | null;
 }
 
 export interface CostSettings {

@@ -113,6 +113,14 @@ pub struct Config {
         default_value = "sqlite:///app/deckwatch.db?mode=rwc"
     )]
     pub database_url: String,
+
+    /// Encryption key for API keys stored in the database. When set, the
+    /// settings credentials endpoint encrypts values with AES-256-GCM before
+    /// persisting them. The key is derived via SHA-256, so any non-empty
+    /// string works. In production, Helm generates a random Secret on first
+    /// install (`secret-encryption-key.yaml`).
+    #[arg(long, env = "DECKWATCH_ENCRYPTION_KEY", default_value = "")]
+    pub encryption_key: String,
 }
 
 impl Config {
