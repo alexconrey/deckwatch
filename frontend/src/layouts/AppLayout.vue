@@ -179,7 +179,7 @@ const onNsCreated = (name: string) => {
   </v-main>
 
   <v-footer class="text-caption text-secondary d-flex align-center justify-center ga-2" style="min-height: 20px; max-height: 20px; padding: 0 8px; font-size: 11px;">
-    <span>Deckwatch v0.0.2</span>
+    <span>Deckwatch v0.1.0</span>
     <span>·</span>
     <a href="/docs/book/" target="_blank" class="text-secondary" style="text-decoration: none;">Help</a>
     <span>·</span>
