@@ -17,7 +17,7 @@ jobs:
           - runner: ubuntu-latest
             arch: linux/amd64
             suffix: amd64
-          - runner: ubuntu-latest
+          - runner: ubuntu-24.04-arm
             arch: linux/arm64
             suffix: arm64
     runs-on: ${{ matrix.platform.runner }}
