@@ -13,11 +13,10 @@ use tokio_stream::wrappers::ReceiverStream;
 
 use crate::anthropic::AnthropicClient;
 use crate::error::AppError;
+use crate::handlers::settings::{load_settings_from_db, AiProviderConfig};
 use crate::log_sanitize::{sanitize_logs, wrap_prompt};
 use crate::metrics;
 use crate::state::AppState;
-
-const DEFAULT_CLAUDE_SECRET: &str = "deckwatch-anthropic-api-key";
 
 const DIAG_PROMPT: &str =
     "Analyze these Kubernetes pod logs and diagnose the issue. Suggest fixes.";
@@ -110,24 +109,65 @@ pub enum DiagStatus {
     Failed,
 }
 
-/// Read the Anthropic API key from the K8s Secret.
-async fn read_api_key(state: &AppState, ns: &str) -> Result<String, AppError> {
-    let secret_name = std::env::var("DECKWATCH_DIAG_CLAUDE_SECRET")
-        .unwrap_or_else(|_| DEFAULT_CLAUDE_SECRET.to_string());
+/// Read a single key from a Kubernetes Secret.
+async fn read_secret_key(
+    state: &AppState,
+    ns: &str,
+    secret_name: &str,
+    data_key: &str,
+) -> Result<String, AppError> {
     let secrets_api = state.secrets_api(ns)?;
-    let secret = secrets_api.get(&secret_name).await.map_err(|_| {
+    let secret = secrets_api.get(secret_name).await.map_err(|_| {
         AppError::BadRequest(format!(
-            "Anthropic API key secret not found. Create it with: \
-             kubectl create secret generic {secret_name} --from-literal=api-key=sk-ant-..."
+            "Secret '{secret_name}' not found in namespace '{ns}'. \
+             Create it with: kubectl -n {ns} create secret generic {secret_name} \
+             --from-literal={data_key}=<value>"
         ))
     })?;
-    let key = secret
+    let value = secret
         .data
         .as_ref()
-        .and_then(|d| d.get("api-key"))
+        .and_then(|d| d.get(data_key))
         .map(|v| String::from_utf8_lossy(&v.0).to_string())
-        .ok_or_else(|| AppError::BadRequest("Secret missing 'api-key' key".to_string()))?;
-    Ok(key)
+        .ok_or_else(|| {
+            AppError::BadRequest(format!(
+                "Secret '{secret_name}' is missing the '{data_key}' key"
+            ))
+        })?;
+    Ok(value)
+}
+
+/// Build an `AnthropicClient` configured for the provider selected in settings.
+async fn build_ai_client(state: &AppState, ns: &str) -> Result<AnthropicClient, AppError> {
+    let settings = load_settings_from_db(state).await;
+    match &settings.ai_provider {
+        AiProviderConfig::Native { api_key_secret } => {
+            // Allow env-var override for backward compat with existing deployments.
+            let secret_name = std::env::var("DECKWATCH_DIAG_CLAUDE_SECRET")
+                .unwrap_or_else(|_| api_key_secret.clone());
+            let key = read_secret_key(state, ns, &secret_name, "api-key").await?;
+            Ok(AnthropicClient::native(key))
+        }
+        AiProviderConfig::VertexAi {
+            project_id,
+            region,
+            sa_key_secret,
+        } => {
+            let sa_json = read_secret_key(state, ns, sa_key_secret, "gcp-sa-key").await?;
+            let token = crate::anthropic::exchange_sa_key_for_token(&sa_json)
+                .await
+                .map_err(|e| AppError::BadRequest(format!("GCP token exchange failed: {e}")))?;
+            Ok(AnthropicClient::vertex(
+                project_id.clone(),
+                region.clone(),
+                token,
+            ))
+        }
+        AiProviderConfig::Bedrock { region, model_id } => {
+            // Bedrock uses IRSA -- no secret needed, just region + model.
+            Ok(AnthropicClient::bedrock(region.clone(), model_id.clone()))
+        }
+    }
 }
 
 /// Create a diagnostic and stream the AI response back via SSE.
@@ -153,9 +193,9 @@ pub async fn create_diagnostic(
         ));
     }
 
-    // Read API key before we start streaming so a missing secret returns
-    // a clean JSON error rather than an SSE error event.
-    let api_key = read_api_key(&state, &ns).await?;
+    // Build the AI client before we start streaming so a missing secret
+    // returns a clean JSON error rather than an SSE error event.
+    let ai_client = build_ai_client(&state, &ns).await?;
 
     // Sanitize + hard-truncate before we ever hand the text to an LLM.
     let sanitized = sanitize_logs(&req.logs);
@@ -176,7 +216,7 @@ pub async fn create_diagnostic(
     tokio::spawn(async move {
         let _ = send_status(&tx, "streaming", Some(&pod_name)).await;
 
-        let client = AnthropicClient::new(api_key);
+        let client = ai_client;
         let (text_tx, mut text_rx) = mpsc::channel::<String>(STREAM_CHANNEL_CAPACITY);
 
         // Spawn the streaming API call.
