@@ -2,7 +2,16 @@
 
 [Introduction](./README.md)
 
-# Getting Started
+# User Guide
+
+- [Getting Started](../../GETTING_STARTED.md)
+- [Deployments](../../DEPLOYMENTS.md)
+- [Applications](../../APPLICATIONS.md)
+- [Ingress](../../INGRESS.md)
+- [Logs and Debugging](../../LOGS_AND_DEBUGGING.md)
+- [GitOps for Developers](../../GITOPS_USER_GUIDE.md)
+
+# Architecture
 
 - [Architecture](../../ARCHITECTURE.md)
 
