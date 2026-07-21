@@ -18,6 +18,7 @@ pub mod health;
 pub mod ingresses;
 pub mod license;
 pub mod logs;
+pub mod mcp;
 pub mod monitoring;
 pub mod namespaces;
 pub mod nodes;
