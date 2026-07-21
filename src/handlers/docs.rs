@@ -20,8 +20,7 @@ use serde::Serialize;
 const OPENAPI_YAML: &str = include_str!("../../openapi/openapi.yaml");
 
 /// One entry per file in `docs/`. Order matches the intended reading order
-/// (roadmap-ish first, deep-dive references last) so the frontend can render
-/// the list directly without re-sorting.
+/// so the frontend can render the list directly without re-sorting.
 struct DocPage {
     slug: &'static str,
     title: &'static str,
@@ -40,11 +39,6 @@ macro_rules! doc_page {
 
 const PAGES: &[DocPage] = &[
     doc_page!("architecture", "Architecture", "../../docs/ARCHITECTURE.md"),
-    doc_page!(
-        "architecture-decision",
-        "Architecture Decision",
-        "../../docs/ARCHITECTURE_DECISION.md"
-    ),
     doc_page!("auth", "Authentication", "../../docs/AUTH.md"),
     doc_page!("gitops", "GitOps", "../../docs/GITOPS.md"),
     doc_page!("registry", "OCI Registry", "../../docs/REGISTRY.md"),
@@ -56,16 +50,7 @@ const PAGES: &[DocPage] = &[
     doc_page!("rollback", "Rollback", "../../docs/ROLLBACK.md"),
     doc_page!("settings", "Settings", "../../docs/SETTINGS.md"),
     doc_page!("metrics", "Metrics", "../../docs/METRICS.md"),
-    doc_page!(
-        "metrics-visualization",
-        "Metrics Visualization",
-        "../../docs/METRICS_VISUALIZATION.md"
-    ),
-    doc_page!(
-        "prometheus-integration",
-        "Prometheus Integration",
-        "../../docs/PROMETHEUS_INTEGRATION.md"
-    ),
+    doc_page!("tracing", "Tracing", "../../docs/TRACING.md"),
     doc_page!(
         "ai-diagnostics",
         "AI Diagnostics",
@@ -95,9 +80,6 @@ pub async fn openapi_yaml() -> Response {
 }
 
 pub async fn swagger_ui() -> Response {
-    // Pinned to swagger-ui-dist@5.17.14. Kept as inline HTML rather than a
-    // separate asset so the docs page works even before the frontend
-    // bundle is built (useful during backend-only dev with `cargo run`).
     const HTML: &str = r#"<!doctype html>
 <html lang="en">
   <head>

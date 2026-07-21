@@ -15,8 +15,8 @@ the raw URI, so label cardinality stays bounded.
 
 | Metric | Type | Labels | Meaning |
 |---|---|---|---|
-| `http_requests_total` | counter | `method`, `path`, `status` | Total HTTP requests handled |
-| `http_request_duration_seconds` | histogram | `method`, `path` | Server-side latency |
+| `deckwatch_http_requests_total` | counter | `method`, `path`, `status` | Total HTTP requests handled |
+| `deckwatch_http_request_duration_seconds` | histogram | `method`, `path` | Server-side latency |
 
 ### Kubernetes API
 
@@ -25,8 +25,8 @@ or `record_k8s_call` free function.
 
 | Metric | Type | Labels | Meaning |
 |---|---|---|---|
-| `k8s_api_requests_total` | counter | `resource`, `operation`, `status` | Calls to the kube API server |
-| `k8s_api_request_duration_seconds` | histogram | `resource`, `operation` | Latency of kube API calls |
+| `deckwatch_kube_api_requests_total` | counter | `resource`, `operation`, `status` | Calls to the kube API server |
+| `deckwatch_kube_api_request_duration_seconds` | histogram | `resource`, `operation` | Latency of kube API calls |
 
 `status` is `ok` or `err`. `operation` is `list`, `get`, `create`,
 `update`, `delete`, `patch`, `watch`.
@@ -35,9 +35,13 @@ or `record_k8s_call` free function.
 
 | Metric | Type | Labels | Meaning |
 |---|---|---|---|
-| `deployments_managed_total` | gauge | `namespace` | Deployments visible to deckwatch, per namespace |
-| `active_sse_connections` | gauge | (none) | Currently open log-stream SSE connections |
-| `gitops_builds_total` | counter | `namespace`, `status` | Gitops build completions |
+| `deckwatch_deployments_managed_total` | gauge | `namespace` | Deployments visible to deckwatch, per namespace |
+| `deckwatch_ingresses_managed_total` | gauge | `namespace` | Ingresses visible to deckwatch, per namespace |
+| `deckwatch_gitops_builds_total` | counter | `namespace`, `status` | GitOps build completions |
+| `deckwatch_gitops_poll_duration_seconds` | histogram | `namespace` | Time spent polling git repos for changes |
+| `deckwatch_audit_events_total` | counter | `action`, `resource_type` | Audit log events recorded |
+| `deckwatch_errors_total` | counter | `kind` | Application errors by category |
+| `deckwatch_active_sse_connections` | gauge | (none) | Currently open log-stream SSE connections |
 
 ### Frontend
 
@@ -96,8 +100,12 @@ metrics:
       release: kube-prometheus-stack   # or whatever your operator selects
 ```
 
-The chart emits a `monitoring.coreos.com/v1` `ServiceMonitor` pointing at
-the `http` port with path `/metrics`.
+The Helm chart includes a `ServiceMonitor` template at
+`helm/deckwatch/templates/servicemonitor.yaml`. When enabled, it emits a
+`monitoring.coreos.com/v1` `ServiceMonitor` resource pointing at the
+`http` port with path `/metrics`. The `labels` map is merged into the
+`ServiceMonitor`'s metadata so the prometheus-operator's
+`serviceMonitorSelector` can discover it.
 
 ### Ad-hoc scrape (dev)
 
@@ -106,17 +114,28 @@ kubectl port-forward svc/deckwatch 8080:80
 curl http://localhost:8080/metrics
 ```
 
+## Prometheus monitoring as a runtime setting
+
+Prometheus metric collection can be toggled at runtime via the
+deckwatch settings API or the Settings page in the UI. When disabled,
+the `/metrics` endpoint returns `204 No Content` and the recording
+middleware becomes a no-op. This is useful in environments where
+Prometheus is not deployed and the per-request recording overhead is
+unwanted.
+
 ## Grafana dashboard suggestions
 
 Panels that pay for themselves early:
 
-- **Request rate & error rate** — `sum by (status) (rate(http_requests_total[5m]))`
-- **p50/p95/p99 latency by route** — `histogram_quantile(0.95, sum by (le, path) (rate(http_request_duration_seconds_bucket[5m])))`
-- **Kube API dependency health** — `sum by (resource, status) (rate(k8s_api_requests_total[5m]))`
-- **SSE fan-out** — `active_sse_connections` as a stat panel (log tail load-shedding)
-- **Gitops build success rate** — `sum by (status) (rate(gitops_builds_total[1h]))`
+- **Request rate & error rate** — `sum by (status) (rate(deckwatch_http_requests_total[5m]))`
+- **p50/p95/p99 latency by route** — `histogram_quantile(0.95, sum by (le, path) (rate(deckwatch_http_request_duration_seconds_bucket[5m])))`
+- **Kube API dependency health** — `sum by (resource, status) (rate(deckwatch_kube_api_requests_total[5m]))`
+- **SSE fan-out** — `deckwatch_active_sse_connections` as a stat panel (log tail load-shedding)
+- **GitOps build success rate** — `sum by (status) (rate(deckwatch_gitops_builds_total[1h]))`
+- **Audit event rate** — `sum by (action) (rate(deckwatch_audit_events_total[5m]))` — spikes indicate batch operations or unusual activity
+- **Error rate by kind** — `sum by (kind) (rate(deckwatch_errors_total[5m]))` — useful for spotting kube API connectivity issues vs application bugs
 - **Frontend error rate** — `sum by (kind) (rate(frontend_errors_total[5m]))` — spikes usually mean the API is down, JS bundle broke, or a new route is 404'ing
-- **RUM latency vs server latency** — overlay `frontend_api_call_duration_seconds` p95 with `http_request_duration_seconds` p95 on the same panel; the gap is network + browser overhead
+- **RUM latency vs server latency** — overlay `frontend_api_call_duration_seconds` p95 with `deckwatch_http_request_duration_seconds` p95 on the same panel; the gap is network + browser overhead
 
 ## Frontend metrics architecture
 

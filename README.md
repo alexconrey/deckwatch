@@ -21,6 +21,24 @@ auto-deploys on push.
   filters, Kaniko builds, and automatic image tag rollouts
 - **Namespace scoping** — restrict which namespaces deckwatch can manage via
   env var or CLI flag
+- **Database persistence** — pluggable storage via SeaORM (SQLite for
+  single-node, Postgres or MySQL for production)
+- **Audit logging** — records who changed what and when, queryable from the UI
+  and exposed as Prometheus metrics
+- **Deployment history with rollback** — tracks every revision and lets you
+  roll back to any prior state
+- **Cross-namespace promotion** — promote a deployment from one namespace to
+  another with a single action
+- **Distributed tracing proxy** — forwards trace context headers through API
+  calls for end-to-end observability
+- **Git webhook receiver** — accepts push webhooks from GitHub/GitLab to
+  trigger builds immediately instead of polling
+- **Validating admission webhook** — optional Kubernetes webhook that enforces
+  deckwatch policies on cluster resources
+- **Prometheus query proxy** — proxies PromQL queries so the frontend can
+  render live metrics without direct Prometheus access
+- **Licensing system** — optional license key validation for gating
+  enterprise features
 
 ## Quick Start
 
@@ -78,14 +96,17 @@ helm install deckwatch helm/deckwatch \
 | `DECKWATCH_NAMESPACES` | `--namespaces` | _(all)_ | Comma-separated namespace allow-list |
 | `DECKWATCH_PORT` | `--port` | `8080` | Listen port |
 | `DECKWATCH_FRONTEND_DIR` | `--frontend-dir` | `frontend/dist` | Path to built SPA |
+| `DECKWATCH_DATABASE_URL` | `--database-url` | `sqlite://deckwatch.db` | Database connection string (SQLite, Postgres, or MySQL) |
 | `RUST_LOG` | — | `deckwatch=info,tower_http=info` | Log filter |
 
 ## Architecture
 
-Deckwatch is a single stateless Rust binary (Axum + kube-rs) that serves a
-Vue 3 + Vuetify SPA. All state lives in Kubernetes — deployment specs,
-annotations for GitOps config, and Jobs for builds. A background tokio task
-polls configured git repos and monitors Kaniko build Jobs.
+Deckwatch is a Rust binary (Axum + kube-rs + SeaORM) that serves a
+Vue 3 + Vuetify SPA. Kubernetes remains the source of truth for workload
+specs, but operational state — audit logs, deployment history, settings, and
+license data — is persisted in a relational database (SQLite by default,
+Postgres or MySQL for production). A background tokio task polls configured
+git repos, monitors Kaniko build Jobs, and accepts webhook-triggered builds.
 
 See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the full design.
 
@@ -93,8 +114,9 @@ See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the full design.
 
 | Layer | Technology |
 |-------|-----------|
-| Backend | Rust, Axum, kube-rs, k8s-openapi |
+| Backend | Rust, Axum, kube-rs, k8s-openapi, SeaORM |
 | Frontend | Vue 3, Vuetify 3, TypeScript, Vite |
+| Database | SQLite (default), Postgres, MySQL via SeaORM |
 | Container build | Kaniko (rootless, in-cluster) |
 | Packaging | Docker (multi-stage, distroless runtime), Helm |
 | CI | GitHub Actions → GHCR |
