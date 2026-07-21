@@ -883,8 +883,7 @@ onMounted(load);
               <div class="flex-grow-1">
                 <div class="text-subtitle-1">Claude</div>
                 <div class="text-caption text-secondary">
-                  Anthropic Claude Code CLI. Runs as a Kubernetes Job with an
-                  <code>ANTHROPIC_API_KEY</code> Secret mounted in.
+                  Anthropic Claude AI for diagnostics and code fixes.
                 </div>
               </div>
               <v-switch
@@ -895,72 +894,29 @@ onMounted(load);
                 inset
               />
             </div>
-          </v-card>
 
-          <v-card variant="outlined" class="mb-3 pa-4">
-            <div class="d-flex align-center">
-              <v-icon
-                icon="mdi-alpha-o-circle"
-                color="grey"
-                size="large"
-                class="mr-3"
+            <template v-if="aiClaudeEnabled">
+              <v-divider class="my-4" />
+
+              <v-select
+                :model-value="aiProvider.type"
+                :items="AI_PROVIDER_OPTIONS"
+                item-title="title"
+                item-value="value"
+                label="API Provider"
+                variant="outlined"
+                density="comfortable"
+                class="mb-4"
+                @update:model-value="(v: AiProviderType) => {
+                  if (v === 'native') {
+                    aiProvider = { type: 'native' };
+                  } else if (v === 'vertex_ai') {
+                    aiProvider = { type: 'vertex_ai', project_id: '', region: 'us-central1' };
+                  } else {
+                    aiProvider = { type: 'bedrock', region: 'us-east-1', model_id: 'anthropic.claude-sonnet-4-20250514-v1:0' };
+                  }
+                }"
               />
-              <div class="flex-grow-1">
-                <div class="d-flex align-center">
-                  <span class="text-subtitle-1">Codex</span>
-                  <v-chip
-                    size="x-small"
-                    color="info"
-                    variant="tonal"
-                    class="ml-2"
-                  >
-                    Coming Soon
-                  </v-chip>
-                </div>
-                <div class="text-caption text-secondary">
-                  OpenAI Codex CLI. Backend plumbing is in place; provider
-                  wiring will ship in a follow-up.
-                </div>
-              </div>
-              <v-switch
-                v-model="aiCodexEnabled"
-                color="primary"
-                hide-details
-                density="compact"
-                :disabled="true"
-                inset
-              />
-            </div>
-          </v-card>
-
-          <v-divider class="my-6" />
-
-          <h3 class="text-h6 mb-2">Claude API Provider</h3>
-          <p class="text-body-2 text-secondary mb-4">
-            Select how Deckwatch connects to the Claude API and provide the
-            required credentials. Keys are encrypted with AES-256-GCM before
-            storage and never returned to the browser.
-          </p>
-
-          <v-select
-            :model-value="aiProvider.type"
-            :items="AI_PROVIDER_OPTIONS"
-            item-title="title"
-            item-value="value"
-            label="Provider"
-            variant="outlined"
-            density="comfortable"
-            class="mb-4"
-            @update:model-value="(v: AiProviderType) => {
-              if (v === 'native') {
-                aiProvider = { type: 'native' };
-              } else if (v === 'vertex_ai') {
-                aiProvider = { type: 'vertex_ai', project_id: '', region: 'us-central1' };
-              } else {
-                aiProvider = { type: 'bedrock', region: 'us-east-1', model_id: 'anthropic.claude-sonnet-4-20250514-v1:0' };
-              }
-            }"
-          />
 
           <!-- Native: Anthropic API key -->
           <template v-if="aiProvider.type === 'native'">
@@ -1093,6 +1049,9 @@ onMounted(load);
           >
             Save Credentials
           </v-btn>
+
+            </template>
+          </v-card>
         </div>
 
         <!-- Observability -->
