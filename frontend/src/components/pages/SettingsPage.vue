@@ -937,9 +937,9 @@ onMounted(load);
 
           <h3 class="text-h6 mb-2">Claude API Provider</h3>
           <p class="text-body-2 text-secondary mb-4">
-            Select how Deckwatch connects to the Claude API. Native uses the
-            Anthropic API directly. Vertex AI routes through Google Cloud.
-            Bedrock routes through AWS (coming soon).
+            Select how Deckwatch connects to the Claude API and provide the
+            required credentials. Keys are encrypted with AES-256-GCM before
+            storage and never returned to the browser.
           </p>
 
           <v-select
@@ -953,18 +953,53 @@ onMounted(load);
             class="mb-4"
             @update:model-value="(v: AiProviderType) => {
               if (v === 'native') {
-                aiProvider = { type: 'native', api_key_secret: 'deckwatch-anthropic-api-key' };
+                aiProvider = { type: 'native' };
               } else if (v === 'vertex_ai') {
-                aiProvider = { type: 'vertex_ai', project_id: '', region: 'us-central1', sa_key_secret: 'deckwatch-gcp-sa-key' };
+                aiProvider = { type: 'vertex_ai', project_id: '', region: 'us-central1' };
               } else {
                 aiProvider = { type: 'bedrock', region: 'us-east-1', model_id: 'anthropic.claude-sonnet-4-20250514-v1:0' };
               }
             }"
           />
 
-          <!-- Vertex AI provider fields -->
+          <!-- Native: Anthropic API key -->
+          <template v-if="aiProvider.type === 'native'">
+            <v-card variant="outlined" class="mb-3 pa-4">
+              <div class="d-flex align-center mb-2">
+                <v-icon icon="mdi-key-variant" color="deep-purple" class="mr-2" />
+                <span class="text-subtitle-2">Anthropic API Key</span>
+                <v-spacer />
+                <v-chip
+                  v-if="credentialStatus.anthropic_api_key"
+                  size="small" color="success" variant="tonal"
+                >Configured</v-chip>
+                <v-chip v-else size="small" color="warning" variant="tonal">Not set</v-chip>
+              </div>
+              <v-text-field
+                v-model="anthropicKeyInput"
+                label="API key"
+                placeholder="sk-ant-api03-..."
+                variant="outlined"
+                density="comfortable"
+                type="password"
+                hint="Paste a new key to replace the current one. Leave blank to keep existing."
+                persistent-hint
+                class="mb-2"
+              />
+              <div class="d-flex">
+                <v-btn
+                  v-if="credentialStatus.anthropic_api_key"
+                  variant="text" color="error" size="small" prepend-icon="mdi-delete"
+                  :loading="savingCredentials"
+                  @click="clearCredential('anthropic_api_key')"
+                >Remove</v-btn>
+              </div>
+            </v-card>
+          </template>
+
+          <!-- Vertex AI: project, region, GCP SA key -->
           <template v-if="aiProvider.type === 'vertex_ai'">
-            <v-row>
+            <v-row class="mb-2">
               <v-col cols="12" md="6">
                 <v-text-field
                   v-model="aiProvider.project_id"
@@ -978,15 +1013,47 @@ onMounted(load);
                 <v-text-field
                   v-model="aiProvider.region"
                   label="Region"
-                  placeholder="us-central1"
+                  placeholder="us-east5"
                   variant="outlined"
                   density="comfortable"
                 />
               </v-col>
             </v-row>
+            <v-card variant="outlined" class="mb-3 pa-4">
+              <div class="d-flex align-center mb-2">
+                <v-icon icon="mdi-key-variant" color="blue" class="mr-2" />
+                <span class="text-subtitle-2">GCP Service Account Key</span>
+                <v-spacer />
+                <v-chip
+                  v-if="credentialStatus.gcp_sa_key"
+                  size="small" color="success" variant="tonal"
+                >Configured</v-chip>
+                <v-chip v-else size="small" color="warning" variant="tonal">Not set</v-chip>
+              </div>
+              <v-textarea
+                v-model="gcpSaKeyInput"
+                label="Service account JSON key"
+                placeholder='{"type": "service_account", ...}'
+                variant="outlined"
+                density="comfortable"
+                rows="3"
+                auto-grow
+                hint="Paste the full JSON key file contents."
+                persistent-hint
+                class="mb-2"
+              />
+              <div class="d-flex">
+                <v-btn
+                  v-if="credentialStatus.gcp_sa_key"
+                  variant="text" color="error" size="small" prepend-icon="mdi-delete"
+                  :loading="savingCredentials"
+                  @click="clearCredential('gcp_sa_key')"
+                >Remove</v-btn>
+              </div>
+            </v-card>
           </template>
 
-          <!-- Bedrock provider fields -->
+          <!-- Bedrock: region, model -->
           <template v-if="aiProvider.type === 'bedrock'">
             <v-alert type="info" variant="tonal" class="mb-4">
               AWS Bedrock support is coming soon. SigV4 request signing is
@@ -1014,112 +1081,15 @@ onMounted(load);
             </v-row>
           </template>
 
-          <v-divider class="my-6" />
-
-          <h3 class="text-h6 mb-2">API Credentials</h3>
-          <p class="text-body-2 text-secondary mb-4">
-            Store API keys encrypted in the database so they can be rotated via
-            this UI without a redeployment. When set, these take priority over
-            the Kubernetes Secret references above. Keys are encrypted with
-            AES-256-GCM before storage and never returned to the browser.
-          </p>
-
-          <!-- Anthropic API key -->
-          <v-card variant="outlined" class="mb-3 pa-4">
-            <div class="d-flex align-center mb-2">
-              <v-icon icon="mdi-key-variant" color="deep-purple" class="mr-2" />
-              <span class="text-subtitle-2">Anthropic API Key</span>
-              <v-spacer />
-              <v-chip
-                v-if="credentialStatus.anthropic_api_key"
-                size="small"
-                color="success"
-                variant="tonal"
-              >
-                Configured
-              </v-chip>
-              <v-chip v-else size="small" color="warning" variant="tonal">
-                Not set
-              </v-chip>
-            </div>
-            <v-text-field
-              v-model="anthropicKeyInput"
-              label="New API key"
-              placeholder="sk-ant-api03-..."
-              variant="outlined"
-              density="comfortable"
-              type="password"
-              hint="Paste a new key to replace the current one. Leave blank to keep existing."
-              persistent-hint
-              class="mb-2"
-            />
-            <div class="d-flex">
-              <v-btn
-                v-if="credentialStatus.anthropic_api_key"
-                variant="text"
-                color="error"
-                size="small"
-                prepend-icon="mdi-delete"
-                :loading="savingCredentials"
-                @click="clearCredential('anthropic_api_key')"
-              >
-                Remove
-              </v-btn>
-            </div>
-          </v-card>
-
-          <!-- GCP Service Account Key -->
-          <v-card variant="outlined" class="mb-3 pa-4">
-            <div class="d-flex align-center mb-2">
-              <v-icon icon="mdi-key-variant" color="blue" class="mr-2" />
-              <span class="text-subtitle-2">GCP Service Account Key (Vertex AI)</span>
-              <v-spacer />
-              <v-chip
-                v-if="credentialStatus.gcp_sa_key"
-                size="small"
-                color="success"
-                variant="tonal"
-              >
-                Configured
-              </v-chip>
-              <v-chip v-else size="small" color="warning" variant="tonal">
-                Not set
-              </v-chip>
-            </div>
-            <v-textarea
-              v-model="gcpSaKeyInput"
-              label="New service account JSON key"
-              placeholder='{"type": "service_account", ...}'
-              variant="outlined"
-              density="comfortable"
-              rows="3"
-              auto-grow
-              hint="Paste the full JSON key file contents. Leave blank to keep existing."
-              persistent-hint
-              class="mb-2"
-            />
-            <div class="d-flex">
-              <v-btn
-                v-if="credentialStatus.gcp_sa_key"
-                variant="text"
-                color="error"
-                size="small"
-                prepend-icon="mdi-delete"
-                :loading="savingCredentials"
-                @click="clearCredential('gcp_sa_key')"
-              >
-                Remove
-              </v-btn>
-            </div>
-          </v-card>
-
           <v-btn
+            v-if="aiProvider.type !== 'bedrock'"
             color="primary"
             variant="tonal"
             prepend-icon="mdi-lock"
             :loading="savingCredentials"
             :disabled="!anthropicKeyInput && !gcpSaKeyInput"
             @click="saveCredentials"
+            class="mt-2"
           >
             Save Credentials
           </v-btn>
