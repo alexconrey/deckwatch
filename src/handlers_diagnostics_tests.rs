@@ -346,3 +346,75 @@ fn parse_agent_unknown_returns_none() {
     assert_eq!(parse_agent(""), None);
     assert_eq!(parse_agent("Claude"), None); // case-sensitive
 }
+
+// ---- Tests for direct Anthropic API integration ----
+
+#[test]
+fn test_diagnose_request_with_agent() {
+    // Verify DiagnoseRequest still deserializes correctly with both agent variants.
+    for agent_str in &["claude", "codex"] {
+        let json = serde_json::json!({
+            "pod_name": "test-pod",
+            "logs": "some error output",
+            "agent": agent_str
+        });
+        let req: DiagnoseRequest = serde_json::from_value(json).unwrap();
+        assert_eq!(req.pod_name, "test-pod");
+        assert_eq!(req.logs, "some error output");
+        assert!(req.container.is_none());
+    }
+}
+
+#[test]
+fn test_diag_prompt_is_non_empty_and_contains_keywords() {
+    // DIAG_PROMPT is the system instruction sent to the AI. Verify it
+    // contains expected keywords for Kubernetes diagnostics.
+    assert!(!DIAG_PROMPT.is_empty());
+    assert!(
+        DIAG_PROMPT.contains("Kubernetes"),
+        "DIAG_PROMPT should mention Kubernetes"
+    );
+    assert!(
+        DIAG_PROMPT.contains("logs"),
+        "DIAG_PROMPT should mention logs"
+    );
+    assert!(
+        DIAG_PROMPT.contains("diagnose") || DIAG_PROMPT.contains("Analyze"),
+        "DIAG_PROMPT should mention diagnosing or analyzing"
+    );
+}
+
+#[test]
+fn test_diagnostic_status_response_serde_simplified() {
+    // With the direct API refactor, DiagnosticStatusResponse still needs
+    // to serialize correctly even when most fields are None (the simplified
+    // model used in direct API mode).
+    let resp = DiagnosticStatusResponse {
+        job_name: "inline-stream".to_string(),
+        status: DiagStatus::Succeeded,
+        agent: None,
+        source_pod: None,
+        started_at: None,
+        completed_at: None,
+        message: None,
+    };
+    let json = serde_json::to_value(&resp).unwrap();
+    assert_eq!(json["job_name"], "inline-stream");
+    assert_eq!(json["status"], "succeeded");
+    // All optional fields should be present as null in the JSON output.
+    assert!(json["agent"].is_null());
+    assert!(json["source_pod"].is_null());
+    assert!(json["started_at"].is_null());
+    assert!(json["completed_at"].is_null());
+    assert!(json["message"].is_null());
+}
+
+#[test]
+fn test_list_diagnostics_empty() {
+    // In direct API mode, list_diagnostics returns an empty history.
+    // Verify DiagnosticHistoryResponse serializes correctly with no items.
+    let resp = DiagnosticHistoryResponse { items: vec![] };
+    let json = serde_json::to_value(&resp).unwrap();
+    let items = json["items"].as_array().unwrap();
+    assert!(items.is_empty());
+}

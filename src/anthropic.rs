@@ -260,4 +260,70 @@ mod tests {
         assert_eq!(headers.get("anthropic-version").unwrap(), ANTHROPIC_VERSION);
         assert_eq!(headers.get("content-type").unwrap(), "application/json");
     }
+
+    #[test]
+    fn test_message_request_body_shape() {
+        // Construct the request body the same way the client does for
+        // message_stream and verify its JSON structure.
+        let model = DEFAULT_MODEL.to_string();
+        let prompt = "Analyze this log output.";
+        let body = serde_json::json!({
+            "model": model,
+            "max_tokens": DEFAULT_MAX_TOKENS,
+            "stream": true,
+            "messages": [{"role": "user", "content": prompt}]
+        });
+
+        assert_eq!(body["model"], "claude-sonnet-4-20250514");
+        assert_eq!(body["max_tokens"], DEFAULT_MAX_TOKENS);
+        assert_eq!(body["stream"], true);
+
+        let messages = body["messages"].as_array().unwrap();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0]["role"], "user");
+        assert_eq!(messages[0]["content"], prompt);
+    }
+
+    #[test]
+    fn test_parse_error_event() {
+        // An SSE `event: error` payload should be parsed by extract_error_message.
+        let data = r#"{"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}"#;
+        assert_eq!(extract_error_message(data), Some("Overloaded".to_string()));
+
+        // Fallback to top-level "message" field when "error.message" is absent.
+        let data_fallback = r#"{"type":"error","message":"Something went wrong"}"#;
+        assert_eq!(
+            extract_error_message(data_fallback),
+            Some("Something went wrong".to_string())
+        );
+
+        // Completely missing message fields should return None.
+        let data_no_msg = r#"{"type":"error"}"#;
+        assert_eq!(extract_error_message(data_no_msg), None);
+    }
+
+    #[test]
+    fn test_parse_message_stop() {
+        // A `message_stop` event carries a data payload but no text delta.
+        // extract_delta_text should return None (it's not a content_block_delta).
+        let data = r#"{"type":"message_stop"}"#;
+        assert_eq!(extract_delta_text(data), None);
+    }
+
+    #[test]
+    fn test_empty_delta_text() {
+        // A content_block_delta with an empty text string should return
+        // Some("") -- the empty string is valid, not None.
+        let data =
+            r#"{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":""}}"#;
+        assert_eq!(extract_delta_text(data), Some("".to_string()));
+    }
+
+    #[test]
+    fn test_model_default() {
+        assert_eq!(DEFAULT_MODEL, "claude-sonnet-4-20250514");
+        // Also verify the client stores this default.
+        let client = AnthropicClient::new("sk-test".to_string());
+        assert_eq!(client.model, "claude-sonnet-4-20250514");
+    }
 }
