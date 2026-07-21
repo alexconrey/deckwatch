@@ -53,6 +53,7 @@ async fn build_state() -> AppState {
         settings_configmap_name: "deckwatch-it-settings".to_string(),
         entitlements: std::sync::Arc::new(crate::license::Entitlements::community()),
         registry_public_url: None,
+        registry_enabled: false,
         ai_rate_limiter: RateLimiter::default(),
         db,
     }
