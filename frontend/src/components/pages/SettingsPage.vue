@@ -962,19 +962,6 @@ onMounted(load);
             }"
           />
 
-          <!-- Native provider fields -->
-          <template v-if="aiProvider.type === 'native'">
-            <v-text-field
-              v-model="aiProvider.api_key_secret"
-              label="API key Secret name"
-              placeholder="deckwatch-anthropic-api-key"
-              variant="outlined"
-              density="comfortable"
-              hint="Name of the Kubernetes Secret containing the 'api-key' data key"
-              persistent-hint
-            />
-          </template>
-
           <!-- Vertex AI provider fields -->
           <template v-if="aiProvider.type === 'vertex_ai'">
             <v-row>
@@ -997,15 +984,6 @@ onMounted(load);
                 />
               </v-col>
             </v-row>
-            <v-text-field
-              v-model="aiProvider.sa_key_secret"
-              label="Service account key Secret name"
-              placeholder="deckwatch-gcp-sa-key"
-              variant="outlined"
-              density="comfortable"
-              hint="Name of the Kubernetes Secret containing the 'gcp-sa-key' data key (JSON service account key)"
-              persistent-hint
-            />
           </template>
 
           <!-- Bedrock provider fields -->
