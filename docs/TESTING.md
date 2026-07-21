@@ -1,18 +1,31 @@
 # Testing deckwatch
 
-deckwatch has three test suites:
+deckwatch has ~580+ tests across three test suites:
 
-| Suite | Runner | Scope | Cluster required? |
-|---|---|---|---|
-| Backend unit | `cargo test` | Pure functions in `src/` (kube_ext, error, config, handler helpers) | No |
-| Frontend unit | `vitest` | API clients, Pinia stores, composables, formatters | No |
-| End-to-end | Playwright | Full app in a real browser | No (mocked) or Yes (live) |
+| Suite | Runner | Approx. count | Scope | Cluster required? |
+|---|---|---|---|---|
+| Backend unit | `cargo test` | ~350+ | Pure functions in `src/` (kube_ext, error, config, handler helpers, database models) | No |
+| Frontend unit | `vitest` | ~200+ | API clients, Pinia stores, composables, formatters | No |
+| End-to-end | Playwright | ~30+ | Full app in a real browser | No (mocked) or Yes (live) |
 
 ## Backend unit tests
 
 Runs against pure functions — no live `kube::Client` or network I/O.
 The test modules build mock `Deployment` / `Pod` / `Node` / `Ingress`
 objects using `k8s-openapi` types.
+
+### Test infrastructure
+
+Backend tests use the `#[cfg(test)] #[path = "..."]` pattern to keep
+test modules in separate files alongside the source they exercise. This
+keeps the main source files clean while allowing tests full access to
+private items.
+
+Dev-dependencies used by tests:
+
+- `rand` -- generating randomized test fixtures
+- `tempfile` -- ephemeral directories for filesystem-backed tests (e.g.
+  registry storage, SQLite databases)
 
 ```bash
 cargo test --lib          # unit tests only
@@ -46,11 +59,31 @@ cargo test --lib -- --nocapture   # see println! output
 
 ### CI integration
 
-Add to CI after linting:
+The CI pipeline runs the following checks in order:
+
+1. **`cargo check`** -- fast type-check of the entire workspace
+2. **`cargo clippy -- -D warnings`** -- lint with all warnings as errors
+3. **`cargo fmt --check`** -- enforce consistent formatting
+4. **`cargo test --workspace --locked`** -- run all backend tests
+5. **Frontend build** -- `pnpm install --frozen-lockfile && pnpm build`
+6. **Helm lint** -- `helm lint helm/deckwatch`
 
 ```yaml
-- name: Backend unit tests
-  run: cargo test --workspace --locked
+- name: Backend checks
+  run: |
+    cargo check --workspace --locked
+    cargo clippy --workspace --locked -- -D warnings
+    cargo fmt --all -- --check
+    cargo test --workspace --locked
+
+- name: Frontend build
+  working-directory: frontend
+  run: |
+    pnpm install --frozen-lockfile
+    pnpm build
+
+- name: Helm lint
+  run: helm lint helm/deckwatch
 ```
 
 If using Bazel per `build/CLAUDE.md`, prefer:
@@ -60,19 +93,23 @@ bazel test //...
 ```
 
 The auto-generated `_test` targets from `k2_rust_library` will pick up the
-new `#[cfg(test)]` modules automatically.
-
-### Wiring the staged test files
-
-The test source files are staged (not pre-integrated) under
-`/tmp/deckwatch-staging/testing/src/`. See
-`src/README_INTEGRATION.md` for the one-liner to append to each source
-file — no `[dev-dependencies]` are needed.
+`#[cfg(test)]` modules automatically.
 
 ## Frontend unit tests
 
 Vitest + `@vue/test-utils` + `happy-dom`. Runs entirely in-process; no
 browser or backend needed.
+
+### Test infrastructure
+
+- **vitest** -- test runner configured via `vitest.config.ts`
+- **happy-dom** -- lightweight DOM implementation (faster than jsdom)
+- **@vue/test-utils** -- mount/shallow-mount Vue components with full
+  reactivity
+- **Vuetify inlining** -- tests import and install Vuetify as a plugin
+  in the test setup so components render with the real Vuetify component
+  tree instead of stubs. This catches prop-type and slot-shape
+  regressions that stub-based tests would miss.
 
 ```bash
 cd frontend

@@ -15,23 +15,45 @@ built into the same axum binary. When turned on, deckwatch:
   destination points at the embedded registry.
 
 The goal is to eliminate the need for an external registry (ECR, Docker
-Hub, GHCR) for local / dev / airgap deployments. Everything runs inside
-your cluster on the same PVC that already survives pod restarts.
+Hub, GHCR) for local / dev / airgap deployments.
+
+## Storage backends
+
+The registry supports two storage backends: **filesystem** (default) and
+**S3**. Both are fully implemented and production-ready.
+
+### Filesystem storage
+
+Layers and manifests are stored on a PVC mounted at `/data/registry`.
+This is the simplest option for single-node or dev clusters.
+
+### S3 storage
+
+Layers and manifests are stored in an S3-compatible bucket. This is
+preferred for production because it decouples storage from the pod
+lifecycle, supports multi-replica deployments, and scales without
+resizing PVCs.
 
 ## Enabling the registry
 
-Set `registry.enabled: true` in your Helm values and `helm upgrade`:
+The registry is controlled exclusively by the `registry.enabled` Helm
+value -- there is no runtime toggle in the settings page. Set
+`registry.enabled: true` in your Helm values and `helm upgrade`:
+
+### Filesystem Helm values
 
 ```yaml
 registry:
   enabled: true
+  storage: filesystem        # default
 
-  # Optional overrides — defaults shown.
+  # Filesystem-specific options
   storageSize: 10Gi
-  storageClassName: ""      # empty = cluster default
-  accessMode: ReadWriteOnce # ReadWriteMany if replicaCount > 1
+  storageClassName: ""       # empty = cluster default
+  accessMode: ReadWriteOnce  # ReadWriteMany if replicaCount > 1
+
   service:
-    port: 5000              # kaniko's default port
+    port: 5000               # kaniko's default port
 
   # Optional — leave empty to derive `<fullname>-registry.<ns>.svc.cluster.local:5000`
   publicUrl: ""
@@ -41,15 +63,74 @@ registry:
     enabled: false
 ```
 
+### S3 Helm values
+
+```yaml
+registry:
+  enabled: true
+  storage: s3
+
+  s3:
+    bucket: my-deckwatch-registry
+    region: us-east-1
+    # Optional — defaults to the AWS SDK default endpoint.
+    # Set this for MinIO or other S3-compatible stores.
+    endpoint: ""
+    # Optional — prefix all keys under this path.
+    prefix: ""
+
+  service:
+    port: 5000
+  publicUrl: ""
+  ingress:
+    enabled: false
+```
+
+Credentials are resolved via the standard AWS credential chain (IRSA,
+instance profile, env vars, `~/.aws/credentials`). For MinIO, set the
+`endpoint` and pass `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` via
+environment variables or a Kubernetes Secret.
+
+### MinIO for local development
+
+MinIO is a lightweight S3-compatible object store that runs in a single
+container. It is the recommended way to test the S3 backend locally:
+
+```bash
+# Start MinIO
+docker run -d --name minio \
+  -p 9000:9000 -p 9001:9001 \
+  -e MINIO_ROOT_USER=minioadmin \
+  -e MINIO_ROOT_PASSWORD=minioadmin \
+  minio/minio server /data --console-address ":9001"
+
+# Create the bucket
+mc alias set local http://localhost:9000 minioadmin minioadmin
+mc mb local/deckwatch-registry
+```
+
+Then configure the registry to point at MinIO:
+
+```yaml
+registry:
+  enabled: true
+  storage: s3
+  s3:
+    bucket: deckwatch-registry
+    region: us-east-1
+    endpoint: http://minio.default.svc.cluster.local:9000
+```
+
 This provisions:
 
-- A `PersistentVolumeClaim` (`<release>-registry`) mounted at
-  `/data/registry` on the deckwatch pod.
+- When using **filesystem** storage: a `PersistentVolumeClaim`
+  (`<release>-registry`) mounted at `/data/registry` on the deckwatch pod.
 - A separate `Service` (`<release>-registry`) on port 5000 pointing at
   the same pod, so kaniko can push to a stable `registry:5000` URL.
 - Environment variables (`DECKWATCH_REGISTRY_ENABLED`,
-  `DECKWATCH_REGISTRY_ROOT`, `DECKWATCH_REGISTRY_PUBLIC_URL`) that turn
-  on the `/v2/*` endpoints inside the app.
+  `DECKWATCH_REGISTRY_ROOT` or `DECKWATCH_REGISTRY_S3_BUCKET`,
+  `DECKWATCH_REGISTRY_PUBLIC_URL`) that turn on the `/v2/*` endpoints
+  inside the app.
 
 ## Pushing with kaniko (via deckwatch GitOps)
 
@@ -100,8 +181,10 @@ Visit `/registry` in the deckwatch UI. The page shows:
 
 ## Storage layout
 
-Everything lives under `DECKWATCH_REGISTRY_ROOT` (default
-`/data/registry`):
+### Filesystem layout
+
+When using **filesystem** storage, everything lives under
+`DECKWATCH_REGISTRY_ROOT` (default `/data/registry`):
 
 ```
 blobs/sha256/<hex>          content-addressable layer + config blobs
@@ -113,6 +196,21 @@ manifests/<repo>/_meta/     sidecar JSON with media_type + digest + size
 The store is safe under concurrent writes because every finished upload
 is `rename(2)`'d into the CAS blob path — POSIX atomicity gives us
 tearing-free reads even mid-push.
+
+### S3 key layout
+
+When using **S3** storage, the same logical structure is mapped to object
+keys under the configured `prefix`:
+
+```
+<prefix>/blobs/sha256/<hex>
+<prefix>/uploads/<uuid>
+<prefix>/manifests/<repo>/<ref>
+<prefix>/manifests/<repo>/_meta/<ref>.json
+```
+
+S3's read-after-write consistency ensures newly pushed layers are
+immediately visible.
 
 ## Sizing the PVC
 

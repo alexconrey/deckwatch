@@ -2,11 +2,11 @@
 
 **Purpose:** A snapshot of how Deckwatch is wired end-to-end, intended for developers picking up the codebase. Complements `CLAUDE.md` (which is instructions for AI assistants) — this document is prose for humans.
 
-**Snapshot date:** 2026-07-10
+**Snapshot date:** 2026-07-21
 
 ## One-liner
 
-Deckwatch is a stateless, single-binary Rust web service that serves a Vue 3 SPA and proxies deploy/manage operations to the Kubernetes API via kube-rs. All state (including per-deployment GitOps config) lives in K8s annotations. A background poller in the same process watches configured Git repos and triggers Kaniko build Jobs on new commits.
+Deckwatch is a single-binary Rust web service backed by a SeaORM database (SQLite by default, Postgres/MySQL supported) that serves a Vue 3 SPA and proxies deploy/manage operations to the Kubernetes API via kube-rs. Settings, GitOps configs, build history, and audit logs are persisted in the database. A background poller in the same process watches configured Git repos and triggers Kaniko build Jobs on new commits.
 
 ## Process topology
 
@@ -23,22 +23,25 @@ Deckwatch is a stateless, single-binary Rust web service that serves a Vue 3 SPA
 │        │                │                     │              │
 │        └────────────────┴──────┬──────────────┘              │
 │                                │                             │
-│                        ┌───────▼────────┐                    │
-│                        │  AppState      │                    │
-│                        │  (kube::Client │                    │
-│                        │   + ns list)   │                    │
-│                        └───────┬────────┘                    │
-└────────────────────────────────┼─────────────────────────────┘
-                                 │
-                                 ▼
-                       ┌──────────────────┐
-                       │  Kubernetes API  │
-                       └──────────────────┘
+│                        ┌───────▼────────────────────────┐    │
+│                        │  AppState                      │    │
+│                        │  kube::Client, db: DbConn,     │    │
+│                        │  registry_enabled/public_url,  │    │
+│                        │  ai_rate_limiter, entitlements  │    │
+│                        └──┬─────────────────────┬───────┘    │
+└───────────────────────────┼─────────────────────┼────────────┘
+                            │                     │
+                            ▼                     ▼
+                  ┌──────────────────┐   ┌─────────────────┐
+                  │  Kubernetes API  │   │  Database        │
+                  └──────────────────┘   │  (SQLite/PG/MY)  │
+                                         └─────────────────┘
 ```
 
-- `src/main.rs:16-59` — process entry, tokio runtime, spawns HTTP server + git watcher.
-- `src/watcher.rs:28-43` — the watcher/monitor loop is one tokio task running both `poll_cycle` (detect new commits, trigger builds) and `monitor_builds` (watch running Kaniko Jobs, update image on success) on a 10-second tick.
-- No database. No cache. No message broker. Everything is derived from live K8s state.
+- `src/main.rs` — process entry, tokio runtime, connects to the database, runs SeaORM migrations, spawns HTTP server + git watcher.
+- `src/watcher.rs` — the watcher/monitor loop is one tokio task running both `poll_cycle` (detect new commits, trigger builds) and `monitor_builds` (watch running Kaniko Jobs, update image on success) on a 10-second tick.
+- `src/db.rs` — database connection setup (SeaORM), auto-migration on startup, helper functions for ensuring application records exist.
+- Live K8s state is still the source of truth for deployments, pods, services, and ingresses. The database stores settings, GitOps configs, build history, and audit logs.
 
 ## Repo layout
 
@@ -51,6 +54,18 @@ src/                            # Rust backend
   error.rs                      # AppError enum + IntoResponse
   kube_ext.rs                   # K8s object → wire summary/detail structs (Serialize)
   watcher.rs                    # git poller + Kaniko job creation + build monitor
+  db.rs                         # SeaORM connect + auto-migrate + helpers
+  audit.rs                      # audit log recording helpers
+  entities/                     # SeaORM entity models (one per DB table)
+    mod.rs                      # re-exports all entities
+    settings.rs                 # key/value settings store
+    applications.rs             # application records (ns/name primary key)
+    gitops_configs.rs           # per-application GitOps configuration
+    builds.rs                   # build history (FK → applications)
+    audit_log.rs                # audit trail entries
+  migrations/                   # SeaORM migration definitions
+    mod.rs                      # migration registry
+    m20260714_000001_initial.rs  # initial schema: all five tables
   handlers/                     # HTTP handlers, one file per resource
     health.rs                   # /healthz, /readyz
     namespaces.rs               # list, create
@@ -61,7 +76,11 @@ src/                            # Rust backend
     cronjobs.rs                 # list, get
     nodes.rs                    # list (cluster overview)
     gitops.rs                   # per-deployment gitops config + manual trigger
+    webhooks.rs                 # POST /api/webhooks/git — inbound Git webhook receiver
+    settings.rs                 # GET/PUT /api/settings (DB-backed)
     addons.rs                   # hardcoded addon catalog + attach/detach
+    templates.rs                # deployment templates CRUD
+    monitoring.rs               # Prometheus integration toggle
 frontend/                       # Vite + Vue 3 + Vuetify 3 + TS + Pinia
   src/
     App.vue                     # <router-view> only
@@ -117,7 +136,7 @@ DeploymentDetailResponse (JSON) → back to client
 Vue reactivity re-renders page
 ```
 
-Key point: every read path is a live K8s API call. No caching. This is deliberate — makes the app trivially stateless — but means K8s API-server load grows linearly with active user tabs (see UX_IMPROVEMENTS.md §H4).
+Key point: every K8s resource read is a live API call (no caching), which means K8s API-server load grows linearly with active user tabs (see UX_IMPROVEMENTS.md §H4). Settings, GitOps configs, and build history reads are served from the database.
 
 ## Request flow (typical write — e.g., scale)
 
@@ -149,15 +168,11 @@ Write patterns used across handlers:
 This is the most subtle part of the codebase.
 
 ### Config storage
-All GitOps configuration is stored as annotations on the target Deployment, prefixed `deckwatch.io/` (helper: `watcher::ann()`, `watcher::get_ann()`):
+GitOps configuration is stored in the `gitops_configs` database table (one row per application), keyed by `application_id` (format `{namespace}/{name}`). See `src/entities/gitops_configs.rs` for the full schema. Key fields: `repo_url`, `branch`, `token_secret`, `dockerfile_path`, `docker_context`, `oci_repository`, `include_paths`, `exclude_paths`, `poll_interval_seconds`, `webhook_enabled`, plus status columns (`last_commit_sha`, `last_build_status`, `last_build_job`, `last_build_time`, `last_build_error`).
 
-- `git-enabled` — "true" to watch this deployment
-- `git-repo`, `git-branch`, `git-token-secret` — source
-- `dockerfile-path`, `docker-context` — build config
-- `ecr-repository` — destination image URL prefix
-- `include-paths`, `exclude-paths` — comma-separated path filters for detecting whether a commit warrants a build
-- `poll-interval`, `webhook-enabled` — currently unused by the watcher (which runs on a fixed 10s tick regardless)
-- `last-commit-sha`, `last-build-status`, `last-build-job`, `last-build-time`, `last-build-error` — status tracking
+Build history is persisted in the `builds` table (FK to `applications`), recording `job_name`, `commit_sha`, `image_tag`, `status`, timestamps, and error messages.
+
+**Legacy migration:** Deployments that still carry the old `deckwatch.io/` annotation-based config are automatically migrated to the database on first read. The annotations are left in place for backwards compatibility but the database is the source of truth going forward.
 
 ### Watch loop (`watcher::run_poller`)
 Every 10 seconds:
@@ -182,6 +197,20 @@ Constructed in `trigger_build` (`src/watcher.rs:271-362`):
 
 ### Manual trigger
 `POST /gitops/trigger` calls `check_remote_head` and `trigger_build_public` (a re-export of the same trigger fn) — bypasses the path filter check.
+
+## State (database)
+
+Deckwatch uses SeaORM with SQLite by default (configurable to PostgreSQL or MySQL via the `DATABASE_URL` environment variable). Migrations run automatically on startup (`src/db.rs`). The database holds:
+
+| Table | Entity file | Purpose |
+|-------|------------|---------|
+| `settings` | `entities/settings.rs` | Key/value pairs for all runtime settings (auth, notifications, AI providers, Prometheus toggle, resource limits, managed lists) |
+| `applications` | `entities/applications.rs` | Canonical registry of tracked applications, keyed by `{namespace}/{name}` |
+| `gitops_configs` | `entities/gitops_configs.rs` | Per-application GitOps configuration (repo, branch, token, paths, build status). FK to `applications` |
+| `builds` | `entities/builds.rs` | Build history records (job name, commit, image tag, status, timestamps). FK to `applications` |
+| `audit_log` | `entities/audit_log.rs` | Immutable audit trail (action, resource, namespace, user identity, detail) |
+
+**ConfigMap fallback migration path:** Settings were originally stored in a `deckwatch-config` ConfigMap. On upgrade, existing ConfigMap settings are read and migrated to the database on first access. The ConfigMap is no longer the source of truth but is still created by Helm for backwards compatibility with older releases.
 
 ## Errors
 
@@ -261,7 +290,6 @@ Attaching an addon appends a container to the Deployment's PodSpec and annotates
 - No Events feed (see §H6).
 - No RBAC / user auth (see §C1).
 - No pod exec / port-forward / port-forward proxy (roadmap item).
-- No metrics-server integration; no Prometheus scrape endpoint.
 - No deployment history / rollback UI (see §C5).
 - No cluster-selector — one deckwatch pod = one target cluster (implicit via kube_client's default kubeconfig).
 - No websocket support anywhere.
