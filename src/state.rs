@@ -32,6 +32,10 @@ pub struct AppState {
     /// Database connection (SQLite, PostgreSQL, or MySQL). Tables are
     /// created automatically via SeaORM migrations at startup.
     pub db: sea_orm::DatabaseConnection,
+    /// Encryption key for at-rest credential storage (AES-256-GCM).
+    /// Empty string means credential encryption is disabled and API keys
+    /// cannot be stored in the database.
+    pub encryption_key: String,
 }
 
 impl AppState {

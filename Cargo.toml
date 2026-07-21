@@ -53,6 +53,9 @@ time = "0.3"
 sea-orm = { version = "1", features = ["sqlx-sqlite", "sqlx-postgres", "sqlx-mysql", "runtime-tokio-rustls"] }
 sea-orm-migration = { version = "1" }
 
-[dev-dependencies]
+# AES-256-GCM encryption for at-rest credential storage (API keys in DB).
+aes-gcm = "0.10"
 rand = "0.8"
+
+[dev-dependencies]
 tempfile = "3"

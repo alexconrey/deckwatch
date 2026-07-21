@@ -72,6 +72,71 @@ pub struct DeckwatchSettings {
     /// once the backend wiring ships.
     #[serde(default = "default_true")]
     pub ai_codex_enabled: bool,
+<<<<<<< Updated upstream
+=======
+    /// Selects which AI backend provider to use for Claude API calls.
+    /// Supports native Anthropic API, Google Vertex AI, and AWS Bedrock.
+    /// Defaults to `native` with the standard API key secret.
+    #[serde(default)]
+    pub ai_provider: AiProviderConfig,
+    /// Encrypted API credentials. Stored encrypted (AES-256-GCM) in the DB,
+    /// decrypted at request time using DECKWATCH_ENCRYPTION_KEY. Users manage
+    /// these via the Settings UI -- no K8s Secrets needed for API keys.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credentials: Option<EncryptedCredentials>,
+}
+
+/// Encrypted credential blobs. Each field holds an AES-256-GCM ciphertext
+/// (base64-encoded) when stored in the database. The plaintext is the raw
+/// API key or JSON service-account key.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct EncryptedCredentials {
+    /// Anthropic API key (for Native provider). Stored encrypted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub anthropic_api_key: Option<String>,
+    /// GCP service account key JSON (for Vertex AI). Stored encrypted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gcp_sa_key: Option<String>,
+}
+
+/// Configuration for the AI provider backend. Tagged enum so the JSON
+/// representation includes a `"type"` discriminator and only the fields
+/// relevant to the chosen provider are present.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum AiProviderConfig {
+    Native {
+        #[serde(default = "default_native_secret")]
+        api_key_secret: String,
+    },
+    VertexAi {
+        project_id: String,
+        region: String,
+        #[serde(default = "default_vertex_secret")]
+        sa_key_secret: String,
+    },
+    Bedrock {
+        region: String,
+        #[serde(default)]
+        model_id: String,
+    },
+}
+
+impl Default for AiProviderConfig {
+    fn default() -> Self {
+        Self::Native {
+            api_key_secret: default_native_secret(),
+        }
+    }
+}
+
+fn default_native_secret() -> String {
+    "deckwatch-anthropic-api-key".to_string()
+}
+
+fn default_vertex_secret() -> String {
+    "deckwatch-gcp-sa-key".to_string()
+>>>>>>> Stashed changes
 }
 
 fn default_true() -> bool {
@@ -210,6 +275,12 @@ pub async fn get_settings(
 ) -> Result<Json<DeckwatchSettings>, AppError> {
     let mut settings = load_settings_from_db(&state).await;
     inject_builtin_registry(&state, &mut settings);
+    // Never send actual credential ciphertexts to the frontend. Replace
+    // with a masked indicator so the UI can show "Configured" vs "Not set".
+    settings.credentials = settings.credentials.map(|c| EncryptedCredentials {
+        anthropic_api_key: c.anthropic_api_key.map(|_| "configured".to_string()),
+        gcp_sa_key: c.gcp_sa_key.map(|_| "configured".to_string()),
+    });
     Ok(Json(settings))
 }
 
@@ -278,6 +349,12 @@ pub async fn put_settings(
     // Strip the injected builtin entry before persisting -- it's derived
     // from the deployment env var, not user data.
     settings.oci_registries.retain(|r| !r.builtin);
+
+    // Preserve existing encrypted credentials -- the general settings PUT
+    // never carries real credential values (the GET masks them). Carry
+    // forward whatever is already in the DB.
+    let existing = load_settings_from_db(&state).await;
+    settings.credentials = existing.credentials;
 
     upsert_settings_to_db(&state.db, &settings)
         .await
@@ -386,6 +463,141 @@ fn default_settings(state: &AppState) -> DeckwatchSettings {
         prometheus_enabled: true,
         ai_claude_enabled: true,
         ai_codex_enabled: true,
+<<<<<<< Updated upstream
+=======
+        ai_provider: AiProviderConfig::default(),
+        credentials: None,
+    }
+}
+
+// --- Credential management ---
+
+/// Request body for `POST /api/settings/credentials`. Each field is
+/// optional -- only the provided fields are updated. Pass `null` or omit a
+/// field to leave it unchanged; pass an empty string to clear it.
+#[derive(Debug, Deserialize)]
+pub struct SetCredentialsRequest {
+    #[serde(default)]
+    pub anthropic_api_key: Option<String>,
+    #[serde(default)]
+    pub gcp_sa_key: Option<String>,
+}
+
+/// Response body for `POST /api/settings/credentials`.
+#[derive(Debug, Serialize)]
+pub struct CredentialStatus {
+    pub anthropic_api_key: &'static str,
+    pub gcp_sa_key: &'static str,
+}
+
+/// Set (or clear) encrypted API credentials in the database.
+///
+/// Each provided non-empty value is encrypted with AES-256-GCM before
+/// storage. An empty string clears the credential. Omitted fields are
+/// left unchanged.
+pub async fn set_credentials(
+    State(state): State<AppState>,
+    Json(req): Json<SetCredentialsRequest>,
+) -> Result<Json<CredentialStatus>, AppError> {
+    if state.encryption_key.is_empty() {
+        return Err(AppError::BadRequest(
+            "DECKWATCH_ENCRYPTION_KEY is not configured; cannot store credentials. \
+             Deploy with the Helm chart or set the environment variable."
+                .to_string(),
+        ));
+    }
+
+    let mut settings = load_settings_from_db(&state).await;
+    let mut creds = settings.credentials.unwrap_or_default();
+
+    if let Some(val) = req.anthropic_api_key {
+        if val.is_empty() {
+            creds.anthropic_api_key = None;
+        } else {
+            creds.anthropic_api_key = Some(
+                crate::crypto::encrypt(&state.encryption_key, &val)
+                    .map_err(|e| AppError::BadRequest(format!("encryption failed: {e}")))?,
+            );
+        }
+    }
+
+    if let Some(val) = req.gcp_sa_key {
+        if val.is_empty() {
+            creds.gcp_sa_key = None;
+        } else {
+            creds.gcp_sa_key = Some(
+                crate::crypto::encrypt(&state.encryption_key, &val)
+                    .map_err(|e| AppError::BadRequest(format!("encryption failed: {e}")))?,
+            );
+        }
+    }
+
+    settings.credentials = Some(creds.clone());
+    upsert_settings_to_db(&state.db, &settings)
+        .await
+        .map_err(|e| AppError::BadRequest(format!("failed to save credentials: {e}")))?;
+
+    if let Err(e) = crate::audit::log_action(
+        &state.db,
+        "update",
+        "credentials",
+        "main",
+        "",
+        "updated API credentials",
+    )
+    .await
+    {
+        tracing::warn!(error = %e, "failed to write audit log for credential update");
+    }
+
+    Ok(Json(CredentialStatus {
+        anthropic_api_key: if creds.anthropic_api_key.is_some() {
+            "configured"
+        } else {
+            "not_configured"
+        },
+        gcp_sa_key: if creds.gcp_sa_key.is_some() {
+            "configured"
+        } else {
+            "not_configured"
+        },
+    }))
+}
+
+/// Read and decrypt a stored credential from the database. Returns `None`
+/// if the credential is not set. Used by `diagnostics.rs` and `ai_fix.rs`
+/// to retrieve API keys without K8s Secrets.
+pub async fn read_credential(
+    state: &AppState,
+    credential_type: &str,
+) -> Result<Option<String>, AppError> {
+    if state.encryption_key.is_empty() {
+        return Ok(None);
+    }
+
+    let settings = load_settings_from_db(state).await;
+    let creds = match settings.credentials {
+        Some(c) => c,
+        None => return Ok(None),
+    };
+
+    let encrypted = match credential_type {
+        "anthropic" => creds.anthropic_api_key,
+        "gcp_sa" => creds.gcp_sa_key,
+        _ => None,
+    };
+
+    match encrypted {
+        Some(enc) => {
+            let plaintext = crate::crypto::decrypt(&state.encryption_key, &enc).map_err(|e| {
+                AppError::BadRequest(format!(
+                    "failed to decrypt {credential_type} credential: {e}"
+                ))
+            })?;
+            Ok(Some(plaintext))
+        }
+        None => Ok(None),
+>>>>>>> Stashed changes
     }
 }
 

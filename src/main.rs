@@ -3,6 +3,7 @@ pub mod audit;
 mod auth;
 mod auto_rollback;
 mod config;
+pub mod crypto;
 mod db;
 mod entities;
 mod error;
@@ -82,6 +83,15 @@ async fn main() {
     // It can be re-enabled as a future business feature.
     let ai_rate_limiter = RateLimiter::default();
 
+    if config.encryption_key.is_empty() {
+        tracing::warn!(
+            "DECKWATCH_ENCRYPTION_KEY is not set; API credentials cannot be stored in the database. \
+             Set this via the Helm chart secret or the environment variable."
+        );
+    } else {
+        tracing::info!("encryption key loaded; encrypted credential storage is enabled");
+    }
+
     let state = AppState {
         kube_client,
         allowed_namespaces: allowed,
@@ -98,6 +108,7 @@ async fn main() {
         registry_enabled: config.registry_enabled,
         ai_rate_limiter,
         db,
+        encryption_key: config.encryption_key.clone(),
     };
 
     let watcher_state = state.clone();

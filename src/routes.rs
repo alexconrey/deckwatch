@@ -141,6 +141,7 @@ pub fn build_router(
             get(logs::get_logs),
         )
         .route("/api/settings", axum::routing::put(settings::put_settings))
+        .route("/api/settings/credentials", post(settings::set_credentials))
         .route("/api/namespaces/{ns}/cronjobs", get(cronjobs::list))
         .route("/api/namespaces/{ns}/cronjobs/{name}", get(cronjobs::get))
         .route("/api/nodes", get(nodes::list_nodes))

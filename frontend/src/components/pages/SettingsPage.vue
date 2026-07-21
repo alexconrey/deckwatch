@@ -8,6 +8,7 @@ import AuditLogPage from "@/components/pages/AuditLogPage.vue";
 import type {
   AuthSettings,
   CostSettings,
+  CredentialStatus,
   DeckwatchSettings,
   DeploymentTemplate,
   GitRepository,
@@ -105,6 +106,29 @@ const prometheusEnabled = ref(true);
 const aiClaudeEnabled = ref(true);
 const aiCodexEnabled = ref(true);
 
+<<<<<<< Updated upstream
+=======
+const AI_PROVIDER_OPTIONS: { value: AiProviderType; title: string; description: string }[] = [
+  { value: "native", title: "Anthropic (Native)", description: "Direct API via api.anthropic.com" },
+  { value: "vertex_ai", title: "Google Vertex AI", description: "Anthropic models via GCP Vertex AI" },
+  { value: "bedrock", title: "AWS Bedrock", description: "Anthropic models via AWS Bedrock (coming soon)" },
+];
+
+const aiProvider = ref<AiProviderConfig>({
+  type: "native",
+  api_key_secret: "deckwatch-anthropic-api-key",
+});
+
+// Encrypted credential storage (managed via dedicated endpoint).
+const credentialStatus = ref<CredentialStatus>({
+  anthropic_api_key: null,
+  gcp_sa_key: null,
+});
+const anthropicKeyInput = ref("");
+const gcpSaKeyInput = ref("");
+const savingCredentials = ref(false);
+
+>>>>>>> Stashed changes
 const gitRepositories = ref<GitRepository[]>([]);
 const ociRegistries = ref<OciRegistry[]>([]);
 const gitTokenSecrets = ref<GitTokenSecret[]>([]);
@@ -178,6 +202,20 @@ function applySettings(s: DeckwatchSettings) {
   prometheusEnabled.value = s.prometheus_enabled ?? true;
   aiClaudeEnabled.value = s.ai_claude_enabled ?? true;
   aiCodexEnabled.value = s.ai_codex_enabled ?? true;
+<<<<<<< Updated upstream
+=======
+  aiProvider.value = s.ai_provider ?? {
+    type: "native",
+    api_key_secret: "deckwatch-anthropic-api-key",
+  };
+  credentialStatus.value = s.credentials ?? {
+    anthropic_api_key: null,
+    gcp_sa_key: null,
+  };
+  // Clear input fields on load -- we never get the real key back.
+  anthropicKeyInput.value = "";
+  gcpSaKeyInput.value = "";
+>>>>>>> Stashed changes
 }
 
 async function load() {
@@ -338,6 +376,54 @@ async function testNotification() {
     snackbar.value = true;
   } finally {
     testingNotification.value = false;
+  }
+}
+
+async function saveCredentials() {
+  savingCredentials.value = true;
+  try {
+    const req: Record<string, string> = {};
+    if (anthropicKeyInput.value) req.anthropic_api_key = anthropicKeyInput.value;
+    if (gcpSaKeyInput.value) req.gcp_sa_key = gcpSaKeyInput.value;
+    if (Object.keys(req).length === 0) {
+      snackbarMessage.value = "Enter at least one credential to save";
+      snackbarColor.value = "error";
+      snackbar.value = true;
+      return;
+    }
+    const result = await settingsApi.setCredentials(req);
+    credentialStatus.value = result;
+    anthropicKeyInput.value = "";
+    gcpSaKeyInput.value = "";
+    snackbarMessage.value = "Credentials saved";
+    snackbarColor.value = "success";
+    snackbar.value = true;
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : "Failed to save credentials";
+    snackbarMessage.value = msg;
+    snackbarColor.value = "error";
+    snackbar.value = true;
+  } finally {
+    savingCredentials.value = false;
+  }
+}
+
+async function clearCredential(type: "anthropic_api_key" | "gcp_sa_key") {
+  savingCredentials.value = true;
+  try {
+    const req: Record<string, string> = { [type]: "" };
+    const result = await settingsApi.setCredentials(req);
+    credentialStatus.value = result;
+    snackbarMessage.value = "Credential cleared";
+    snackbarColor.value = "success";
+    snackbar.value = true;
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : "Failed to clear credential";
+    snackbarMessage.value = msg;
+    snackbarColor.value = "error";
+    snackbar.value = true;
+  } finally {
+    savingCredentials.value = false;
   }
 }
 
@@ -838,6 +924,223 @@ onMounted(load);
               />
             </div>
           </v-card>
+<<<<<<< Updated upstream
+=======
+
+          <v-divider class="my-6" />
+
+          <h3 class="text-h6 mb-2">Claude API Provider</h3>
+          <p class="text-body-2 text-secondary mb-4">
+            Select how Deckwatch connects to the Claude API. Native uses the
+            Anthropic API directly. Vertex AI routes through Google Cloud.
+            Bedrock routes through AWS (coming soon).
+          </p>
+
+          <v-select
+            :model-value="aiProvider.type"
+            :items="AI_PROVIDER_OPTIONS"
+            item-title="title"
+            item-value="value"
+            label="Provider"
+            variant="outlined"
+            density="comfortable"
+            class="mb-4"
+            @update:model-value="(v: AiProviderType) => {
+              if (v === 'native') {
+                aiProvider = { type: 'native', api_key_secret: 'deckwatch-anthropic-api-key' };
+              } else if (v === 'vertex_ai') {
+                aiProvider = { type: 'vertex_ai', project_id: '', region: 'us-central1', sa_key_secret: 'deckwatch-gcp-sa-key' };
+              } else {
+                aiProvider = { type: 'bedrock', region: 'us-east-1', model_id: 'anthropic.claude-sonnet-4-20250514-v1:0' };
+              }
+            }"
+          />
+
+          <!-- Native provider fields -->
+          <template v-if="aiProvider.type === 'native'">
+            <v-text-field
+              v-model="aiProvider.api_key_secret"
+              label="API key Secret name"
+              placeholder="deckwatch-anthropic-api-key"
+              variant="outlined"
+              density="comfortable"
+              hint="Name of the Kubernetes Secret containing the 'api-key' data key"
+              persistent-hint
+            />
+          </template>
+
+          <!-- Vertex AI provider fields -->
+          <template v-if="aiProvider.type === 'vertex_ai'">
+            <v-row>
+              <v-col cols="12" md="6">
+                <v-text-field
+                  v-model="aiProvider.project_id"
+                  label="GCP Project ID"
+                  placeholder="my-gcp-project"
+                  variant="outlined"
+                  density="comfortable"
+                />
+              </v-col>
+              <v-col cols="12" md="6">
+                <v-text-field
+                  v-model="aiProvider.region"
+                  label="Region"
+                  placeholder="us-central1"
+                  variant="outlined"
+                  density="comfortable"
+                />
+              </v-col>
+            </v-row>
+            <v-text-field
+              v-model="aiProvider.sa_key_secret"
+              label="Service account key Secret name"
+              placeholder="deckwatch-gcp-sa-key"
+              variant="outlined"
+              density="comfortable"
+              hint="Name of the Kubernetes Secret containing the 'gcp-sa-key' data key (JSON service account key)"
+              persistent-hint
+            />
+          </template>
+
+          <!-- Bedrock provider fields -->
+          <template v-if="aiProvider.type === 'bedrock'">
+            <v-alert type="info" variant="tonal" class="mb-4">
+              AWS Bedrock support is coming soon. SigV4 request signing is
+              required and not yet implemented.
+            </v-alert>
+            <v-row>
+              <v-col cols="12" md="6">
+                <v-text-field
+                  v-model="aiProvider.region"
+                  label="AWS Region"
+                  placeholder="us-east-1"
+                  variant="outlined"
+                  density="comfortable"
+                />
+              </v-col>
+              <v-col cols="12" md="6">
+                <v-text-field
+                  v-model="aiProvider.model_id"
+                  label="Model ID"
+                  placeholder="anthropic.claude-sonnet-4-20250514-v1:0"
+                  variant="outlined"
+                  density="comfortable"
+                />
+              </v-col>
+            </v-row>
+          </template>
+
+          <v-divider class="my-6" />
+
+          <h3 class="text-h6 mb-2">API Credentials</h3>
+          <p class="text-body-2 text-secondary mb-4">
+            Store API keys directly in the database (encrypted at rest with
+            AES-256-GCM). Keys entered here replace the Kubernetes Secret
+            approach -- no <code>kubectl</code> or pod restart needed to
+            rotate credentials. The actual key value is never sent back to
+            the browser after saving.
+          </p>
+
+          <!-- Anthropic API Key -->
+          <v-card variant="outlined" class="mb-3 pa-4">
+            <div class="d-flex align-center mb-3">
+              <v-icon icon="mdi-key-variant" class="mr-2" />
+              <span class="text-subtitle-1">Anthropic API Key</span>
+              <v-spacer />
+              <v-chip
+                v-if="credentialStatus.anthropic_api_key === 'configured'"
+                color="success"
+                size="small"
+                variant="tonal"
+              >
+                Configured
+              </v-chip>
+              <v-chip v-else color="warning" size="small" variant="tonal">
+                Not configured
+              </v-chip>
+            </div>
+            <v-text-field
+              v-model="anthropicKeyInput"
+              label="API Key"
+              placeholder="sk-ant-api03-..."
+              type="password"
+              variant="outlined"
+              density="comfortable"
+              hint="Paste your Anthropic API key. It will be encrypted before storage."
+              persistent-hint
+              class="mb-2"
+            />
+            <div class="d-flex">
+              <v-btn
+                v-if="credentialStatus.anthropic_api_key === 'configured'"
+                variant="text"
+                color="error"
+                size="small"
+                prepend-icon="mdi-close-circle"
+                :loading="savingCredentials"
+                @click="clearCredential('anthropic_api_key')"
+              >
+                Clear
+              </v-btn>
+            </div>
+          </v-card>
+
+          <!-- GCP Service Account Key -->
+          <v-card variant="outlined" class="mb-3 pa-4">
+            <div class="d-flex align-center mb-3">
+              <v-icon icon="mdi-key-variant" class="mr-2" />
+              <span class="text-subtitle-1">GCP Service Account Key</span>
+              <v-spacer />
+              <v-chip
+                v-if="credentialStatus.gcp_sa_key === 'configured'"
+                color="success"
+                size="small"
+                variant="tonal"
+              >
+                Configured
+              </v-chip>
+              <v-chip v-else color="warning" size="small" variant="tonal">
+                Not configured
+              </v-chip>
+            </div>
+            <v-textarea
+              v-model="gcpSaKeyInput"
+              label="Service Account Key JSON"
+              placeholder='{"type": "service_account", ...}'
+              variant="outlined"
+              density="comfortable"
+              rows="4"
+              auto-grow
+              hint="Paste the full JSON service account key for Vertex AI."
+              persistent-hint
+              class="mb-2"
+            />
+            <div class="d-flex">
+              <v-btn
+                v-if="credentialStatus.gcp_sa_key === 'configured'"
+                variant="text"
+                color="error"
+                size="small"
+                prepend-icon="mdi-close-circle"
+                :loading="savingCredentials"
+                @click="clearCredential('gcp_sa_key')"
+              >
+                Clear
+              </v-btn>
+            </div>
+          </v-card>
+
+          <v-btn
+            color="primary"
+            variant="tonal"
+            prepend-icon="mdi-content-save"
+            :loading="savingCredentials"
+            :disabled="!anthropicKeyInput && !gcpSaKeyInput"
+            @click="saveCredentials"
+          >
+            Save credentials
+          </v-btn>
+>>>>>>> Stashed changes
         </div>
 
         <!-- Observability -->

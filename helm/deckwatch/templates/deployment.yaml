@@ -55,6 +55,11 @@ spec:
               value: {{ .Values.settings.configMapName | default "deckwatch-config" | quote }}
             - name: DECKWATCH_DATABASE_URL
               value: {{ .Values.database.url | quote }}
+            - name: DECKWATCH_ENCRYPTION_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "deckwatch.fullname" . }}-encryption-key
+                  key: encryption-key
             {{- if .Values.registry.enabled }}
             - name: DECKWATCH_REGISTRY_ENABLED
               value: "true"

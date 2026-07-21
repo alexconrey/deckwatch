@@ -502,6 +502,11 @@ export interface NotificationSettings {
   webhook_url: string;
 }
 
+export interface CredentialStatus {
+  anthropic_api_key?: string | null;
+  gcp_sa_key?: string | null;
+}
+
 export interface DeckwatchSettings {
   allowed_namespaces: string[];
   default_resource_limits: ResourceDefaults | null;
@@ -515,6 +520,7 @@ export interface DeckwatchSettings {
   ai_codex_enabled?: boolean;
   cost?: CostSettings | null;
   tracing?: TracingSettings | null;
+  credentials?: CredentialStatus | null;
 }
 
 export interface CostSettings {
