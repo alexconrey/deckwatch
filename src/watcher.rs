@@ -505,9 +505,26 @@ async fn trigger_build(
 
     let jobs_api = state.jobs_api(ns)?;
 
-    // Clean up any existing job with the same name (e.g. from a previous failed build)
-    let _ = jobs_api.delete(&job_name, &Default::default()).await;
-    jobs_api.create(&PostParams::default(), &job).await?;
+    // Clean up any existing job with the same name. Use background
+    // propagation and retry the create if the old object is still
+    // finalizing (409 AlreadyExists).
+    let dp = kube::api::DeleteParams {
+        propagation_policy: Some(kube::api::PropagationPolicy::Background),
+        ..Default::default()
+    };
+    let _ = jobs_api.delete(&job_name, &dp).await;
+
+    let mut attempts = 0;
+    loop {
+        match jobs_api.create(&PostParams::default(), &job).await {
+            Ok(_) => break,
+            Err(kube::Error::Api(e)) if e.code == 409 && attempts < 5 => {
+                attempts += 1;
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            }
+            Err(e) => return Err(e.into()),
+        }
+    }
 
     Ok(job_name)
 }
@@ -619,6 +636,14 @@ async fn monitor_builds(state: &AppState) -> anyhow::Result<()> {
             )
             .await;
         }
+
+        // Clean up the completed Job so re-triggers don't race against
+        // a finalizing deletion.
+        let dp = kube::api::DeleteParams {
+            propagation_policy: Some(kube::api::PropagationPolicy::Background),
+            ..Default::default()
+        };
+        let _ = jobs_api.delete(job_name, &dp).await;
     }
 
     Ok(())
