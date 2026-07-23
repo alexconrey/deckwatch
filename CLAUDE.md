@@ -194,10 +194,11 @@ GHCR on tag push.
 
 ### Cutting a release
 
-When bumping the version, update **all four files**:
+When bumping the version, update **all five files**:
 - `Cargo.toml` → `version`
 - `helm/deckwatch/Chart.yaml` → `version` and `appVersion`
 - `frontend/package.json` → `version`
+- `frontend/src/layouts/AppLayout.vue` → footer version string
 - `CLAUDE.md` → `Current version`
 
 Then commit, tag (`vX.Y.Z`), and push with `--tags`. The publish workflow
