@@ -129,7 +129,7 @@ registry:
     enabled: false
     className: ""
     annotations: {}
-    hosts: []
+    host: ""
     tls: []
 
 webhook:

@@ -111,6 +111,9 @@ Deckwatch exposes the following MCP tools:
 | `list_addons` | List available sidecar addons (Redis, PostgreSQL, Memcached, etc.) with default config | — |
 | `list_templates` | List deployment templates (web-app, worker, cron-job, static-site, custom) with payloads | — |
 | `configure_gitops` | Enable GitOps for a deployment — polls a git repo, builds images with Kaniko, auto-deploys | `namespace`, `deployment_name`, `repo_url`, `oci_repository`, `branch` (optional), `dockerfile_path` (optional), `docker_context` (optional), `token_secret` (optional), `poll_interval_seconds` (optional) |
+| `create_ingress` | Create an Ingress resource (auto-creates backing Service if missing) | `namespace`, `name`, `service_name`, `host` (optional), `service_port` (optional, default 80), `path` (optional, default /), `ingress_class` (optional), `annotations` (optional) |
+| `update_ingress` | Update an existing Ingress resource | `namespace`, `name`, `service_name`, `host` (optional), `service_port` (optional), `path` (optional), `ingress_class` (optional), `annotations` (optional) |
+| `create_service` | Create a ClusterIP Service with app label selector | `namespace`, `name`, `port` (optional, default 80), `target_port` (optional) |
 
 ## Example Workflows
 
