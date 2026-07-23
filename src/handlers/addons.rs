@@ -375,11 +375,7 @@ pub async fn attach(
     if addon_id == "postgres" {
         let volume_name = format!("{container_name}-data");
         let pvc_name = format!("{name}-{container_name}-data");
-        let storage_size = overrides
-            .storage
-            .as_deref()
-            .unwrap_or("1Gi")
-            .to_string();
+        let storage_size = overrides.storage.as_deref().unwrap_or("1Gi").to_string();
 
         let pvc = PersistentVolumeClaim {
             metadata: ObjectMeta {

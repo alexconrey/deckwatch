@@ -192,6 +192,17 @@ CI runs on PRs to main via `.github/workflows/ci.yml`:
 Publish workflow (`.github/workflows/publish.yml`) builds multi-arch image to
 GHCR on tag push.
 
+### Cutting a release
+
+When bumping the version, update **all four files**:
+- `Cargo.toml` → `version`
+- `helm/deckwatch/Chart.yaml` → `version` and `appVersion`
+- `frontend/package.json` → `version`
+- `CLAUDE.md` → `Current version`
+
+Then commit, tag (`vX.Y.Z`), and push with `--tags`. The publish workflow
+builds the multi-arch image automatically.
+
 ## Coding Conventions
 
 ### Rust Backend
@@ -215,6 +226,8 @@ GHCR on tag push.
 - Vitest + happy-dom + @vue/test-utils (vuetify inlined via vite-plugin-vuetify)
 
 ### Git Workflow
+- **NEVER commit directly to main** — always create a branch and open a PR
+- **NEVER push tags directly** — only tag after a PR has been merged to main
 - Iterative small commits, not monolithic version bumps
 - Concise commit messages; larger context in PR descriptions
 - Do NOT include `Co-Authored-By: Claude` in commits or PRs

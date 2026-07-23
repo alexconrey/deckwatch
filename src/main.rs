@@ -300,7 +300,11 @@ async fn migrate_configmap_apps_to_db(state: &AppState) {
         let data_str = match cm.data.as_ref().and_then(|d| d.get("application")) {
             Some(s) => s,
             None => {
-                tracing::warn!(cm = cm_name, ns = cm_ns, "ConfigMap missing 'application' key; skipping");
+                tracing::warn!(
+                    cm = cm_name,
+                    ns = cm_ns,
+                    "ConfigMap missing 'application' key; skipping"
+                );
                 continue;
             }
         };
@@ -367,7 +371,11 @@ async fn migrate_configmap_apps_to_db(state: &AppState) {
         if let Err(e) = ns_api.delete(cm_name, &Default::default()).await {
             tracing::warn!(cm = cm_name, ns = cm_ns, error = %e, "failed to delete legacy ConfigMap");
         } else {
-            tracing::info!(cm = cm_name, ns = cm_ns, "deleted legacy application ConfigMap");
+            tracing::info!(
+                cm = cm_name,
+                ns = cm_ns,
+                "deleted legacy application ConfigMap"
+            );
         }
     }
 }

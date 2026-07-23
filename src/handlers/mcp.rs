@@ -754,7 +754,7 @@ async fn tool_list_templates(state: &AppState) -> Result<String, String> {
     let response = templates::list(State(state.clone()))
         .await
         .map_err(|e| format!("{e}"))?;
-    serde_json::to_string_pretty(&response.0) .map_err(|e| e.to_string())
+    serde_json::to_string_pretty(&response.0).map_err(|e| e.to_string())
 }
 
 async fn tool_create_application(
@@ -795,9 +795,7 @@ async fn tool_configure_gitops(
     let name = args["deployment_name"]
         .as_str()
         .ok_or("deployment_name is required")?;
-    let repo_url = args["repo_url"]
-        .as_str()
-        .ok_or("repo_url is required")?;
+    let repo_url = args["repo_url"].as_str().ok_or("repo_url is required")?;
     let oci_repository = args["oci_repository"]
         .as_str()
         .map(|s| s.to_string())
@@ -833,7 +831,7 @@ async fn tool_configure_gitops(
     .await
     .map_err(|e| format!("{e}"))?;
 
-    serde_json::to_string_pretty(&result.0) .map_err(|e| e.to_string())
+    serde_json::to_string_pretty(&result.0).map_err(|e| e.to_string())
 }
 
 // ---------------------------------------------------------------------------
