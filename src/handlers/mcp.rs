@@ -19,7 +19,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::entities::gitops_configs;
 use crate::handlers::applications;
-use crate::handlers::{addons, gitops, templates};
+use crate::handlers::{addons, gitops, ingresses, templates};
 use crate::kube_ext;
 use crate::state::AppState;
 
@@ -274,6 +274,61 @@ fn handle_tools_list(request: &JsonRpcRequest) -> JsonRpcResponse {
                     "required": ["namespace", "deployment_name", "repo_url"],
                     "additionalProperties": false
                 }
+            },
+            {
+                "name": "create_ingress",
+                "description": "Create a Kubernetes Ingress resource. Automatically creates a backing ClusterIP Service if one doesn't exist.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "namespace": { "type": "string", "description": "Kubernetes namespace" },
+                        "name": { "type": "string", "description": "Ingress name" },
+                        "host": { "type": "string", "description": "Hostname for the ingress rule (e.g. myapp.example.com)" },
+                        "service_name": { "type": "string", "description": "Backend service name" },
+                        "service_port": { "type": "integer", "description": "Backend service port (default: 80)" },
+                        "path": { "type": "string", "description": "URL path (default: /)" },
+                        "path_type": { "type": "string", "description": "Path matching type (default: Prefix)", "enum": ["Prefix", "Exact", "ImplementationSpecific"] },
+                        "ingress_class": { "type": "string", "description": "IngressClass name (e.g. alb, nginx)" },
+                        "annotations": { "type": "object", "description": "Ingress annotations as key-value pairs", "additionalProperties": { "type": "string" } }
+                    },
+                    "required": ["namespace", "name", "service_name"],
+                    "additionalProperties": false
+                }
+            },
+            {
+                "name": "update_ingress",
+                "description": "Update an existing Kubernetes Ingress resource (host, paths, annotations, TLS).",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "namespace": { "type": "string", "description": "Kubernetes namespace" },
+                        "name": { "type": "string", "description": "Ingress name" },
+                        "host": { "type": "string", "description": "Hostname for the ingress rule" },
+                        "service_name": { "type": "string", "description": "Backend service name" },
+                        "service_port": { "type": "integer", "description": "Backend service port (default: 80)" },
+                        "path": { "type": "string", "description": "URL path (default: /)" },
+                        "path_type": { "type": "string", "description": "Path matching type (default: Prefix)" },
+                        "ingress_class": { "type": "string", "description": "IngressClass name" },
+                        "annotations": { "type": "object", "description": "Ingress annotations as key-value pairs", "additionalProperties": { "type": "string" } }
+                    },
+                    "required": ["namespace", "name", "service_name"],
+                    "additionalProperties": false
+                }
+            },
+            {
+                "name": "create_service",
+                "description": "Create a Kubernetes ClusterIP Service pointing to pods with a matching app label.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "namespace": { "type": "string", "description": "Kubernetes namespace" },
+                        "name": { "type": "string", "description": "Service name (also used as the app label selector)" },
+                        "port": { "type": "integer", "description": "Service port (default: 80)" },
+                        "target_port": { "type": "integer", "description": "Container port to forward to (defaults to same as port)" }
+                    },
+                    "required": ["namespace", "name"],
+                    "additionalProperties": false
+                }
             }
         ]
     });
@@ -305,6 +360,9 @@ async fn handle_tool_call(state: &AppState, request: &JsonRpcRequest) -> JsonRpc
         "list_addons" => tool_list_addons().await,
         "list_templates" => tool_list_templates(state).await,
         "configure_gitops" => tool_configure_gitops(state, args).await,
+        "create_ingress" => tool_create_ingress(state, args).await,
+        "update_ingress" => tool_update_ingress(state, args).await,
+        "create_service" => tool_create_service(state, args).await,
         _ => Err(format!("Unknown tool: {tool_name}")),
     };
 
@@ -832,6 +890,144 @@ async fn tool_configure_gitops(
     .map_err(|e| format!("{e}"))?;
 
     serde_json::to_string_pretty(&result.0).map_err(|e| e.to_string())
+}
+
+async fn tool_create_ingress(state: &AppState, args: &serde_json::Value) -> Result<String, String> {
+    let ns = args["namespace"].as_str().ok_or("namespace is required")?;
+    let name = args["name"].as_str().ok_or("name is required")?;
+    let service_name = args["service_name"]
+        .as_str()
+        .ok_or("service_name is required")?;
+    let service_port = args["service_port"].as_i64().unwrap_or(80) as i32;
+    let path = args["path"].as_str().unwrap_or("/").to_string();
+    let path_type = args["path_type"].as_str().map(|s| s.to_string());
+    let host = args["host"].as_str().map(|s| s.to_string());
+    let ingress_class = args["ingress_class"].as_str().map(|s| s.to_string());
+    let annotations: Option<std::collections::BTreeMap<String, String>> = args
+        .get("annotations")
+        .and_then(|v| serde_json::from_value(v.clone()).ok());
+
+    let req = ingresses::CreateIngressRequest {
+        name: name.to_string(),
+        host,
+        paths: vec![ingresses::IngressPathInput {
+            path,
+            path_type,
+            service_name: service_name.to_string(),
+            service_port,
+        }],
+        ingress_class,
+        annotations,
+        tls: None,
+    };
+
+    let result = ingresses::create(
+        State(state.clone()),
+        axum::extract::Path(ns.to_string()),
+        Json(req),
+    )
+    .await
+    .map_err(|e| format!("{e}"))?;
+
+    let (_status, Json(detail)) = result;
+    serde_json::to_string_pretty(&detail).map_err(|e| e.to_string())
+}
+
+async fn tool_update_ingress(state: &AppState, args: &serde_json::Value) -> Result<String, String> {
+    let ns = args["namespace"].as_str().ok_or("namespace is required")?;
+    let name = args["name"].as_str().ok_or("name is required")?;
+    let service_name = args["service_name"]
+        .as_str()
+        .ok_or("service_name is required")?;
+    let service_port = args["service_port"].as_i64().unwrap_or(80) as i32;
+    let path = args["path"].as_str().unwrap_or("/").to_string();
+    let path_type = args["path_type"].as_str().map(|s| s.to_string());
+    let host = args["host"].as_str().map(|s| s.to_string());
+    let ingress_class = args["ingress_class"].as_str().map(|s| s.to_string());
+    let annotations: Option<std::collections::BTreeMap<String, String>> = args
+        .get("annotations")
+        .and_then(|v| serde_json::from_value(v.clone()).ok());
+
+    let req = ingresses::CreateIngressRequest {
+        name: name.to_string(),
+        host,
+        paths: vec![ingresses::IngressPathInput {
+            path,
+            path_type,
+            service_name: service_name.to_string(),
+            service_port,
+        }],
+        ingress_class,
+        annotations,
+        tls: None,
+    };
+
+    let result = ingresses::update(
+        State(state.clone()),
+        axum::extract::Path((ns.to_string(), name.to_string())),
+        Json(req),
+    )
+    .await
+    .map_err(|e| format!("{e}"))?;
+
+    serde_json::to_string_pretty(&result.0).map_err(|e| e.to_string())
+}
+
+async fn tool_create_service(state: &AppState, args: &serde_json::Value) -> Result<String, String> {
+    use k8s_openapi::api::core::v1::{Service, ServicePort, ServiceSpec};
+    use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
+    use k8s_openapi::apimachinery::pkg::util::intstr::IntOrString;
+    use kube::api::PostParams;
+
+    let ns = args["namespace"].as_str().ok_or("namespace is required")?;
+    let name = args["name"].as_str().ok_or("name is required")?;
+    let port = args["port"].as_i64().unwrap_or(80) as i32;
+    let target_port = args["target_port"].as_i64().unwrap_or(port as i64) as i32;
+
+    let mut labels = std::collections::BTreeMap::new();
+    labels.insert("app".to_string(), name.to_string());
+    labels.insert(
+        "app.kubernetes.io/managed-by".to_string(),
+        "deckwatch".to_string(),
+    );
+
+    let mut selector = std::collections::BTreeMap::new();
+    selector.insert("app".to_string(), name.to_string());
+
+    let svc = Service {
+        metadata: ObjectMeta {
+            name: Some(name.to_string()),
+            namespace: Some(ns.to_string()),
+            labels: Some(labels),
+            ..Default::default()
+        },
+        spec: Some(ServiceSpec {
+            selector: Some(selector),
+            ports: Some(vec![ServicePort {
+                port,
+                target_port: Some(IntOrString::Int(target_port)),
+                protocol: Some("TCP".to_string()),
+                ..Default::default()
+            }]),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+
+    let svc_api = state.services_api(ns).map_err(|e| format!("{e}"))?;
+    let created = svc_api
+        .create(&PostParams::default(), &svc)
+        .await
+        .map_err(|e| format!("{e}"))?;
+
+    let result = serde_json::json!({
+        "name": created.metadata.name,
+        "namespace": ns,
+        "cluster_ip": created.spec.as_ref().and_then(|s| s.cluster_ip.clone()),
+        "port": port,
+        "target_port": target_port,
+    });
+    serde_json::to_string_pretty(&result).map_err(|e| e.to_string())
 }
 
 // ---------------------------------------------------------------------------

@@ -43,7 +43,7 @@ fn test_tools_list_returns_all_tools() {
     let tools = result["tools"]
         .as_array()
         .expect("tools should be an array");
-    assert_eq!(tools.len(), 14);
+    assert_eq!(tools.len(), 17);
 }
 
 #[test]
@@ -78,6 +78,9 @@ fn test_tools_list_tool_names() {
         "list_addons",
         "list_templates",
         "configure_gitops",
+        "create_ingress",
+        "update_ingress",
+        "create_service",
     ];
 
     for name in &expected {
@@ -241,6 +244,50 @@ async fn test_configure_gitops_missing_oci_repository() {
     assert!(
         err.message.contains("oci_repository"),
         "error should mention missing oci_repository; got: {}",
+        err.message
+    );
+}
+
+#[tokio::test]
+async fn test_create_ingress_missing_service_name() {
+    let state = build_test_state().await;
+    let req = JsonRpcRequest {
+        jsonrpc: "2.0".to_string(),
+        id: Some(json!(50)),
+        method: "tools/call".to_string(),
+        params: json!({
+            "name": "create_ingress",
+            "arguments": { "namespace": "default", "name": "my-ingress" }
+        }),
+    };
+
+    let resp = handle_tool_call(&state, &req).await;
+    let err = resp.error.expect("should error without service_name");
+    assert!(
+        err.message.contains("service_name"),
+        "error should mention missing service_name; got: {}",
+        err.message
+    );
+}
+
+#[tokio::test]
+async fn test_create_service_missing_name() {
+    let state = build_test_state().await;
+    let req = JsonRpcRequest {
+        jsonrpc: "2.0".to_string(),
+        id: Some(json!(51)),
+        method: "tools/call".to_string(),
+        params: json!({
+            "name": "create_service",
+            "arguments": { "namespace": "default" }
+        }),
+    };
+
+    let resp = handle_tool_call(&state, &req).await;
+    let err = resp.error.expect("should error without name");
+    assert!(
+        err.message.contains("name"),
+        "error should mention missing name; got: {}",
         err.message
     );
 }
@@ -569,6 +616,7 @@ users:
         settings_configmap_name: "deckwatch-settings".to_string(),
         entitlements: std::sync::Arc::new(crate::license::Entitlements::community()),
         registry_public_url: None,
+        registry_internal_url: None,
         registry_enabled: false,
         ai_rate_limiter: RateLimiter::default(),
         db,

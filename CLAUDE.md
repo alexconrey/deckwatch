@@ -56,7 +56,7 @@ src/                              # Rust backend
     ingresses.rs                  # CRUD + auto-service + IngressClass discovery
     gitops.rs                     # GitOps config CRUD (DB-backed)
     logs.rs                       # Log streaming (SSE) + bulk history
-    mcp.rs                        # MCP server (JSON-RPC 2.0, 14 tools)
+    mcp.rs                        # MCP server (JSON-RPC 2.0, 17 tools)
     monitoring.rs                 # PodMonitor CRD management
     diagnostics.rs                # AI diagnostic job creation
     ai_fix.rs                     # AI fix job creation
@@ -260,10 +260,10 @@ builds the multi-arch image automatically.
 Deckwatch exposes an MCP endpoint at `POST /mcp` (JSON-RPC 2.0, MCP 2025-11-25 spec).
 Claude Code connects via `claude mcp add --transport http <name> <url>/mcp`.
 
-14 tools: get_namespaces, list_deployments, get_deployment, get_pod_logs,
+17 tools: get_namespaces, list_deployments, get_deployment, get_pod_logs,
 get_events, get_deployment_history, get_gitops_status, get_build_logs,
 list_ingresses, get_metrics, create_application, list_addons, list_templates,
-configure_gitops.
+configure_gitops, create_ingress, update_ingress, create_service.
 
 ## Addons
 
