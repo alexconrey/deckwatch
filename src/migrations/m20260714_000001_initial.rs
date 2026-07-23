@@ -26,7 +26,7 @@ impl MigrationTrait for Migration {
                     .col(ColumnDef::new(Settings::Value).string().not_null())
                     .col(
                         ColumnDef::new(Settings::UpdatedAt)
-                            .timestamp()
+                            .timestamp_with_time_zone()
                             .not_null()
                             .default(Expr::current_timestamp()),
                     )
@@ -63,13 +63,13 @@ impl MigrationTrait for Migration {
                     .col(ColumnDef::new(Applications::DeploymentName).string().null())
                     .col(
                         ColumnDef::new(Applications::CreatedAt)
-                            .timestamp()
+                            .timestamp_with_time_zone()
                             .not_null()
                             .default(Expr::current_timestamp()),
                     )
                     .col(
                         ColumnDef::new(Applications::UpdatedAt)
-                            .timestamp()
+                            .timestamp_with_time_zone()
                             .not_null()
                             .default(Expr::current_timestamp()),
                     )
@@ -169,7 +169,7 @@ impl MigrationTrait for Migration {
                     .col(ColumnDef::new(GitopsConfigs::LastBuildJob).string().null())
                     .col(
                         ColumnDef::new(GitopsConfigs::LastBuildTime)
-                            .timestamp()
+                            .timestamp_with_time_zone()
                             .null(),
                     )
                     .col(
@@ -179,13 +179,13 @@ impl MigrationTrait for Migration {
                     )
                     .col(
                         ColumnDef::new(GitopsConfigs::CreatedAt)
-                            .timestamp()
+                            .timestamp_with_time_zone()
                             .not_null()
                             .default(Expr::current_timestamp()),
                     )
                     .col(
                         ColumnDef::new(GitopsConfigs::UpdatedAt)
-                            .timestamp()
+                            .timestamp_with_time_zone()
                             .not_null()
                             .default(Expr::current_timestamp()),
                     )
@@ -217,12 +217,20 @@ impl MigrationTrait for Migration {
                             .not_null()
                             .default("pending"),
                     )
-                    .col(ColumnDef::new(Builds::StartedAt).timestamp().null())
-                    .col(ColumnDef::new(Builds::CompletedAt).timestamp().null())
+                    .col(
+                        ColumnDef::new(Builds::StartedAt)
+                            .timestamp_with_time_zone()
+                            .null(),
+                    )
+                    .col(
+                        ColumnDef::new(Builds::CompletedAt)
+                            .timestamp_with_time_zone()
+                            .null(),
+                    )
                     .col(ColumnDef::new(Builds::ErrorMessage).string().null())
                     .col(
                         ColumnDef::new(Builds::CreatedAt)
-                            .timestamp()
+                            .timestamp_with_time_zone()
                             .not_null()
                             .default(Expr::current_timestamp()),
                     )
@@ -251,7 +259,7 @@ impl MigrationTrait for Migration {
                     )
                     .col(
                         ColumnDef::new(AuditLog::Timestamp)
-                            .timestamp()
+                            .timestamp_with_time_zone()
                             .not_null()
                             .default(Expr::current_timestamp()),
                     )
