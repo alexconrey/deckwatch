@@ -147,6 +147,13 @@ database:
   #   sqlite:///data/deckwatch.db?mode=rwc
   #   postgres://user:pass@host:5432/deckwatch
   url: "sqlite:///data/deckwatch.db?mode=rwc"
+  # Read DECKWATCH_DATABASE_URL from a K8s Secret instead of the plaintext
+  # url above. The Secret can be created by any mechanism — ExternalSecrets
+  # Operator, Secrets Store CSI, Vault, or plain kubectl create secret.
+  urlFromSecret:
+    enabled: false
+    secretName: ""
+    key: "database-url"
   # PVC for SQLite persistence. Only used when url starts with "sqlite://".
   persistence:
     enabled: true
