@@ -12,7 +12,10 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 
+use sea_orm::EntityTrait;
+
 use crate::anthropic::AnthropicClient;
+use crate::entities::applications;
 use crate::error::AppError;
 use crate::handlers::diagnostics::{DiagAgent, DiagStatus};
 use crate::handlers::settings::{load_settings_from_db, AiProviderConfig};
@@ -20,10 +23,6 @@ use crate::kube_ext::ApplicationGitConfig;
 use crate::log_sanitize::{sanitize_logs, wrap_prompt};
 use crate::state::AppState;
 
-// AI-fix reuses the diagnostics status/agent enums so the frontend can
-// share UI components for both flows.
-
-const APP_CM_DATA_KEY: &str = "application";
 const APP_LABEL: &str = "deckwatch.io/application";
 
 const AI_FIX_PROMPT: &str = "You are reviewing a Kubernetes application that is managed by Deckwatch. \
@@ -38,10 +37,6 @@ const CRASH_LOG_TAIL_BYTES: usize = 32 * 1024;
 const CRASH_LOG_MAX_PODS: usize = 3;
 
 const STREAM_CHANNEL_CAPACITY: usize = 64;
-
-fn cm_name(app: &str) -> String {
-    format!("deckwatch-app-{app}")
-}
 
 fn member_selector(app_name: &str) -> String {
     format!("{APP_LABEL}={app_name}")
@@ -60,15 +55,6 @@ pub struct AiFixResponse {
     pub agent: DiagAgent,
 }
 
-#[derive(Serialize, Deserialize)]
-struct ApplicationData {
-    name: String,
-    #[serde(default)]
-    description: String,
-    #[serde(default)]
-    git: Option<ApplicationGitConfig>,
-}
-
 /// Read a single key from a Kubernetes Secret.
 async fn read_secret_key(
     state: &AppState,
@@ -78,11 +64,11 @@ async fn read_secret_key(
 ) -> Result<String, AppError> {
     let secrets_api = state.secrets_api(ns)?;
     let secret = secrets_api.get(secret_name).await.map_err(|_| {
-        AppError::BadRequest(format!(
-            "Secret '{secret_name}' not found in namespace '{ns}'. \
-             Create it with: kubectl -n {ns} create secret generic {secret_name} \
-             --from-literal={data_key}=<value>"
-        ))
+        AppError::BadRequest(
+            "AI provider credentials are not configured. \
+             Go to Settings \u{2192} AI Providers to set up your API key."
+                .to_string(),
+        )
     })?;
     let value = secret
         .data
@@ -189,23 +175,23 @@ pub async fn create_ai_fix(
         ));
     }
 
-    // 1. Load the application record from its managed ConfigMap.
-    let cm_api = state.configmaps_api(&ns)?;
-    let app_cm = cm_api.get(&cm_name(&name)).await?;
-    let app_data: ApplicationData = app_cm
-        .data
-        .as_ref()
-        .and_then(|d| d.get(APP_CM_DATA_KEY))
+    // 1. Load the application record from the database.
+    let app_id = format!("{ns}/{name}");
+    let app_row = applications::Entity::find_by_id(&app_id)
+        .one(&state.db)
+        .await
+        .map_err(|e| AppError::BadRequest(format!("db error: {e}")))?
+        .ok_or_else(|| AppError::NotFound(format!("application '{name}' not found")))?;
+
+    let git: ApplicationGitConfig = app_row
+        .git_config
+        .as_deref()
         .and_then(|s| serde_json::from_str(s).ok())
         .ok_or_else(|| {
-            AppError::BadRequest(format!("configmap for application '{name}' is malformed"))
+            AppError::BadRequest(format!(
+                "application '{name}' has no git configuration -- enable GitOps first"
+            ))
         })?;
-
-    let git = app_data.git.as_ref().ok_or_else(|| {
-        AppError::BadRequest(format!(
-            "application '{name}' has no git configuration -- enable GitOps first"
-        ))
-    })?;
 
     let branch = git.branch.clone().unwrap_or_else(|| "main".to_string());
 
@@ -226,7 +212,7 @@ pub async fn create_ai_fix(
     let context_md = build_context_markdown(
         &name,
         &ns,
-        &app_data.description,
+        &app_row.description,
         &git.repo_url,
         &branch,
         &crash_logs,

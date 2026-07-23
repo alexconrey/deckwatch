@@ -1,7 +1,9 @@
 use k8s_openapi::api::apps::v1::Deployment;
 use k8s_openapi::api::autoscaling::v2::HorizontalPodAutoscaler;
 use k8s_openapi::api::batch::v1::{CronJob, Job};
-use k8s_openapi::api::core::v1::{ConfigMap, Event, Namespace, Node, Pod, Secret, Service};
+use k8s_openapi::api::core::v1::{
+    ConfigMap, Event, Namespace, Node, PersistentVolumeClaim, Pod, Secret, Service,
+};
 use k8s_openapi::api::networking::v1::{Ingress, IngressClass};
 use kube::api::{ApiResource, DynamicObject, GroupVersionKind};
 use kube::discovery;
@@ -22,6 +24,7 @@ pub struct AppState {
     /// registries dropdown) and by watcher.rs (decides whether kaniko
     /// needs `--insecure` for pushes to the local registry).
     pub registry_public_url: Option<String>,
+    pub registry_internal_url: Option<String>,
     pub registry_enabled: bool,
     /// Per-namespace rate limiter for AI-agent jobs (diagnostics + ai-fix).
     /// Shared across all handlers via `AppState` clones — the limiter
@@ -86,6 +89,11 @@ impl AppState {
     }
 
     pub fn configmaps_api(&self, ns: &str) -> Result<Api<ConfigMap>, AppError> {
+        self.check_namespace(ns)?;
+        Ok(Api::namespaced(self.kube_client.clone(), ns))
+    }
+
+    pub fn pvcs_api(&self, ns: &str) -> Result<Api<PersistentVolumeClaim>, AppError> {
         self.check_namespace(ns)?;
         Ok(Api::namespaced(self.kube_client.clone(), ns))
     }

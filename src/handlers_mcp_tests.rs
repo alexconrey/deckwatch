@@ -43,7 +43,7 @@ fn test_tools_list_returns_all_tools() {
     let tools = result["tools"]
         .as_array()
         .expect("tools should be an array");
-    assert_eq!(tools.len(), 10);
+    assert_eq!(tools.len(), 14);
 }
 
 #[test]
@@ -74,6 +74,10 @@ fn test_tools_list_tool_names() {
         "get_build_logs",
         "list_ingresses",
         "get_metrics",
+        "create_application",
+        "list_addons",
+        "list_templates",
+        "configure_gitops",
     ];
 
     for name in &expected {
@@ -190,6 +194,58 @@ async fn test_tool_call_missing_namespace() {
 }
 
 #[tokio::test]
+async fn test_configure_gitops_missing_repo_url() {
+    let state = build_test_state().await;
+    let req = JsonRpcRequest {
+        jsonrpc: "2.0".to_string(),
+        id: Some(json!(40)),
+        method: "tools/call".to_string(),
+        params: json!({
+            "name": "configure_gitops",
+            "arguments": {
+                "namespace": "default",
+                "deployment_name": "my-app",
+                "oci_repository": "ghcr.io/org/app"
+            }
+        }),
+    };
+
+    let resp = handle_tool_call(&state, &req).await;
+    let err = resp.error.expect("should error without repo_url");
+    assert!(
+        err.message.contains("repo_url"),
+        "error should mention missing repo_url; got: {}",
+        err.message
+    );
+}
+
+#[tokio::test]
+async fn test_configure_gitops_missing_oci_repository() {
+    let state = build_test_state().await;
+    let req = JsonRpcRequest {
+        jsonrpc: "2.0".to_string(),
+        id: Some(json!(41)),
+        method: "tools/call".to_string(),
+        params: json!({
+            "name": "configure_gitops",
+            "arguments": {
+                "namespace": "default",
+                "deployment_name": "my-app",
+                "repo_url": "https://github.com/org/repo"
+            }
+        }),
+    };
+
+    let resp = handle_tool_call(&state, &req).await;
+    let err = resp.error.expect("should error without oci_repository");
+    assert!(
+        err.message.contains("oci_repository"),
+        "error should mention missing oci_repository; got: {}",
+        err.message
+    );
+}
+
+#[tokio::test]
 async fn test_tool_call_get_namespaces_shape() {
     let state = build_test_state().await;
     let req = JsonRpcRequest {
@@ -226,6 +282,74 @@ async fn test_tool_call_get_namespaces_shape() {
         assert_eq!(err.code, -32000);
         assert!(!err.message.is_empty());
     }
+}
+
+#[tokio::test]
+async fn test_list_addons_returns_catalog() {
+    let state = build_test_state().await;
+    let req = JsonRpcRequest {
+        jsonrpc: "2.0".to_string(),
+        id: Some(json!(30)),
+        method: "tools/call".to_string(),
+        params: json!({
+            "name": "list_addons",
+            "arguments": {}
+        }),
+    };
+
+    let resp = handle_tool_call(&state, &req).await;
+    assert!(resp.error.is_none(), "list_addons should succeed without a cluster");
+    let result = resp.result.expect("should have result");
+    let text = result["content"][0]["text"].as_str().expect("should have text");
+    let parsed: serde_json::Value = serde_json::from_str(text).expect("should be valid JSON");
+    let addons = parsed["addons"].as_array().expect("should have addons array");
+    let ids: Vec<&str> = addons.iter().filter_map(|a| a["id"].as_str()).collect();
+    assert!(ids.contains(&"postgres"), "catalog should include postgres addon");
+    assert!(ids.contains(&"redis"), "catalog should include redis addon");
+}
+
+#[tokio::test]
+async fn test_create_application_missing_name() {
+    let state = build_test_state().await;
+    let req = JsonRpcRequest {
+        jsonrpc: "2.0".to_string(),
+        id: Some(json!(20)),
+        method: "tools/call".to_string(),
+        params: json!({
+            "name": "create_application",
+            "arguments": { "namespace": "default" }
+        }),
+    };
+
+    let resp = handle_tool_call(&state, &req).await;
+    let err = resp.error.expect("should error without name");
+    assert!(
+        err.message.contains("name"),
+        "error should mention missing name; got: {}",
+        err.message
+    );
+}
+
+#[tokio::test]
+async fn test_create_application_missing_namespace() {
+    let state = build_test_state().await;
+    let req = JsonRpcRequest {
+        jsonrpc: "2.0".to_string(),
+        id: Some(json!(21)),
+        method: "tools/call".to_string(),
+        params: json!({
+            "name": "create_application",
+            "arguments": { "name": "my-app" }
+        }),
+    };
+
+    let resp = handle_tool_call(&state, &req).await;
+    let err = resp.error.expect("should error without namespace");
+    assert!(
+        err.message.contains("namespace"),
+        "error should mention missing namespace; got: {}",
+        err.message
+    );
 }
 
 // ---------------------------------------------------------------------------

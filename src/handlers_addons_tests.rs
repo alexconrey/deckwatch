@@ -12,6 +12,7 @@ fn catalog_contains_expected_addons() {
     assert!(ids.contains(&"memcached".to_string()));
     assert!(ids.contains(&"nginx-proxy".to_string()));
     assert!(ids.contains(&"fluent-bit".to_string()));
+    assert!(ids.contains(&"postgres".to_string()));
 }
 
 #[test]
@@ -34,6 +35,34 @@ fn catalog_entries_have_nonempty_image_and_name() {
             a.id
         );
     }
+}
+
+#[test]
+fn catalog_postgres_addon_has_expected_fields() {
+    let pg = catalog()
+        .into_iter()
+        .find(|a| a.id == "postgres")
+        .expect("postgres addon missing from catalog");
+    assert_eq!(pg.name, "PostgreSQL");
+    assert_eq!(pg.image, "postgres:16-alpine");
+    assert_eq!(pg.default_port, Some(5432));
+    assert_eq!(
+        pg.description,
+        "PostgreSQL database sidecar with persistent storage."
+    );
+    let env_names: Vec<&str> = pg.default_env.iter().map(|e| e.name.as_str()).collect();
+    assert!(env_names.contains(&"PG_HOST"));
+    assert!(env_names.contains(&"PGDATA"));
+    assert!(env_names.contains(&"POSTGRES_DB"));
+    assert!(env_names.contains(&"POSTGRES_USER"));
+    assert!(env_names.contains(&"POSTGRES_PASSWORD"));
+    let pg_host = pg.default_env.iter().find(|e| e.name == "PG_HOST").unwrap();
+    assert_eq!(pg_host.value, "localhost");
+    let pgdata = pg.default_env.iter().find(|e| e.name == "PGDATA").unwrap();
+    assert_eq!(pgdata.value, "/var/lib/postgresql/data/pgdata");
+    let res = pg.default_resources.unwrap();
+    assert_eq!(res.cpu.as_deref(), Some("200m"));
+    assert_eq!(res.memory.as_deref(), Some("256Mi"));
 }
 
 // ---- build_resources_from_overrides ----

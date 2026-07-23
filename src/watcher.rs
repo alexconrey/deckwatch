@@ -142,7 +142,9 @@ async fn check_and_build(
         String::new()
     };
 
-    let remote_sha: String = check_remote_head(http, repo_url, branch, &token).await?;
+    let auth_user = resolve_git_auth_user(&config.git_auth_user, repo_url);
+
+    let remote_sha: String = check_remote_head(http, repo_url, branch, &token, &auth_user).await?;
     let last_sha = config.last_commit_sha.as_deref().unwrap_or("");
 
     if remote_sha == last_sha {
@@ -201,7 +203,7 @@ async fn check_and_build(
     let dep_api = state.deployments_api(ns)?;
     let dep = dep_api.get(dep_name).await?;
 
-    let job_name: String = trigger_build(state, ns, &dep, &remote_sha, &token).await?;
+    let job_name: String = trigger_build(state, ns, &dep, &remote_sha, &token, &auth_user).await?;
     // Counter incremented once per build kickoff; success/failure is recorded
     // later in monitor_builds when the Job completes.
     metrics::record_gitops_build(ns, "started");
@@ -245,11 +247,34 @@ async fn check_and_build(
     Ok(())
 }
 
+/// Resolve the HTTP Basic auth username for git operations. If the user
+/// configured an explicit value, use it. Otherwise auto-detect from the
+/// repo hostname: `oauth2` for GitLab, `x-access-token` for GitHub,
+/// `x-token-auth` for Bitbucket, `oauth2` as the fallback.
+pub fn resolve_git_auth_user(configured: &str, repo_url: &str) -> String {
+    if !configured.is_empty() {
+        return configured.to_string();
+    }
+    let host = repo_url
+        .strip_prefix("https://")
+        .or_else(|| repo_url.strip_prefix("http://"))
+        .and_then(|s| s.split('/').next())
+        .unwrap_or("");
+    if host.contains("github.com") || host.contains("github.") {
+        "x-access-token".to_string()
+    } else if host.contains("bitbucket.org") || host.contains("bitbucket.") {
+        "x-token-auth".to_string()
+    } else {
+        "oauth2".to_string()
+    }
+}
+
 pub async fn check_remote_head(
     http: &reqwest::Client,
     repo_url: &str,
     branch: &str,
     token: &str,
+    auth_user: &str,
 ) -> anyhow::Result<String> {
     let url = format!(
         "{}/info/refs?service=git-upload-pack",
@@ -260,7 +285,7 @@ pub async fn check_remote_head(
     if !token.is_empty() {
         let creds = base64::Engine::encode(
             &base64::engine::general_purpose::STANDARD,
-            format!("x-token:{token}"),
+            format!("{auth_user}:{token}"),
         );
         request = request.header("Authorization", format!("Basic {creds}"));
     }
@@ -337,7 +362,16 @@ pub async fn trigger_build_public(
     commit_sha: &str,
     token: &str,
 ) -> anyhow::Result<String> {
-    trigger_build(state, ns, dep, commit_sha, token).await
+    let config = {
+        let app_id = format!("{ns}/{}", dep.name_any());
+        gitops_configs::Entity::find()
+            .filter(gitops_configs::Column::ApplicationId.eq(&app_id))
+            .one(&state.db)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("no gitops config found for {app_id}"))?
+    };
+    let auth_user = resolve_git_auth_user(&config.git_auth_user, &config.repo_url);
+    trigger_build(state, ns, dep, commit_sha, token, &auth_user).await
 }
 
 async fn trigger_build(
@@ -346,6 +380,7 @@ async fn trigger_build(
     dep: &Deployment,
     commit_sha: &str,
     token: &str,
+    auth_user: &str,
 ) -> anyhow::Result<String> {
     let dep_name = dep.name_any();
     let short_sha = &commit_sha[..7.min(commit_sha.len())];
@@ -366,6 +401,16 @@ async fn trigger_build(
     let oci_repo = &config.oci_repository;
     let token_secret = &config.token_secret;
 
+    // When an internal registry URL is configured, rewrite the Kaniko push
+    // destination to use it (pods can reach the ClusterIP Service but the
+    // kubelet can't). The deployment image reference keeps the public URL.
+    let kaniko_destination = match (&state.registry_internal_url, &state.registry_public_url) {
+        (Some(internal), Some(public)) if oci_repo.starts_with(public.as_str()) => {
+            oci_repo.replacen(public.as_str(), internal.as_str(), 1)
+        }
+        _ => oci_repo.clone(),
+    };
+
     let repo_no_scheme = repo_url
         .strip_prefix("https://")
         .or_else(|| repo_url.strip_prefix("http://"))
@@ -374,16 +419,30 @@ async fn trigger_build(
     let kaniko_context = if token.is_empty() {
         format!("git://{repo_no_scheme}#refs/heads/{branch}")
     } else {
-        format!("git://x-token:{token}@{repo_no_scheme}#refs/heads/{branch}")
+        format!("git://{auth_user}:{token}@{repo_no_scheme}#refs/heads/{branch}")
     };
 
     let mut args = vec![
         format!("--dockerfile={dockerfile}"),
         format!("--context={kaniko_context}"),
-        format!("--destination={oci_repo}:{short_sha}"),
+        format!("--destination={kaniko_destination}:{short_sha}"),
         "--cache=true".to_string(),
         "--snapshot-mode=redo".to_string(),
     ];
+
+    // The embedded registry uses plain HTTP; tell Kaniko not to require TLS.
+    let is_internal_registry = state
+        .registry_public_url
+        .as_deref()
+        .or(state.registry_internal_url.as_deref())
+        .map(|url| kaniko_destination.starts_with(url))
+        .unwrap_or(false);
+    if is_internal_registry {
+        let registry_host = kaniko_destination.split('/').next().unwrap_or("");
+        if !registry_host.is_empty() {
+            args.push(format!("--insecure-registry={registry_host}"));
+        }
+    }
 
     if context != "." {
         args.push(format!("--context-sub-path={context}"));
@@ -413,18 +472,25 @@ async fn trigger_build(
                         env: if token_secret.is_empty() {
                             None
                         } else {
-                            Some(vec![EnvVar {
-                                name: "GIT_TOKEN".to_string(),
-                                value_from: Some(EnvVarSource {
-                                    secret_key_ref: Some(SecretKeySelector {
-                                        name: token_secret.to_string(),
-                                        key: "token".to_string(),
+                            Some(vec![
+                                EnvVar {
+                                    name: "GIT_USERNAME".to_string(),
+                                    value: Some(auth_user.to_string()),
+                                    ..Default::default()
+                                },
+                                EnvVar {
+                                    name: "GIT_PASSWORD".to_string(),
+                                    value_from: Some(EnvVarSource {
+                                        secret_key_ref: Some(SecretKeySelector {
+                                            name: token_secret.to_string(),
+                                            key: "token".to_string(),
+                                            ..Default::default()
+                                        }),
                                         ..Default::default()
                                     }),
                                     ..Default::default()
-                                }),
-                                ..Default::default()
-                            }])
+                                },
+                            ])
                         },
                         ..Default::default()
                     }],

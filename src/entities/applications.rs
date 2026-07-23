@@ -10,6 +10,7 @@ pub struct Model {
     pub description: String,
     pub team: String,
     pub deployment_name: Option<String>,
+    pub git_config: Option<String>,
     pub created_at: DateTimeUtc,
     pub updated_at: DateTimeUtc,
 }

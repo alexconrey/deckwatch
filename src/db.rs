@@ -55,6 +55,7 @@ pub async fn ensure_application(
             description: Set(String::new()),
             team: Set(String::new()),
             deployment_name: Set(Some(name.to_string())),
+            git_config: Set(None),
             created_at: Set(now),
             updated_at: Set(now),
         };

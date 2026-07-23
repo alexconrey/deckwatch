@@ -31,6 +31,11 @@ pub struct GitOpsConfigRequest {
     pub repo_url: String,
     pub branch: Option<String>,
     pub token_secret: Option<String>,
+    /// Username for HTTP Basic auth when cloning private repos.
+    /// Auto-detected from hostname when empty: `oauth2` for GitLab,
+    /// `x-access-token` for GitHub, `x-token-auth` for Bitbucket.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub git_auth_user: Option<String>,
     pub dockerfile_path: Option<String>,
     pub docker_context: Option<String>,
     /// Preferred field: OCI-generic registry destination
@@ -70,6 +75,7 @@ pub struct GitOpsConfig {
     pub repo_url: String,
     pub branch: String,
     pub token_secret: Option<String>,
+    pub git_auth_user: String,
     pub dockerfile_path: String,
     pub docker_context: String,
     /// Canonical field going forward.
@@ -156,6 +162,7 @@ pub async fn get_config(
                     token_secret: sea_orm::ActiveValue::Set(
                         get_ann(&dep, "git-token-secret").unwrap_or("").to_string(),
                     ),
+                    git_auth_user: sea_orm::ActiveValue::Set(String::new()),
                     dockerfile_path: sea_orm::ActiveValue::Set(
                         get_ann(&dep, "dockerfile-path")
                             .unwrap_or("Dockerfile")
@@ -240,6 +247,7 @@ pub async fn get_config(
                 } else {
                     Some(r.token_secret.clone())
                 },
+                git_auth_user: r.git_auth_user.clone(),
                 dockerfile_path: r.dockerfile_path.clone(),
                 docker_context: r.docker_context.clone(),
                 oci_repository: oci.clone(),
@@ -328,6 +336,7 @@ pub async fn set_config(
 
     let branch = req.branch.unwrap_or_else(|| "main".to_string());
     let token_secret = req.token_secret.unwrap_or_default();
+    let git_auth_user = req.git_auth_user.unwrap_or_default();
     let dockerfile_path = req
         .dockerfile_path
         .unwrap_or_else(|| "Dockerfile".to_string());
@@ -344,6 +353,7 @@ pub async fn set_config(
             active.repo_url = sea_orm::ActiveValue::Set(req.repo_url);
             active.branch = sea_orm::ActiveValue::Set(branch);
             active.token_secret = sea_orm::ActiveValue::Set(token_secret);
+            active.git_auth_user = sea_orm::ActiveValue::Set(git_auth_user.clone());
             active.dockerfile_path = sea_orm::ActiveValue::Set(dockerfile_path);
             active.docker_context = sea_orm::ActiveValue::Set(docker_context);
             active.oci_repository = sea_orm::ActiveValue::Set(oci_repository);
@@ -365,6 +375,7 @@ pub async fn set_config(
                 repo_url: sea_orm::ActiveValue::Set(req.repo_url),
                 branch: sea_orm::ActiveValue::Set(branch),
                 token_secret: sea_orm::ActiveValue::Set(token_secret),
+                git_auth_user: sea_orm::ActiveValue::Set(git_auth_user),
                 dockerfile_path: sea_orm::ActiveValue::Set(dockerfile_path),
                 docker_context: sea_orm::ActiveValue::Set(docker_context),
                 oci_repository: sea_orm::ActiveValue::Set(oci_repository),
@@ -577,7 +588,8 @@ pub async fn trigger_build(
     };
 
     let http = reqwest::Client::new();
-    let remote_sha = check_remote_head(&http, &config_row.repo_url, &config_row.branch, &token)
+    let auth_user = crate::watcher::resolve_git_auth_user(&config_row.git_auth_user, &config_row.repo_url);
+    let remote_sha = check_remote_head(&http, &config_row.repo_url, &config_row.branch, &token, &auth_user)
         .await
         .map_err(|e| AppError::BadRequest(format!("failed to check remote: {e}")))?;
 

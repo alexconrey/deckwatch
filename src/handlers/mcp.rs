@@ -18,6 +18,8 @@ use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
 use serde::{Deserialize, Serialize};
 
 use crate::entities::gitops_configs;
+use crate::handlers::applications;
+use crate::handlers::{addons, gitops, templates};
 use crate::kube_ext;
 use crate::state::AppState;
 
@@ -217,6 +219,61 @@ fn handle_tools_list(request: &JsonRpcRequest) -> JsonRpcResponse {
                     "required": ["namespace"],
                     "additionalProperties": false
                 }
+            },
+            {
+                "name": "create_application",
+                "description": "Create a new deckwatch application in a namespace. Optionally seeds a starter deployment from a template (web-app, worker, cron-job, static-site).",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "namespace": { "type": "string", "description": "Kubernetes namespace" },
+                        "name": { "type": "string", "description": "Application name (lowercase alphanumeric or '-', max 53 chars)" },
+                        "description": { "type": "string", "description": "Human-readable description of the application" },
+                        "template_id": { "type": "string", "description": "Deployment template: web-app (default), worker, cron-job, static-site", "enum": ["web-app", "worker", "cron-job", "static-site"] },
+                        "create_deployment": { "type": "boolean", "description": "Seed a starter deployment from the template (default: true)" }
+                    },
+                    "required": ["namespace", "name"],
+                    "additionalProperties": false
+                }
+            },
+            {
+                "name": "list_addons",
+                "description": "List available deployment addons (sidecar containers like Redis, PostgreSQL, Memcached, etc.) with their default configuration.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {},
+                    "additionalProperties": false
+                }
+            },
+            {
+                "name": "list_templates",
+                "description": "List available deployment templates (web-app, worker, cron-job, static-site, plus custom templates) with their pre-filled payloads.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {},
+                    "additionalProperties": false
+                }
+            },
+            {
+                "name": "configure_gitops",
+                "description": "Enable GitOps for a deployment. Configures deckwatch to poll a git repo, build container images with Kaniko on new commits, and auto-deploy them.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "namespace": { "type": "string", "description": "Kubernetes namespace" },
+                        "deployment_name": { "type": "string", "description": "Name of the deployment to configure GitOps for" },
+                        "repo_url": { "type": "string", "description": "Git repository URL (e.g. https://github.com/org/repo)" },
+                        "branch": { "type": "string", "description": "Branch to watch (default: main)" },
+                        "dockerfile_path": { "type": "string", "description": "Path to Dockerfile relative to repo root (default: Dockerfile)" },
+                        "docker_context": { "type": "string", "description": "Docker build context path (default: .)" },
+                        "oci_repository": { "type": "string", "description": "OCI registry destination for built images (e.g. ghcr.io/org/app). Defaults to the internal deckwatch registry if available." },
+                        "token_secret": { "type": "string", "description": "Name of K8s Secret containing git credentials (for private repos)" },
+                        "git_auth_user": { "type": "string", "description": "HTTP Basic auth username for git (auto-detected: oauth2 for GitLab, x-access-token for GitHub)" },
+                        "poll_interval_seconds": { "type": "integer", "description": "How often to poll for new commits (default: 30)" }
+                    },
+                    "required": ["namespace", "deployment_name", "repo_url"],
+                    "additionalProperties": false
+                }
             }
         ]
     });
@@ -244,6 +301,10 @@ async fn handle_tool_call(state: &AppState, request: &JsonRpcRequest) -> JsonRpc
         "get_build_logs" => tool_get_build_logs(state, args).await,
         "list_ingresses" => tool_list_ingresses(state, args).await,
         "get_metrics" => tool_get_metrics(state, args).await,
+        "create_application" => tool_create_application(state, args).await,
+        "list_addons" => tool_list_addons().await,
+        "list_templates" => tool_list_templates(state).await,
+        "configure_gitops" => tool_configure_gitops(state, args).await,
         _ => Err(format!("Unknown tool: {tool_name}")),
     };
 
@@ -682,6 +743,97 @@ async fn tool_get_metrics(state: &AppState, args: &serde_json::Value) -> Result<
         }
         Err(e) => Err(e.to_string()),
     }
+}
+
+async fn tool_list_addons() -> Result<String, String> {
+    let Json(response) = addons::list().await;
+    serde_json::to_string_pretty(&response).map_err(|e| e.to_string())
+}
+
+async fn tool_list_templates(state: &AppState) -> Result<String, String> {
+    let response = templates::list(State(state.clone()))
+        .await
+        .map_err(|e| format!("{e}"))?;
+    serde_json::to_string_pretty(&response.0) .map_err(|e| e.to_string())
+}
+
+async fn tool_create_application(
+    state: &AppState,
+    args: &serde_json::Value,
+) -> Result<String, String> {
+    let ns = args["namespace"].as_str().ok_or("namespace is required")?;
+    let name = args["name"].as_str().ok_or("name is required")?;
+    let description = args["description"].as_str().map(|s| s.to_string());
+    let template_id = args["template_id"].as_str().map(|s| s.to_string());
+    let create_deployment = args["create_deployment"].as_bool().unwrap_or(true);
+
+    let req = applications::ApplicationRequest {
+        name: name.to_string(),
+        description,
+        git: None,
+        create_deployment: Some(create_deployment),
+        template_id,
+    };
+
+    let result = applications::create(
+        State(state.clone()),
+        axum::extract::Path(ns.to_string()),
+        Json(req),
+    )
+    .await
+    .map_err(|e| format!("{e}"))?;
+
+    let (_status, Json(detail)) = result;
+    serde_json::to_string_pretty(&detail).map_err(|e| e.to_string())
+}
+
+async fn tool_configure_gitops(
+    state: &AppState,
+    args: &serde_json::Value,
+) -> Result<String, String> {
+    let ns = args["namespace"].as_str().ok_or("namespace is required")?;
+    let name = args["deployment_name"]
+        .as_str()
+        .ok_or("deployment_name is required")?;
+    let repo_url = args["repo_url"]
+        .as_str()
+        .ok_or("repo_url is required")?;
+    let oci_repository = args["oci_repository"]
+        .as_str()
+        .map(|s| s.to_string())
+        .or_else(|| {
+            state
+                .registry_public_url
+                .as_ref()
+                .map(|base| format!("{base}/{name}"))
+        })
+        .ok_or("oci_repository is required (no internal registry configured)")?;
+
+    let req = gitops::GitOpsConfigRequest {
+        repo_url: repo_url.to_string(),
+        branch: args["branch"].as_str().map(|s| s.to_string()),
+        token_secret: args["token_secret"].as_str().map(|s| s.to_string()),
+        git_auth_user: args["git_auth_user"].as_str().map(|s| s.to_string()),
+        dockerfile_path: args["dockerfile_path"].as_str().map(|s| s.to_string()),
+        docker_context: args["docker_context"].as_str().map(|s| s.to_string()),
+        oci_repository: Some(oci_repository),
+        ecr_repository: None,
+        include_paths: None,
+        exclude_paths: None,
+        poll_interval_seconds: args["poll_interval_seconds"].as_i64(),
+        webhook_enabled: None,
+        webhook_secret: None,
+    };
+
+    let result = gitops::set_config(
+        State(state.clone()),
+        axum::extract::Path((ns.to_string(), name.to_string())),
+        Json(req),
+    )
+    .await
+    .map_err(|e| format!("{e}"))?;
+
+    serde_json::to_string_pretty(&result.0) .map_err(|e| e.to_string())
 }
 
 // ---------------------------------------------------------------------------

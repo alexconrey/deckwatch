@@ -11,14 +11,15 @@ metadata:
     {{- include "deckwatch.labels" . | nindent 4 }}
     app.kubernetes.io/component: registry
 spec:
-  type: ClusterIP
+  type: {{ .Values.registry.service.type | default "ClusterIP" }}
   ports:
     - port: {{ .Values.registry.service.port | default 5000 }}
-      # Same target as the main service — the `/v2/*` endpoints are served
-      # by the same axum router; this is only a DNS convenience.
       targetPort: http
       protocol: TCP
       name: registry
+      {{- if and (eq (.Values.registry.service.type | default "ClusterIP") "NodePort") .Values.registry.service.nodePort }}
+      nodePort: {{ .Values.registry.service.nodePort }}
+      {{- end }}
   selector:
     {{- include "deckwatch.selectorLabels" . | nindent 4 }}
 {{- end }}

@@ -103,6 +103,15 @@ Deckwatch exposes the following MCP tools:
 | `get_gitops_status` | GitOps config, last commit SHA, build status | `namespace`, `name` |
 | `get_metrics` | Pod CPU and memory usage from metrics-server | `namespace`, `label_selector` (optional) |
 
+### Catalog & Management
+
+| Tool | Description | Parameters |
+|------|-------------|------------|
+| `create_application` | Create a new deckwatch application with optional seed deployment | `namespace`, `name`, `description` (optional), `template_id` (optional), `create_deployment` (optional, default true) |
+| `list_addons` | List available sidecar addons (Redis, PostgreSQL, Memcached, etc.) with default config | — |
+| `list_templates` | List deployment templates (web-app, worker, cron-job, static-site, custom) with payloads | — |
+| `configure_gitops` | Enable GitOps for a deployment — polls a git repo, builds images with Kaniko, auto-deploys | `namespace`, `deployment_name`, `repo_url`, `oci_repository`, `branch` (optional), `dockerfile_path` (optional), `docker_context` (optional), `token_secret` (optional), `poll_interval_seconds` (optional) |
+
 ## Example Workflows
 
 ### Diagnosing a crashing deployment
@@ -151,6 +160,39 @@ Claude Code will:
 1. Call `get_metrics` to fetch CPU/memory usage
 2. Call `list_deployments` to get the configured limits
 3. Compare usage against limits and flag any at-risk pods
+
+### Creating an application from Claude Code
+
+```
+> create a new web app called "api-gateway" in the staging namespace
+```
+
+Claude Code will:
+1. Call `list_templates` to see available templates
+2. Call `create_application` with the chosen template
+3. Confirm the application was created with its seed deployment
+
+### Discovering available addons
+
+```
+> what database sidecars can I attach to my deployment?
+```
+
+Claude Code will:
+1. Call `list_addons` to list the addon catalog
+2. Show you available options (Redis, PostgreSQL, Memcached, etc.)
+3. Explain what each addon provides and its default configuration
+
+### Setting up GitOps for a deployment
+
+```
+> enable gitops for my-api in staging, watch https://github.com/org/my-api on the main branch, push images to ghcr.io/org/my-api
+```
+
+Claude Code will:
+1. Call `configure_gitops` with the repo URL, branch, and OCI repository
+2. Confirm the GitOps pipeline is configured
+3. Deckwatch will begin polling for new commits and building images automatically
 
 ## Configuration
 

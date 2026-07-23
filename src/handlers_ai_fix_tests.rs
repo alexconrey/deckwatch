@@ -182,43 +182,7 @@ fn truncate_tail_exact_boundary() {
     assert_eq!(truncate_tail(logs, logs.len()), logs);
 }
 
-// ---- ApplicationData round-trip ----
-
-#[test]
-fn application_data_deserializes_full() {
-    let json = serde_json::json!({
-        "name": "my-app",
-        "description": "A test application",
-        "git": {
-            "repo_url": "https://github.com/example/repo",
-            "branch": "develop",
-            "token_secret": "my-git-secret"
-        }
-    });
-    let data: ApplicationData = serde_json::from_value(json).unwrap();
-    assert_eq!(data.name, "my-app");
-    assert_eq!(data.description, "A test application");
-    let git = data.git.unwrap();
-    assert_eq!(git.repo_url, "https://github.com/example/repo");
-    assert_eq!(git.branch.as_deref(), Some("develop"));
-}
-
-#[test]
-fn application_data_deserializes_minimal() {
-    let json = serde_json::json!({ "name": "bare-app" });
-    let data: ApplicationData = serde_json::from_value(json).unwrap();
-    assert_eq!(data.name, "bare-app");
-    assert!(data.description.is_empty());
-    assert!(data.git.is_none());
-}
-
-// ---- cm_name / member_selector helpers ----
-
-#[test]
-fn cm_name_formats_correctly() {
-    assert_eq!(cm_name("web"), "deckwatch-app-web");
-    assert_eq!(cm_name("billing-api"), "deckwatch-app-billing-api");
-}
+// ---- member_selector helper ----
 
 #[test]
 fn member_selector_formats_correctly() {

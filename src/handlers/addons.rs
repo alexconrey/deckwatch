@@ -4,9 +4,13 @@ use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::Json;
 use k8s_openapi::api::apps::v1::Deployment;
-use k8s_openapi::api::core::v1::{Container, ContainerPort, EnvVar, ResourceRequirements};
+use k8s_openapi::api::core::v1::{
+    Container, ContainerPort, EnvVar, PersistentVolumeClaim, PersistentVolumeClaimSpec,
+    PersistentVolumeClaimVolumeSource, ResourceRequirements, Volume, VolumeMount,
+};
 use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
-use kube::api::{ListParams, PostParams};
+use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
+use kube::api::{DeleteParams, ListParams, PostParams};
 use serde::{Deserialize, Serialize};
 
 use crate::error::AppError;
@@ -63,6 +67,8 @@ pub struct AttachAddonRequest {
     pub resource_limits: Option<ResourceSpec>,
     #[serde(default)]
     pub resource_requests: Option<ResourceSpec>,
+    #[serde(default)]
+    pub storage: Option<String>,
 }
 
 // PATCH body for editing an already-attached addon. All fields are optional;
@@ -173,6 +179,39 @@ fn catalog() -> Vec<AddonDefinition> {
             default_resources: Some(ResourceSpecOutput {
                 cpu: Some("100m".to_string()),
                 memory: Some("128Mi".to_string()),
+            }),
+        },
+        AddonDefinition {
+            id: "postgres".to_string(),
+            name: "PostgreSQL".to_string(),
+            description: "PostgreSQL database sidecar with persistent storage.".to_string(),
+            image: "postgres:16-alpine".to_string(),
+            default_port: Some(5432),
+            default_env: vec![
+                EnvVarOutput {
+                    name: "PG_HOST".to_string(),
+                    value: "localhost".to_string(),
+                },
+                EnvVarOutput {
+                    name: "PGDATA".to_string(),
+                    value: "/var/lib/postgresql/data/pgdata".to_string(),
+                },
+                EnvVarOutput {
+                    name: "POSTGRES_DB".to_string(),
+                    value: "app".to_string(),
+                },
+                EnvVarOutput {
+                    name: "POSTGRES_USER".to_string(),
+                    value: "app".to_string(),
+                },
+                EnvVarOutput {
+                    name: "POSTGRES_PASSWORD".to_string(),
+                    value: "changeme".to_string(),
+                },
+            ],
+            default_resources: Some(ResourceSpecOutput {
+                cpu: Some("200m".to_string()),
+                memory: Some("256Mi".to_string()),
             }),
         },
     ]
@@ -312,14 +351,73 @@ pub async fn attach(
         def.default_resources.as_ref(),
     );
 
+    let volume_mounts = if addon_id == "postgres" {
+        let volume_name = format!("{container_name}-data");
+        Some(vec![VolumeMount {
+            name: volume_name.clone(),
+            mount_path: "/var/lib/postgresql/data".to_string(),
+            ..Default::default()
+        }])
+    } else {
+        None
+    };
+
     pod_spec.containers.push(Container {
         name: container_name.clone(),
         image: Some(def.image.clone()),
         ports,
         env: if env.is_empty() { None } else { Some(env) },
         resources,
+        volume_mounts,
         ..Default::default()
     });
+
+    if addon_id == "postgres" {
+        let volume_name = format!("{container_name}-data");
+        let pvc_name = format!("{name}-{container_name}-data");
+        let storage_size = overrides
+            .storage
+            .as_deref()
+            .unwrap_or("1Gi")
+            .to_string();
+
+        let pvc = PersistentVolumeClaim {
+            metadata: ObjectMeta {
+                name: Some(pvc_name.clone()),
+                namespace: Some(ns.clone()),
+                ..Default::default()
+            },
+            spec: Some(PersistentVolumeClaimSpec {
+                access_modes: Some(vec!["ReadWriteOnce".to_string()]),
+                resources: Some(k8s_openapi::api::core::v1::VolumeResourceRequirements {
+                    requests: Some({
+                        let mut m = BTreeMap::new();
+                        m.insert("storage".to_string(), Quantity(storage_size));
+                        m
+                    }),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let pvc_api = state.pvcs_api(&ns)?;
+        let t = K8sTimer::new("persistentvolumeclaims", "create");
+        let created = pvc_api.create(&PostParams::default(), &pvc).await;
+        t.finish(created.is_ok());
+        created?;
+
+        let volumes = pod_spec.volumes.get_or_insert_with(Vec::new);
+        volumes.push(Volume {
+            name: volume_name,
+            persistent_volume_claim: Some(PersistentVolumeClaimVolumeSource {
+                claim_name: pvc_name,
+                read_only: Some(false),
+            }),
+            ..Default::default()
+        });
+    }
 
     // Inject the addon's default env vars into the primary (first) container
     // so the app can discover the sidecar (e.g. REDIS_URL=redis://localhost:6379).
@@ -582,6 +680,22 @@ pub async fn detach(
     pod_spec.containers.retain(|c| c.name != container_name);
     remove_injected_env_from_primary(pod_spec, &injected_env_names);
 
+    let pvc_volume_name = format!("{container_name}-data");
+    let pvc_name = if let Some(volumes) = pod_spec.volumes.as_mut() {
+        let pvc_claim = volumes
+            .iter()
+            .find(|v| v.name == pvc_volume_name)
+            .and_then(|v| v.persistent_volume_claim.as_ref())
+            .map(|pvc| pvc.claim_name.clone());
+        volumes.retain(|v| v.name != pvc_volume_name);
+        if volumes.is_empty() {
+            pod_spec.volumes = None;
+        }
+        pvc_claim
+    } else {
+        None
+    };
+
     // Mirror the removal at the deployment metadata level so DeploymentDetail
     // no longer reports the addon as attached.
     if let Some(dep_annotations) = dep.metadata.annotations.as_mut() {
@@ -595,6 +709,15 @@ pub async fn detach(
     let updated = api.replace(&name, &PostParams::default(), &dep).await;
     t.finish(updated.is_ok());
     let updated = updated?;
+
+    if let Some(pvc_name) = pvc_name {
+        let pvc_api = state.pvcs_api(&ns)?;
+        let t = K8sTimer::new("persistentvolumeclaims", "delete");
+        let deleted = pvc_api.delete(&pvc_name, &DeleteParams::default()).await;
+        t.finish(deleted.is_ok());
+        deleted?;
+    }
+
     let detail = deployment_detail(&updated);
     let pods = list_pods_for_deployment(&state, &ns, &updated).await?;
     let ingresses = list_ingresses_for_service(&state, &ns, &name).await?;

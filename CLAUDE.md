@@ -9,7 +9,7 @@ health probe configuration, GitOps pipelines, an embedded OCI container
 registry, AI diagnostics, and an MCP server for Claude Code integration.
 
 **Repository:** https://github.com/alexconrey/deckwatch
-**Current version:** v0.1.0
+**Current version:** v0.3.0
 
 ## Architecture
 
@@ -56,7 +56,7 @@ src/                              # Rust backend
     ingresses.rs                  # CRUD + auto-service + IngressClass discovery
     gitops.rs                     # GitOps config CRUD (DB-backed)
     logs.rs                       # Log streaming (SSE) + bulk history
-    mcp.rs                        # MCP server (JSON-RPC 2.0, 10 tools)
+    mcp.rs                        # MCP server (JSON-RPC 2.0, 14 tools)
     monitoring.rs                 # PodMonitor CRD management
     diagnostics.rs                # AI diagnostic job creation
     ai_fix.rs                     # AI fix job creation
@@ -106,6 +106,30 @@ docs/internal/                    # Local-only docs (gitignored)
 
 ## Development Workflow
 
+### Create the k3d cluster (one-time)
+
+```bash
+k3d cluster create deckwatch --port 8080:80@loadbalancer
+```
+
+After creation, configure the node to allow insecure pulls from the
+internal registry via NodePort:
+
+```bash
+# Tell k3s containerd that localhost:30500 is an HTTP registry
+docker exec k3d-deckwatch-server-0 sh -c 'cat > /etc/rancher/k3s/registries.yaml << EOF
+mirrors:
+  "localhost:30500":
+    endpoint:
+      - "http://localhost:30500"
+EOF'
+
+# Restart k3s to pick up the config
+docker exec k3d-deckwatch-server-0 sh -c 'kill 1'
+# Wait ~15s, then restart the LB
+docker restart k3d-deckwatch-serverlb
+```
+
 ### Build & Deploy to k3d
 
 ```bash
@@ -116,13 +140,31 @@ helm upgrade --install deckwatch helm/deckwatch \
   --set image.repository=deckwatch --set image.tag=dev \
   --set image.pullPolicy=Never \
   --set registry.enabled=true \
+  --set registry.publicUrl=localhost:30500 \
+  --set registry.service.type=NodePort \
+  --set registry.service.nodePort=30500 \
+  --set registry.internalUrl=deckwatch-registry.deckwatch.svc.cluster.local:5000 \
   --set ingress.enabled=true \
   --set 'ingress.hosts[0].host=' \
   --set 'ingress.hosts[0].paths[0].path=/' \
   --set 'ingress.hosts[0].paths[0].pathType=Prefix'
-kubectl -n deckwatch rollout restart deploy/deckwatch
 kubectl -n deckwatch port-forward svc/deckwatch 8080:80
 ```
+
+#### Registry architecture (local dev)
+
+The embedded OCI registry runs inside the deckwatch pod. Two network
+paths reach the same data:
+
+| Consumer | Address | How it resolves |
+|----------|---------|-----------------|
+| Kaniko (pod) push | `deckwatch-registry.deckwatch.svc.cluster.local:5000` | ClusterIP via CoreDNS |
+| Kubelet pull | `localhost:30500` | NodePort via kube-proxy iptables |
+
+`DECKWATCH_REGISTRY_INTERNAL_URL` is the Kaniko push address.
+`DECKWATCH_REGISTRY_PUBLIC_URL` is the kubelet pull address (used in
+deployment image references). On production (EKS) the kubelet can
+resolve `.svc.cluster.local` natively, so no split is needed.
 
 ### Frontend dev (standalone)
 
@@ -194,6 +236,8 @@ GHCR on tag push.
 ### k3d (local dev)
 - Cluster name: `deckwatch`
 - Port 8080 mapped to loadbalancer
+- Registry: NodePort 30500 → ClusterIP 5000 (see "Registry architecture" above)
+- `registries.yaml` on node maps `localhost:30500` → `http://localhost:30500` (insecure)
 - MinIO deployed in `minio` namespace for S3 registry testing
 - MCP server registered: `claude mcp add --transport http deckwatch-localhost http://localhost:8080/mcp`
 
@@ -202,9 +246,25 @@ GHCR on tag push.
 Deckwatch exposes an MCP endpoint at `POST /mcp` (JSON-RPC 2.0, MCP 2025-11-25 spec).
 Claude Code connects via `claude mcp add --transport http <name> <url>/mcp`.
 
-10 tools: get_namespaces, list_deployments, get_deployment, get_pod_logs,
+14 tools: get_namespaces, list_deployments, get_deployment, get_pod_logs,
 get_events, get_deployment_history, get_gitops_status, get_build_logs,
-list_ingresses, get_metrics.
+list_ingresses, get_metrics, create_application, list_addons, list_templates,
+configure_gitops.
+
+## Addons
+
+Addons are sidecar containers attached to deployments via the `/api/addons`
+catalog. The addon system injects the sidecar container and its default env
+vars into the primary container automatically.
+
+Available addons: `redis`, `memcached`, `nginx-proxy`, `fluent-bit`,
+`otel-collector`, `postgres`.
+
+The **postgres** addon is unique — it provisions a PersistentVolumeClaim
+(`{deployment}-{container}-data`) alongside the sidecar for durable storage.
+Detaching the addon cleans up both the volume and the PVC. The `storage` field
+on `AttachAddonRequest` controls PVC size (default `1Gi`). Injected env vars:
+`PG_HOST=localhost`, `PGDATA`, `POSTGRES_DB`, `POSTGRES_USER`, `POSTGRES_PASSWORD`.
 
 ## Feature Flags
 

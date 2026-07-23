@@ -96,11 +96,22 @@ async fn main() {
         } else {
             Some(config.registry_public_url.clone())
         },
+        registry_internal_url: if config.registry_internal_url.is_empty() {
+            if config.registry_public_url.is_empty() {
+                None
+            } else {
+                Some(config.registry_public_url.clone())
+            }
+        } else {
+            Some(config.registry_internal_url.clone())
+        },
         registry_enabled: config.registry_enabled,
         ai_rate_limiter,
         db,
         encryption_key: config.encryption_key.clone(),
     };
+
+    migrate_configmap_apps_to_db(&state).await;
 
     let watcher_state = state.clone();
     tokio::spawn(async move {
@@ -227,6 +238,138 @@ async fn load_auth_config(state: &AppState) -> auth::AuthConfig {
         return auth::AuthConfig::disabled();
     };
     auth::AuthConfig::from_settings(parsed.auth.as_ref())
+}
+
+/// One-time startup migration: import application records from legacy
+/// ConfigMaps into the database, then delete the ConfigMaps. Runs on
+/// every boot but is a no-op once all ConfigMaps have been migrated.
+async fn migrate_configmap_apps_to_db(state: &AppState) {
+    use k8s_openapi::api::core::v1::ConfigMap;
+    use kube::api::ListParams;
+    use kube::Api;
+    use sea_orm::ActiveValue::Set;
+    use sea_orm::EntityTrait;
+
+    use crate::entities::applications;
+
+    let selector = "app.kubernetes.io/component=application,app.kubernetes.io/managed-by=deckwatch";
+    let cm_api: Api<ConfigMap> = Api::all(state.kube_client.clone());
+    let lp = ListParams::default().labels(selector);
+
+    let cms = match cm_api.list(&lp).await {
+        Ok(list) => list,
+        Err(e) => {
+            tracing::warn!(error = %e, "failed to list legacy application ConfigMaps; skipping migration");
+            return;
+        }
+    };
+
+    if cms.items.is_empty() {
+        return;
+    }
+
+    tracing::info!(
+        count = cms.items.len(),
+        "found legacy application ConfigMaps to migrate"
+    );
+
+    for cm in &cms.items {
+        let cm_name = match cm.metadata.name.as_deref() {
+            Some(n) => n,
+            None => continue,
+        };
+        let cm_ns = match cm.metadata.namespace.as_deref() {
+            Some(n) => n,
+            None => continue,
+        };
+
+        #[derive(serde::Deserialize)]
+        #[allow(dead_code)]
+        struct LegacyAppData {
+            name: String,
+            #[serde(default)]
+            description: String,
+            #[serde(default)]
+            created_at: Option<String>,
+            #[serde(default)]
+            updated_at: Option<String>,
+            #[serde(default)]
+            git: Option<crate::kube_ext::ApplicationGitConfig>,
+        }
+
+        let data_str = match cm.data.as_ref().and_then(|d| d.get("application")) {
+            Some(s) => s,
+            None => {
+                tracing::warn!(cm = cm_name, ns = cm_ns, "ConfigMap missing 'application' key; skipping");
+                continue;
+            }
+        };
+        let data: LegacyAppData = match serde_json::from_str(data_str) {
+            Ok(d) => d,
+            Err(e) => {
+                tracing::warn!(cm = cm_name, ns = cm_ns, error = %e, "failed to parse ConfigMap data; skipping");
+                continue;
+            }
+        };
+
+        let app_id = format!("{cm_ns}/{}", data.name);
+
+        let existing = match applications::Entity::find_by_id(&app_id)
+            .one(&state.db)
+            .await
+        {
+            Ok(Some(_)) => {
+                tracing::info!(app = %app_id, "application already in database; deleting legacy ConfigMap");
+                true
+            }
+            Ok(None) => false,
+            Err(e) => {
+                tracing::warn!(app = %app_id, error = %e, "DB lookup failed; skipping");
+                continue;
+            }
+        };
+
+        if !existing {
+            let now = {
+                use std::time::SystemTime;
+                let d = SystemTime::now()
+                    .duration_since(SystemTime::UNIX_EPOCH)
+                    .expect("system clock before UNIX epoch");
+                sea_orm::prelude::DateTimeUtc::from_timestamp(d.as_secs() as i64, d.subsec_nanos())
+                    .expect("timestamp out of range")
+            };
+
+            let git_config_json = data
+                .git
+                .as_ref()
+                .and_then(|g| serde_json::to_string(g).ok());
+
+            let model = applications::ActiveModel {
+                id: Set(app_id.clone()),
+                name: Set(data.name.clone()),
+                namespace: Set(cm_ns.to_string()),
+                description: Set(data.description),
+                team: Set(String::new()),
+                deployment_name: Set(Some(data.name.clone())),
+                git_config: Set(git_config_json),
+                created_at: Set(now),
+                updated_at: Set(now),
+            };
+
+            if let Err(e) = applications::Entity::insert(model).exec(&state.db).await {
+                tracing::warn!(app = %app_id, error = %e, "failed to insert application into DB; skipping");
+                continue;
+            }
+            tracing::info!(app = %app_id, "migrated application from ConfigMap to database");
+        }
+
+        let ns_api: Api<ConfigMap> = Api::namespaced(state.kube_client.clone(), cm_ns);
+        if let Err(e) = ns_api.delete(cm_name, &Default::default()).await {
+            tracing::warn!(cm = cm_name, ns = cm_ns, error = %e, "failed to delete legacy ConfigMap");
+        } else {
+            tracing::info!(cm = cm_name, ns = cm_ns, "deleted legacy application ConfigMap");
+        }
+    }
 }
 
 #[cfg(test)]

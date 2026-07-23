@@ -118,11 +118,11 @@ async fn read_secret_key(
 ) -> Result<String, AppError> {
     let secrets_api = state.secrets_api(ns)?;
     let secret = secrets_api.get(secret_name).await.map_err(|_| {
-        AppError::BadRequest(format!(
-            "Secret '{secret_name}' not found in namespace '{ns}'. \
-             Create it with: kubectl -n {ns} create secret generic {secret_name} \
-             --from-literal={data_key}=<value>"
-        ))
+        AppError::BadRequest(
+            "AI provider credentials are not configured. \
+             Go to Settings \u{2192} AI Providers to set up your API key."
+                .to_string(),
+        )
     })?;
     let value = secret
         .data

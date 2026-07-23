@@ -102,6 +102,14 @@ pub struct Config {
     #[arg(long, env = "DECKWATCH_REGISTRY_PUBLIC_URL", default_value = "")]
     pub registry_public_url: String,
 
+    /// In-cluster registry URL that Kaniko uses to push built images.
+    /// Defaults to the same value as `registry_public_url`. Set this when
+    /// the kubelet pull URL differs from the in-cluster push URL (e.g.
+    /// k3d NodePort setups where push goes to the ClusterIP Service but
+    /// pull goes through localhost:nodePort).
+    #[arg(long, env = "DECKWATCH_REGISTRY_INTERNAL_URL", default_value = "")]
+    pub registry_internal_url: String,
+
     /// Database URL. Defaults to SQLite file.
     /// Examples:
     ///   sqlite:///data/deckwatch.db?mode=rwc

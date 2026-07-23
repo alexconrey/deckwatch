@@ -226,6 +226,7 @@ export interface GitOpsConfig {
   repo_url: string;
   branch: string;
   token_secret: string;
+  git_auth_user: string;
   dockerfile_path: string;
   docker_context: string;
   ecr_repository: string;
@@ -251,6 +252,7 @@ export interface GitOpsConfigRequest {
   repo_url: string;
   branch?: string;
   token_secret: string;
+  git_auth_user?: string;
   dockerfile_path?: string;
   docker_context?: string;
   ecr_repository?: string;
@@ -376,6 +378,7 @@ export interface AttachAddonRequest {
   env?: { name: string; value: string }[];
   resource_limits?: ResourceSpec;
   resource_requests?: ResourceSpec;
+  storage?: string;
 }
 
 // --- AI Diagnostics types ---

@@ -83,6 +83,10 @@ spec:
             {{- end }}
             - name: DECKWATCH_REGISTRY_PUBLIC_URL
               value: {{ include "deckwatch.registryPublicUrl" . | quote }}
+            {{- if .Values.registry.internalUrl }}
+            - name: DECKWATCH_REGISTRY_INTERNAL_URL
+              value: {{ .Values.registry.internalUrl | quote }}
+            {{- end }}
             {{- end }}
           {{- if and .Values.registry.enabled (eq (default "filesystem" .Values.registry.storage) "s3") .Values.registry.s3.credentialsSecret }}
           envFrom:

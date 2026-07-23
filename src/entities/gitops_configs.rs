@@ -9,6 +9,7 @@ pub struct Model {
     pub repo_url: String,
     pub branch: String,
     pub token_secret: String,
+    pub git_auth_user: String,
     pub dockerfile_path: String,
     pub docker_context: String,
     pub oci_repository: String,

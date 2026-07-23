@@ -1,5 +1,3 @@
-// Unit tests for request/response types and helpers in src/handlers/applications.rs
-
 use super::*;
 
 // ---- ApplicationRequest deserialization ----
@@ -62,8 +60,6 @@ fn application_update_request_with_description_only() {
 fn application_update_request_with_git_null_clears_git() {
     let json = r#"{"git": null}"#;
     let req: ApplicationUpdateRequest = serde_json::from_str(json).unwrap();
-    // When `git` is explicitly sent as null, the outer Option is Some(None),
-    // signalling "clear the git config".
     let outer = req.git.expect("outer Option should be Some");
     assert!(outer.is_none(), "inner Option should be None (clear)");
 }
@@ -127,107 +123,11 @@ fn application_list_response_serializes() {
     assert_eq!(json["applications"].as_array().unwrap().len(), 0);
 }
 
-// ---- ApplicationData serde roundtrip ----
-
-#[test]
-fn application_data_roundtrip() {
-    let data = ApplicationData {
-        name: "test-app".to_string(),
-        description: "A test application".to_string(),
-        created_at: Some("2025-01-01T00:00:00Z".to_string()),
-        updated_at: None,
-        git: None,
-    };
-    let serialized = serde_json::to_string(&data).unwrap();
-    let deserialized: ApplicationData = serde_json::from_str(&serialized).unwrap();
-    assert_eq!(deserialized.name, "test-app");
-    assert_eq!(deserialized.description, "A test application");
-    assert_eq!(
-        deserialized.created_at.as_deref(),
-        Some("2025-01-01T00:00:00Z")
-    );
-    assert!(deserialized.updated_at.is_none());
-    assert!(deserialized.git.is_none());
-}
-
-#[test]
-fn application_data_skips_none_fields() {
-    let data = ApplicationData {
-        name: "minimal".to_string(),
-        description: String::new(),
-        created_at: None,
-        updated_at: None,
-        git: None,
-    };
-    let json = serde_json::to_value(&data).unwrap();
-    assert!(!json.as_object().unwrap().contains_key("created_at"));
-    assert!(!json.as_object().unwrap().contains_key("updated_at"));
-    assert!(!json.as_object().unwrap().contains_key("git"));
-}
-
 // ---- Helper functions ----
-
-#[test]
-fn cm_name_formats_correctly() {
-    assert_eq!(cm_name("my-app"), "deckwatch-app-my-app");
-    assert_eq!(cm_name("a"), "deckwatch-app-a");
-}
-
-#[test]
-fn app_labels_includes_all_required_labels() {
-    let labels = app_labels("test-app");
-    assert_eq!(labels.get(MANAGED_BY_LABEL).unwrap(), MANAGED_BY);
-    assert_eq!(labels.get(COMPONENT_LABEL).unwrap(), APP_COMPONENT);
-    assert_eq!(labels.get(APP_LABEL).unwrap(), "test-app");
-    assert_eq!(labels.len(), 3);
-}
 
 #[test]
 fn member_selector_formats_correctly() {
     assert_eq!(member_selector("my-app"), "deckwatch.io/application=my-app");
-}
-
-#[test]
-fn parse_app_data_returns_none_for_missing_data() {
-    let cm = ConfigMap::default();
-    assert!(parse_app_data(&cm).is_none());
-}
-
-#[test]
-fn parse_app_data_returns_none_for_invalid_json() {
-    let mut data = BTreeMap::new();
-    data.insert(APP_DATA_KEY.to_string(), "not valid json {".to_string());
-    let cm = ConfigMap {
-        data: Some(data),
-        ..Default::default()
-    };
-    assert!(parse_app_data(&cm).is_none());
-}
-
-#[test]
-fn parse_app_data_extracts_valid_data() {
-    let app_data = ApplicationData {
-        name: "parsed-app".to_string(),
-        description: "desc".to_string(),
-        created_at: Some("2025-06-01T12:00:00Z".to_string()),
-        updated_at: None,
-        git: Some(ApplicationGitConfig {
-            repo_url: "https://github.com/org/repo".to_string(),
-            branch: Some("main".to_string()),
-            token_secret: None,
-        }),
-    };
-    let serialized = serde_json::to_string(&app_data).unwrap();
-    let mut data = BTreeMap::new();
-    data.insert(APP_DATA_KEY.to_string(), serialized);
-    let cm = ConfigMap {
-        data: Some(data),
-        ..Default::default()
-    };
-    let parsed = parse_app_data(&cm).expect("should parse successfully");
-    assert_eq!(parsed.name, "parsed-app");
-    assert_eq!(parsed.description, "desc");
-    assert!(parsed.git.is_some());
 }
 
 // ---- seed_template ----

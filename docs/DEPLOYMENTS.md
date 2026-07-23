@@ -309,6 +309,36 @@ For advanced users, you can view the full Kubernetes YAML spec:
 
 This is read-only. To edit via YAML, use the YAML tab in the Edit dialog.
 
+## Addons (Sidecar Containers)
+
+Addons attach pre-configured sidecar containers to your deployment. On the
+deployment detail page, the **Addons** card shows attached addons and lets you
+browse the catalog.
+
+Available addons:
+
+| Addon | Image | Injected Env Vars |
+|-------|-------|-------------------|
+| Redis | `redis:7-alpine` | `REDIS_URL=redis://localhost:6379` |
+| Memcached | `memcached:1.6-alpine` | `MEMCACHED_URL=memcached://localhost:11211` |
+| Nginx Proxy | `nginx:1.27-alpine` | `PROXY_URL=http://localhost:8080` |
+| Fluent Bit | `fluent/fluent-bit:3.1` | — |
+| OpenTelemetry | `otel/opentelemetry-collector:latest` | `OTEL_EXPORTER_OTLP_ENDPOINT`, `OTEL_SERVICE_NAME` |
+| **PostgreSQL** | `postgres:16-alpine` | `PG_HOST=localhost`, `POSTGRES_DB=app`, `POSTGRES_USER=app`, `POSTGRES_PASSWORD=changeme` |
+
+The **PostgreSQL** addon is unique: it creates a PersistentVolumeClaim for
+durable storage (default 1Gi). Your data survives pod restarts. When you
+detach the addon, the PVC is automatically cleaned up.
+
+To attach an addon:
+1. Open the deployment detail page.
+2. In the **Addons** card, click **Browse Catalog**.
+3. Click **Attach** on the desired addon.
+4. (Optional) Override the default port, env vars, or resource limits.
+
+Addon env vars are automatically injected into your primary container so your
+application code can discover the sidecar without additional configuration.
+
 ## Cloning and Promoting
 
 You can clone a deployment to another namespace using the promote/clone

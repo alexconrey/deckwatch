@@ -5,15 +5,18 @@ use axum::http::StatusCode;
 use axum::Json;
 use k8s_openapi::api::apps::v1::{Deployment, DeploymentSpec};
 use k8s_openapi::api::core::v1::{
-    ConfigMap, Container, ContainerPort, EnvVar, HTTPGetAction, PodSpec, PodTemplateSpec, Probe,
+    Container, ContainerPort, EnvVar, HTTPGetAction, PodSpec, PodTemplateSpec, Probe,
     ResourceRequirements,
 };
 use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::{LabelSelector, ObjectMeta};
 use k8s_openapi::apimachinery::pkg::util::intstr::IntOrString;
 use kube::api::{ListParams, Patch, PatchParams, PostParams};
+use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter};
+use sea_orm::ActiveValue::Set;
 use serde::{Deserialize, Serialize};
 
+use crate::entities::applications;
 use crate::error::AppError;
 use crate::kube_ext::{
     compute_application_health, cronjob_summary, deployment_summary, ApplicationDetail,
@@ -23,14 +26,9 @@ use crate::metrics::K8sTimer;
 use crate::state::AppState;
 use crate::watcher::ann;
 
-const APP_DATA_KEY: &str = "application";
 const APP_LABEL: &str = "deckwatch.io/application";
-const COMPONENT_LABEL: &str = "app.kubernetes.io/component";
 const MANAGED_BY_LABEL: &str = "app.kubernetes.io/managed-by";
-const APP_COMPONENT: &str = "application";
 const MANAGED_BY: &str = "deckwatch";
-const APP_SELECTOR: &str =
-    "app.kubernetes.io/component=application,app.kubernetes.io/managed-by=deckwatch";
 
 /// Sentinel image used when we seed a Deployment for a GitOps-backed app
 /// before the first kaniko build has completed. It intentionally does not
@@ -40,41 +38,17 @@ const APP_SELECTOR: &str =
 /// `<oci-repo>:<sha>` tag.
 pub const GITOPS_PLACEHOLDER_IMAGE: &str = "deckwatch-placeholder:awaiting-build";
 
-/// JSON persisted inside the ConfigMap under `data.application`.
-#[derive(Serialize, Deserialize, Clone)]
-struct ApplicationData {
-    name: String,
-    #[serde(default)]
-    description: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    created_at: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    updated_at: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    git: Option<ApplicationGitConfig>,
-}
-
-fn cm_name(app: &str) -> String {
-    format!("deckwatch-app-{app}")
-}
-
-fn app_labels(app_name: &str) -> BTreeMap<String, String> {
-    let mut labels = BTreeMap::new();
-    labels.insert(MANAGED_BY_LABEL.to_string(), MANAGED_BY.to_string());
-    labels.insert(COMPONENT_LABEL.to_string(), APP_COMPONENT.to_string());
-    labels.insert(APP_LABEL.to_string(), app_name.to_string());
-    labels
-}
-
-fn parse_app_data(cm: &ConfigMap) -> Option<ApplicationData> {
-    cm.data
-        .as_ref()
-        .and_then(|d| d.get(APP_DATA_KEY))
-        .and_then(|s| serde_json::from_str::<ApplicationData>(s).ok())
-}
-
 fn member_selector(app_name: &str) -> String {
     format!("{APP_LABEL}={app_name}")
+}
+
+fn now_utc() -> sea_orm::prelude::DateTimeUtc {
+    use std::time::SystemTime;
+    let d = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .expect("system clock before UNIX epoch");
+    sea_orm::prelude::DateTimeUtc::from_timestamp(d.as_secs() as i64, d.subsec_nanos())
+        .expect("timestamp out of range")
 }
 
 // ============================================================
@@ -135,24 +109,18 @@ pub async fn list(
     State(state): State<AppState>,
     Path(ns): Path<String>,
 ) -> Result<Json<ApplicationListResponse>, AppError> {
-    let cm_api = state.configmaps_api(&ns)?;
+    let rows = applications::Entity::find()
+        .filter(applications::Column::Namespace.eq(&ns))
+        .all(&state.db)
+        .await
+        .map_err(|e| AppError::BadRequest(format!("database error: {e}")))?;
+
     let dep_api = state.deployments_api(&ns)?;
     let cj_api = state.cronjobs_api(&ns)?;
 
-    let lp = ListParams::default().labels(APP_SELECTOR);
-    let t = K8sTimer::new("configmaps", "list");
-    let cms = cm_api.list(&lp).await;
-    t.finish(cms.is_ok());
-    let cms = cms?;
-
-    let mut applications = Vec::with_capacity(cms.items.len());
-    for cm in cms.iter() {
-        let data = match parse_app_data(cm) {
-            Some(d) => d,
-            None => continue,
-        };
-
-        let member_lp = ListParams::default().labels(&member_selector(&data.name));
+    let mut applications = Vec::with_capacity(rows.len());
+    for row in &rows {
+        let member_lp = ListParams::default().labels(&member_selector(&row.name));
         let t = K8sTimer::new("deployments", "list");
         let deps = dep_api.list(&member_lp).await;
         t.finish(deps.is_ok());
@@ -163,7 +131,11 @@ pub async fn list(
         let cjs = cjs?;
 
         let dep_summaries: Vec<DeploymentSummary> = deps.iter().map(deployment_summary).collect();
-        let gitops_enabled = data.git.is_some()
+        let git_config: Option<ApplicationGitConfig> = row
+            .git_config
+            .as_deref()
+            .and_then(|s| serde_json::from_str(s).ok());
+        let gitops_enabled = git_config.is_some()
             || deps.iter().any(|d| {
                 d.metadata
                     .annotations
@@ -175,15 +147,10 @@ pub async fn list(
         let health = compute_application_health(&dep_summaries);
 
         applications.push(ApplicationSummary {
-            name: data.name,
+            name: row.name.clone(),
             namespace: ns.clone(),
-            description: data.description,
-            created_at: data.created_at.or_else(|| {
-                cm.metadata
-                    .creation_timestamp
-                    .as_ref()
-                    .map(|t| t.0.to_string())
-            }),
+            description: row.description.clone(),
+            created_at: Some(row.created_at.to_string()),
             deployment_count: deps.items.len(),
             cronjob_count: cjs.items.len(),
             health,
@@ -198,14 +165,12 @@ pub async fn get(
     State(state): State<AppState>,
     Path((ns, name)): Path<(String, String)>,
 ) -> Result<Json<ApplicationDetail>, AppError> {
-    let cm_api = state.configmaps_api(&ns)?;
-    let t = K8sTimer::new("configmaps", "get");
-    let cm = cm_api.get(&cm_name(&name)).await;
-    t.finish(cm.is_ok());
-    let cm = cm?;
-    let data = parse_app_data(&cm).ok_or_else(|| {
-        AppError::BadRequest(format!("configmap for application '{name}' is malformed"))
-    })?;
+    let app_id = format!("{ns}/{name}");
+    let row = applications::Entity::find_by_id(&app_id)
+        .one(&state.db)
+        .await
+        .map_err(|e| AppError::BadRequest(format!("database error: {e}")))?
+        .ok_or_else(|| AppError::NotFound(format!("application '{name}' not found")))?;
 
     let dep_api = state.deployments_api(&ns)?;
     let cj_api = state.cronjobs_api(&ns)?;
@@ -223,20 +188,18 @@ pub async fn get(
     let cronjobs: Vec<CronJobSummary> = cjs.iter().map(cronjob_summary).collect();
     let health = compute_application_health(&deployments);
 
-    let created_at = data.created_at.clone().or_else(|| {
-        cm.metadata
-            .creation_timestamp
-            .as_ref()
-            .map(|t| t.0.to_string())
-    });
+    let git: Option<ApplicationGitConfig> = row
+        .git_config
+        .as_deref()
+        .and_then(|s| serde_json::from_str(s).ok());
 
     Ok(Json(ApplicationDetail {
-        name: data.name,
+        name: row.name,
         namespace: ns,
-        description: data.description,
-        created_at,
-        updated_at: data.updated_at,
-        git: data.git,
+        description: row.description,
+        created_at: Some(row.created_at.to_string()),
+        updated_at: Some(row.updated_at.to_string()),
+        git,
         deployments,
         cronjobs,
         health,
@@ -251,7 +214,6 @@ pub async fn create(
     if req.name.is_empty() {
         return Err(AppError::BadRequest("name is required".to_string()));
     }
-    // Names propagate into resource labels and a ConfigMap name; validate up front.
     if !req
         .name
         .chars()
@@ -263,59 +225,51 @@ pub async fn create(
         ));
     }
 
-    let cm_api = state.configmaps_api(&ns)?;
-    let t = K8sTimer::new("configmaps", "get");
-    let existing = cm_api.get_opt(&cm_name(&req.name)).await;
-    t.finish(existing.is_ok());
-    if existing?.is_some() {
+    let app_id = format!("{ns}/{}", req.name);
+    let existing = applications::Entity::find_by_id(&app_id)
+        .one(&state.db)
+        .await
+        .map_err(|e| AppError::BadRequest(format!("database error: {e}")))?;
+    if existing.is_some() {
         return Err(AppError::BadRequest(format!(
             "application '{}' already exists",
             req.name
         )));
     }
 
-    let now = jiff::Timestamp::now().to_string();
-    let data = ApplicationData {
-        name: req.name.clone(),
-        description: req.description.unwrap_or_default(),
-        created_at: Some(now.clone()),
-        updated_at: Some(now.clone()),
-        git: req.git.clone(),
+    let now = now_utc();
+    let git_config_json = req
+        .git
+        .as_ref()
+        .map(serde_json::to_string)
+        .transpose()
+        .map_err(|e| AppError::BadRequest(format!("failed to serialize git config: {e}")))?;
+
+    let model = applications::ActiveModel {
+        id: Set(app_id),
+        name: Set(req.name.clone()),
+        namespace: Set(ns.clone()),
+        description: Set(req.description.clone().unwrap_or_default()),
+        team: Set(String::new()),
+        deployment_name: Set(Some(req.name.clone())),
+        git_config: Set(git_config_json),
+        created_at: Set(now),
+        updated_at: Set(now),
     };
-    let serialized = serde_json::to_string(&data)
-        .map_err(|e| AppError::BadRequest(format!("failed to serialize application: {e}")))?;
+    applications::Entity::insert(model)
+        .exec(&state.db)
+        .await
+        .map_err(|e| AppError::BadRequest(format!("database error: {e}")))?;
 
-    let mut cm_data = BTreeMap::new();
-    cm_data.insert(APP_DATA_KEY.to_string(), serialized);
-
-    let cm = ConfigMap {
-        metadata: ObjectMeta {
-            name: Some(cm_name(&req.name)),
-            namespace: Some(ns.clone()),
-            labels: Some(app_labels(&req.name)),
-            ..Default::default()
-        },
-        data: Some(cm_data),
-        ..Default::default()
-    };
-    let t = K8sTimer::new("configmaps", "create");
-    let create_res = cm_api.create(&PostParams::default(), &cm).await;
-    t.finish(create_res.is_ok());
-    create_res?;
-
-    // Optionally create a starter Deployment. Default template is web-app.
     let should_seed = req.create_deployment.unwrap_or(false) || req.git.is_some();
     if should_seed {
         let template_id = req.template_id.as_deref().unwrap_or("web-app");
         if let Err(e) =
             create_seed_deployment(&state, &ns, &req.name, template_id, req.git.as_ref()).await
         {
-            // Roll back the ConfigMap so we don't leave an orphaned Application record.
-            let t = K8sTimer::new("configmaps", "delete");
-            let del = cm_api
-                .delete(&cm_name(&req.name), &Default::default())
+            let _ = applications::Entity::delete_by_id(format!("{ns}/{}", req.name))
+                .exec(&state.db)
                 .await;
-            t.finish(del.is_ok());
             return Err(e);
         }
     }
@@ -329,39 +283,32 @@ pub async fn update(
     Path((ns, name)): Path<(String, String)>,
     Json(req): Json<ApplicationUpdateRequest>,
 ) -> Result<Json<ApplicationDetail>, AppError> {
-    let cm_api = state.configmaps_api(&ns)?;
-    let t = K8sTimer::new("configmaps", "get");
-    let cm = cm_api.get(&cm_name(&name)).await;
-    t.finish(cm.is_ok());
-    let cm = cm?;
-    let mut data = parse_app_data(&cm).ok_or_else(|| {
-        AppError::BadRequest(format!("configmap for application '{name}' is malformed"))
-    })?;
+    let app_id = format!("{ns}/{name}");
+    let existing = applications::Entity::find_by_id(&app_id)
+        .one(&state.db)
+        .await
+        .map_err(|e| AppError::BadRequest(format!("database error: {e}")))?
+        .ok_or_else(|| AppError::NotFound(format!("application '{name}' not found")))?;
+
+    let mut active: applications::ActiveModel = existing.into();
 
     if let Some(desc) = req.description {
-        data.description = desc;
+        active.description = Set(desc);
     }
     if let Some(git) = req.git {
-        data.git = git;
+        let git_json = git
+            .as_ref()
+            .map(serde_json::to_string)
+            .transpose()
+            .map_err(|e| AppError::BadRequest(format!("failed to serialize git config: {e}")))?;
+        active.git_config = Set(git_json);
     }
-    data.updated_at = Some(jiff::Timestamp::now().to_string());
+    active.updated_at = Set(now_utc());
 
-    let serialized = serde_json::to_string(&data)
-        .map_err(|e| AppError::BadRequest(format!("failed to serialize application: {e}")))?;
-
-    let patch = serde_json::json!({
-        "data": { "application": serialized }
-    });
-    let t = K8sTimer::new("configmaps", "patch");
-    let res = cm_api
-        .patch(
-            &cm_name(&name),
-            &PatchParams::default(),
-            &Patch::Merge(patch),
-        )
-        .await;
-    t.finish(res.is_ok());
-    res?;
+    active
+        .update(&state.db)
+        .await
+        .map_err(|e| AppError::BadRequest(format!("database error: {e}")))?;
 
     get(State(state), Path((ns, name))).await
 }
@@ -371,7 +318,6 @@ pub async fn delete(
     Path((ns, name)): Path<(String, String)>,
     Query(query): Query<DeleteQuery>,
 ) -> Result<StatusCode, AppError> {
-    let cm_api = state.configmaps_api(&ns)?;
     let dep_api = state.deployments_api(&ns)?;
     let cj_api = state.cronjobs_api(&ns)?;
     let selector = member_selector(&name);
@@ -384,8 +330,6 @@ pub async fn delete(
         t.finish(dep_list.is_ok());
         for dep in dep_list?.iter() {
             if let Some(dn) = dep.metadata.name.as_deref() {
-                // Best-effort delete; K8sTimer's Drop guard records the outcome
-                // (ok/err) for any that panic or short-circuit.
                 let t = K8sTimer::new("deployments", "delete");
                 let res = dep_api.delete(dn, &Default::default()).await;
                 t.finish(res.is_ok());
@@ -402,7 +346,6 @@ pub async fn delete(
             }
         }
     } else {
-        // Detach members by removing the application label.
         let null_label: BTreeMap<String, Option<String>> =
             [(APP_LABEL.to_string(), None)].into_iter().collect();
         let patch = serde_json::json!({
@@ -434,10 +377,12 @@ pub async fn delete(
         }
     }
 
-    let t = K8sTimer::new("configmaps", "delete");
-    let res = cm_api.delete(&cm_name(&name), &Default::default()).await;
-    t.finish(res.is_ok());
-    res?;
+    let app_id = format!("{ns}/{name}");
+    applications::Entity::delete_by_id(&app_id)
+        .exec(&state.db)
+        .await
+        .map_err(|e| AppError::BadRequest(format!("database error: {e}")))?;
+
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -446,12 +391,16 @@ pub async fn add_member(
     Path((ns, name)): Path<(String, String)>,
     Json(req): Json<AddMemberRequest>,
 ) -> Result<StatusCode, AppError> {
-    // Sanity check: the application must exist.
-    let cm_api = state.configmaps_api(&ns)?;
-    let t = K8sTimer::new("configmaps", "get");
-    let cm = cm_api.get(&cm_name(&name)).await;
-    t.finish(cm.is_ok());
-    cm?;
+    let app_id = format!("{ns}/{name}");
+    let existing = applications::Entity::find_by_id(&app_id)
+        .one(&state.db)
+        .await
+        .map_err(|e| AppError::BadRequest(format!("database error: {e}")))?;
+    if existing.is_none() {
+        return Err(AppError::NotFound(format!(
+            "application '{name}' not found"
+        )));
+    }
 
     let patch = serde_json::json!({
         "metadata": { "labels": { "deckwatch.io/application": name } }
@@ -491,12 +440,16 @@ pub async fn remove_member(
     State(state): State<AppState>,
     Path((ns, name, kind, resource_name)): Path<(String, String, String, String)>,
 ) -> Result<StatusCode, AppError> {
-    // Ensure the application record exists; also gives us a friendlier 404.
-    let cm_api = state.configmaps_api(&ns)?;
-    let t = K8sTimer::new("configmaps", "get");
-    let cm = cm_api.get(&cm_name(&name)).await;
-    t.finish(cm.is_ok());
-    cm?;
+    let app_id = format!("{ns}/{name}");
+    let existing = applications::Entity::find_by_id(&app_id)
+        .one(&state.db)
+        .await
+        .map_err(|e| AppError::BadRequest(format!("database error: {e}")))?;
+    if existing.is_none() {
+        return Err(AppError::NotFound(format!(
+            "application '{name}' not found"
+        )));
+    }
 
     let null_label: BTreeMap<String, Option<String>> =
         [(APP_LABEL.to_string(), None)].into_iter().collect();
@@ -648,11 +601,6 @@ async fn create_seed_deployment(
         tmpl.memory_limit.clone(),
     );
 
-    // With GitOps enabled, the template image (usually nginx) is misleading —
-    // the deployment is meant to run the user's code once kaniko has built it.
-    // Use an obviously-fake tag so operators immediately see "this is waiting
-    // on a build" rather than a running nginx welcome page. The watcher patches
-    // the real image in after the first successful build.
     let image = if git.is_some() {
         GITOPS_PLACEHOLDER_IMAGE.to_string()
     } else {
@@ -671,7 +619,6 @@ async fn create_seed_deployment(
         ..Default::default()
     };
 
-    // GitOps annotations mirror the keys used by handlers/gitops.rs.
     let mut annotations: BTreeMap<String, String> = BTreeMap::new();
     if let Some(g) = git {
         annotations.insert(ann("git-enabled"), "true".to_string());

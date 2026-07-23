@@ -178,7 +178,7 @@ Build history is persisted in the `builds` table (FK to `applications`), recordi
 Every 10 seconds:
 1. **`poll_cycle`** — list namespaces (either allowed subset or all), list deployments in each, for each with `git-enabled=true` and `last-build-status != building`:
    - Fetch the token from the K8s Secret named in `git-token-secret` (must have key `token`).
-   - HTTP GET `<repo>/info/refs?service=git-upload-pack` with Basic auth (`x-token:<token>`) to read the branch HEAD SHA.
+   - HTTP GET `<repo>/info/refs?service=git-upload-pack` with Basic auth (`<auth_user>:<token>`) to read the branch HEAD SHA. The auth username is auto-detected from the hostname (`oauth2` for GitLab, `x-access-token` for GitHub, `x-token-auth` for Bitbucket) or can be set explicitly via `git_auth_user` in the GitOps config.
    - If SHA matches `last-commit-sha` → nothing to do.
    - Else if include/exclude paths configured AND `last-commit-sha` set → use GitHub's `/compare` API to diff files; skip build if all changed paths are excluded.
    - Else create a Kaniko Job (see below) and patch annotations to `building`.
@@ -191,7 +191,7 @@ Constructed in `trigger_build` (`src/watcher.rs:271-362`):
 - Name: `<deployment>-build-<shortsha>`
 - Labels: `deckwatch.io/build=true`, `deckwatch.io/deployment=<name>` (used by list_builds and monitor)
 - Single container: `gcr.io/kaniko-project/executor:latest`
-- Args: `--dockerfile=<path>`, `--context=git://x-token:<token>@<host>/<repo>#refs/heads/<branch>`, `--destination=<ecr>:<shortsha>`, `--cache=true`
+- Args: `--dockerfile=<path>`, `--context=git://<auth_user>:<token>@<host>/<repo>#refs/heads/<branch>`, `--destination=<oci_repo>:<shortsha>`, `--cache=true`
 - Env: `GIT_TOKEN` from Secret ref (though the token is *already* baked into --context, so this env is somewhat redundant)
 - `ttl_seconds_after_finished=3600`, `backoff_limit=0` (no retry).
 
@@ -274,18 +274,22 @@ The only access control is `--namespaces` (env: `DECKWATCH_NAMESPACES`). If unse
 
 ## Add-on catalog
 
-Addons (`src/handlers/addons.rs:48-75`) are a hardcoded list in Rust:
+Addons (`src/handlers/addons.rs`) are a hardcoded catalog in Rust:
 - redis (redis:7-alpine)
 - memcached (memcached:1.6-alpine)
 - nginx-proxy (nginx:1.27-alpine)
 - fluent-bit (fluent/fluent-bit:3.1)
+- otel-collector (otel/opentelemetry-collector:latest)
+- postgres (postgres:16-alpine) — **persistent storage addon**
 
 Attaching an addon appends a container to the Deployment's PodSpec and annotates the pod template with `deckwatch.addon/<container-name>=<addon-id>` (used by detach to find the container by addon id).
+
+The **postgres** addon additionally provisions a PersistentVolumeClaim (`{deployment}-{container}-data`) and mounts it at `/var/lib/postgresql/data`. The PVC size defaults to `1Gi` and can be customized via the `storage` field on `AttachAddonRequest`. Detaching the addon removes both the volume from the pod spec and deletes the PVC from the cluster. Injected env vars: `PG_HOST=localhost`, `PGDATA=/var/lib/postgresql/data/pgdata`, `POSTGRES_DB=app`, `POSTGRES_USER=app`, `POSTGRES_PASSWORD=changeme`.
 
 ## What is NOT in the codebase (deliberate scope)
 
 - No StatefulSet / DaemonSet management.
-- No PersistentVolumeClaim UI.
+- No standalone PersistentVolumeClaim UI (PVCs are managed automatically by the postgres addon).
 - No Service / ConfigMap / Secret CRUD (Secrets are read-only via the gitops trigger; there's no way to create them in-app — see UX_IMPROVEMENTS.md §C2).
 - No Events feed (see §H6).
 - No RBAC / user auth (see §C1).

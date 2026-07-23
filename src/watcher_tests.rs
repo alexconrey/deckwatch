@@ -75,3 +75,49 @@ fn test_get_oci_repository_none_when_neither_present() {
     let dep = Deployment::default();
     assert_eq!(get_oci_repository(&dep), None);
 }
+
+// ---- resolve_git_auth_user ----
+
+#[test]
+fn git_auth_user_explicit_value_takes_precedence() {
+    assert_eq!(
+        resolve_git_auth_user("my-user", "https://gitlab.example.com/org/repo"),
+        "my-user"
+    );
+}
+
+#[test]
+fn git_auth_user_gitlab_auto_detected() {
+    assert_eq!(
+        resolve_git_auth_user("", "https://gitlab.com/org/repo.git"),
+        "oauth2"
+    );
+    assert_eq!(
+        resolve_git_auth_user("", "https://gitlab.gravitas.sh/kore/examples/nginx.git"),
+        "oauth2"
+    );
+}
+
+#[test]
+fn git_auth_user_github_auto_detected() {
+    assert_eq!(
+        resolve_git_auth_user("", "https://github.com/org/repo.git"),
+        "x-access-token"
+    );
+}
+
+#[test]
+fn git_auth_user_bitbucket_auto_detected() {
+    assert_eq!(
+        resolve_git_auth_user("", "https://bitbucket.org/org/repo.git"),
+        "x-token-auth"
+    );
+}
+
+#[test]
+fn git_auth_user_unknown_host_defaults_to_oauth2() {
+    assert_eq!(
+        resolve_git_auth_user("", "https://gitea.internal.example.com/org/repo"),
+        "oauth2"
+    );
+}
