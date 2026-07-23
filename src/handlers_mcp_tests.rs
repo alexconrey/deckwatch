@@ -298,13 +298,23 @@ async fn test_list_addons_returns_catalog() {
     };
 
     let resp = handle_tool_call(&state, &req).await;
-    assert!(resp.error.is_none(), "list_addons should succeed without a cluster");
+    assert!(
+        resp.error.is_none(),
+        "list_addons should succeed without a cluster"
+    );
     let result = resp.result.expect("should have result");
-    let text = result["content"][0]["text"].as_str().expect("should have text");
+    let text = result["content"][0]["text"]
+        .as_str()
+        .expect("should have text");
     let parsed: serde_json::Value = serde_json::from_str(text).expect("should be valid JSON");
-    let addons = parsed["addons"].as_array().expect("should have addons array");
+    let addons = parsed["addons"]
+        .as_array()
+        .expect("should have addons array");
     let ids: Vec<&str> = addons.iter().filter_map(|a| a["id"].as_str()).collect();
-    assert!(ids.contains(&"postgres"), "catalog should include postgres addon");
+    assert!(
+        ids.contains(&"postgres"),
+        "catalog should include postgres addon"
+    );
     assert!(ids.contains(&"redis"), "catalog should include redis addon");
 }
 

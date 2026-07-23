@@ -588,10 +588,17 @@ pub async fn trigger_build(
     };
 
     let http = reqwest::Client::new();
-    let auth_user = crate::watcher::resolve_git_auth_user(&config_row.git_auth_user, &config_row.repo_url);
-    let remote_sha = check_remote_head(&http, &config_row.repo_url, &config_row.branch, &token, &auth_user)
-        .await
-        .map_err(|e| AppError::BadRequest(format!("failed to check remote: {e}")))?;
+    let auth_user =
+        crate::watcher::resolve_git_auth_user(&config_row.git_auth_user, &config_row.repo_url);
+    let remote_sha = check_remote_head(
+        &http,
+        &config_row.repo_url,
+        &config_row.branch,
+        &token,
+        &auth_user,
+    )
+    .await
+    .map_err(|e| AppError::BadRequest(format!("failed to check remote: {e}")))?;
 
     let short_sha = &remote_sha[..7.min(remote_sha.len())];
     let job_name = crate::watcher::trigger_build_public(&state, &ns, &dep, &remote_sha, &token)
