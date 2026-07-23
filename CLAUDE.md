@@ -9,7 +9,7 @@ health probe configuration, GitOps pipelines, an embedded OCI container
 registry, AI diagnostics, and an MCP server for Claude Code integration.
 
 **Repository:** https://github.com/alexconrey/deckwatch
-**Current version:** v0.3.1
+**Current version:** v0.3.2
 
 ## Architecture
 
