@@ -24,7 +24,7 @@ fn test_initialize_response() {
     assert_eq!(result["protocolVersion"], "2025-11-25");
     assert!(result["capabilities"]["tools"].is_object());
     assert_eq!(result["serverInfo"]["name"], "deckwatch");
-    assert_eq!(result["serverInfo"]["version"], "0.1.0");
+    assert_eq!(result["serverInfo"]["version"], "0.3.2");
 }
 
 #[test]
@@ -43,7 +43,12 @@ fn test_tools_list_returns_all_tools() {
     let tools = result["tools"]
         .as_array()
         .expect("tools should be an array");
-    assert_eq!(tools.len(), 17);
+    // 160+ upstream mcp-k8s tools + 5 deckwatch-specific
+    assert!(
+        tools.len() > 100,
+        "expected 100+ tools (mcp-k8s upstream + deckwatch); got {}",
+        tools.len()
+    );
 }
 
 #[test]
@@ -64,23 +69,23 @@ fn test_tools_list_tool_names() {
     let names: Vec<&str> = tools.iter().filter_map(|t| t["name"].as_str()).collect();
 
     let expected = [
-        "get_namespaces",
-        "list_deployments",
-        "get_deployment",
-        "get_pod_logs",
-        "get_events",
-        "get_deployment_history",
-        "get_gitops_status",
-        "get_build_logs",
-        "list_ingresses",
-        "get_metrics",
+        // Deckwatch-specific
         "create_application",
         "list_addons",
         "list_templates",
         "configure_gitops",
-        "create_ingress",
-        "update_ingress",
-        "create_service",
+        "get_gitops_status",
+        // Upstream mcp-k8s MCP handlers
+        "list_deployments",
+        "get_deployment",
+        "get_pod_logs",
+        "get_events",
+        "list_ingresses",
+        // Upstream mcp-k8s resource modules
+        "list_pods",
+        "list_services",
+        "list_configmaps",
+        "list_secrets",
     ];
 
     for name in &expected {
@@ -249,67 +254,22 @@ async fn test_configure_gitops_missing_oci_repository() {
 }
 
 #[tokio::test]
-async fn test_create_ingress_missing_service_name() {
-    let state = build_test_state().await;
-    let req = JsonRpcRequest {
-        jsonrpc: "2.0".to_string(),
-        id: Some(json!(50)),
-        method: "tools/call".to_string(),
-        params: json!({
-            "name": "create_ingress",
-            "arguments": { "namespace": "default", "name": "my-ingress" }
-        }),
-    };
-
-    let resp = handle_tool_call(&state, &req).await;
-    let err = resp.error.expect("should error without service_name");
-    assert!(
-        err.message.contains("service_name"),
-        "error should mention missing service_name; got: {}",
-        err.message
-    );
-}
-
-#[tokio::test]
-async fn test_create_service_missing_name() {
-    let state = build_test_state().await;
-    let req = JsonRpcRequest {
-        jsonrpc: "2.0".to_string(),
-        id: Some(json!(51)),
-        method: "tools/call".to_string(),
-        params: json!({
-            "name": "create_service",
-            "arguments": { "namespace": "default" }
-        }),
-    };
-
-    let resp = handle_tool_call(&state, &req).await;
-    let err = resp.error.expect("should error without name");
-    assert!(
-        err.message.contains("name"),
-        "error should mention missing name; got: {}",
-        err.message
-    );
-}
-
-#[tokio::test]
-async fn test_tool_call_get_namespaces_shape() {
+async fn test_upstream_tool_dispatch() {
     let state = build_test_state().await;
     let req = JsonRpcRequest {
         jsonrpc: "2.0".to_string(),
         id: Some(json!(12)),
         method: "tools/call".to_string(),
         params: json!({
-            "name": "get_namespaces",
+            "name": "list_namespaces",
             "arguments": {}
         }),
     };
 
     let resp = handle_tool_call(&state, &req).await;
 
-    // get_namespaces talks to the cluster; with our dummy kube client it will
-    // error, but the dispatch itself must still produce a valid JSON-RPC
-    // response (error envelope, not a panic).
+    // Upstream tools talk to the cluster; with our dummy kube client it will
+    // error, but the dispatch itself must produce a valid JSON-RPC response.
     if let Some(result) = &resp.result {
         // If it somehow succeeds (e.g. a real kubeconfig is present), verify shape.
         let content = result["content"]
@@ -566,11 +526,14 @@ fn test_success_response_preserves_null_id() {
 // ---------------------------------------------------------------------------
 
 /// Build an AppState for dispatch-level tests. Constructs a dummy kube client
-/// from an in-memory kubeconfig pointing at an unreachable server. Tool calls
+/// from an in-memory kubeconfig pointing at an unreachable server. Upstream
+/// mcp-k8s pulls in rustls, so we install a crypto provider first. Tool calls
 /// that actually hit the cluster will return connection errors, but dispatch
 /// routing and parameter validation are fully testable without a live cluster.
 async fn build_test_state() -> crate::state::AppState {
     use crate::rate_limit::RateLimiter;
+
+    let _ = rustls::crypto::ring::default_provider().install_default();
 
     // Build a minimal kubeconfig YAML and parse it — avoids constructing
     // non-exhaustive kube config structs field-by-field.

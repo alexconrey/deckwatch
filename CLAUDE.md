@@ -260,10 +260,9 @@ builds the multi-arch image automatically.
 Deckwatch exposes an MCP endpoint at `POST /mcp` (JSON-RPC 2.0, MCP 2025-11-25 spec).
 Claude Code connects via `claude mcp add --transport http <name> <url>/mcp`.
 
-17 tools: get_namespaces, list_deployments, get_deployment, get_pod_logs,
-get_events, get_deployment_history, get_gitops_status, get_build_logs,
-list_ingresses, get_metrics, create_application, list_addons, list_templates,
-configure_gitops, create_ingress, update_ingress, create_service.
+5 deckwatch-specific tools (create_application, list_addons, list_templates,
+configure_gitops, get_gitops_status) plus 160+ upstream K8s tools from mcp-k8s
+(deployments, pods, services, ingresses, secrets, configmaps, RBAC, CRDs, etc.).
 
 ## Addons
 
