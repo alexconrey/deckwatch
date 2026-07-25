@@ -1,26 +1,20 @@
 //! Streamable HTTP MCP (Model Context Protocol) server endpoint.
 //!
-//! Implements the MCP 2025-11-25 spec over JSON-RPC 2.0. Exposes deckwatch
-//! Kubernetes management capabilities as MCP tools so Claude Code (and other
-//! MCP clients) can query cluster state — pod logs, events, deployment status,
-//! GitOps config, build history — alongside local filesystem access.
+//! Exposes deckwatch-specific tools (applications, GitOps, addons, templates)
+//! alongside 160+ generic Kubernetes tools from the mcp-k8s upstream library.
 //!
-//! Wire up: `POST /mcp` in the public API router (no auth layer so MCP
-//! clients can connect without a bearer token, same as healthz).
+//! Wire up: `POST /mcp` in the public API router.
 
 use axum::extract::State;
 use axum::http::{header, StatusCode};
 use axum::response::IntoResponse;
 use axum::Json;
-use k8s_openapi::api::apps::v1::ReplicaSet;
-use kube::api::ListParams;
 use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
 use serde::{Deserialize, Serialize};
 
 use crate::entities::gitops_configs;
 use crate::handlers::applications;
-use crate::handlers::{addons, gitops, ingresses, templates};
-use crate::kube_ext;
+use crate::handlers::{addons, gitops, templates};
 use crate::state::AppState;
 
 // ---------------------------------------------------------------------------
@@ -82,258 +76,86 @@ fn handle_initialize(request: &JsonRpcRequest) -> JsonRpcResponse {
         serde_json::json!({
             "protocolVersion": "2025-11-25",
             "capabilities": { "tools": {} },
-            "serverInfo": { "name": "deckwatch", "version": "0.1.0" }
+            "serverInfo": { "name": "deckwatch", "version": "0.3.2" }
         }),
     )
 }
 
 // ---------------------------------------------------------------------------
-// tools/list
+// tools/list — upstream mcp-k8s tools + deckwatch-specific tools
 // ---------------------------------------------------------------------------
 
 fn handle_tools_list(request: &JsonRpcRequest) -> JsonRpcResponse {
-    let tools = serde_json::json!({
-        "tools": [
-            {
-                "name": "get_namespaces",
-                "description": "List all Kubernetes namespaces visible to deckwatch.",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {},
-                    "additionalProperties": false
-                }
-            },
-            {
-                "name": "list_deployments",
-                "description": "List deployments in a namespace with replica counts and status.",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "namespace": { "type": "string", "description": "Kubernetes namespace" }
-                    },
-                    "required": ["namespace"],
-                    "additionalProperties": false
-                }
-            },
-            {
-                "name": "get_deployment",
-                "description": "Get detailed info for a single deployment including pods and ingresses.",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "namespace": { "type": "string", "description": "Kubernetes namespace" },
-                        "name": { "type": "string", "description": "Deployment name" }
-                    },
-                    "required": ["namespace", "name"],
-                    "additionalProperties": false
-                }
-            },
-            {
-                "name": "get_pod_logs",
-                "description": "Fetch logs from a pod. Optionally scope to a container and limit line count.",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "namespace": { "type": "string", "description": "Kubernetes namespace" },
-                        "pod_name": { "type": "string", "description": "Pod name" },
-                        "tail_lines": { "type": "integer", "description": "Number of recent lines to return" },
-                        "container": { "type": "string", "description": "Container name (optional, defaults to first)" }
-                    },
-                    "required": ["namespace", "pod_name"],
-                    "additionalProperties": false
-                }
-            },
-            {
-                "name": "get_events",
-                "description": "List Kubernetes events in a namespace, optionally filtered by resource name.",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "namespace": { "type": "string", "description": "Kubernetes namespace" },
-                        "resource_name": { "type": "string", "description": "Filter to events involving this resource name" }
-                    },
-                    "required": ["namespace"],
-                    "additionalProperties": false
-                }
-            },
-            {
-                "name": "get_deployment_history",
-                "description": "List revision history (ReplicaSets) for a deployment.",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "namespace": { "type": "string", "description": "Kubernetes namespace" },
-                        "name": { "type": "string", "description": "Deployment name" }
-                    },
-                    "required": ["namespace", "name"],
-                    "additionalProperties": false
-                }
-            },
-            {
-                "name": "get_gitops_status",
-                "description": "Get GitOps configuration and last build status for a deployment.",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "namespace": { "type": "string", "description": "Kubernetes namespace" },
-                        "name": { "type": "string", "description": "Deployment name" }
-                    },
-                    "required": ["namespace", "name"],
-                    "additionalProperties": false
-                }
-            },
-            {
-                "name": "get_build_logs",
-                "description": "Fetch logs from a Kubernetes Job's pod (e.g. a GitOps build job).",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "namespace": { "type": "string", "description": "Kubernetes namespace" },
-                        "job_name": { "type": "string", "description": "Job name" }
-                    },
-                    "required": ["namespace", "job_name"],
-                    "additionalProperties": false
-                }
-            },
-            {
-                "name": "list_ingresses",
-                "description": "List ingresses in a namespace with hosts, classes, and addresses.",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "namespace": { "type": "string", "description": "Kubernetes namespace" }
-                    },
-                    "required": ["namespace"],
-                    "additionalProperties": false
-                }
-            },
-            {
-                "name": "get_metrics",
-                "description": "Get pod resource usage metrics (CPU/memory) from metrics-server.",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "namespace": { "type": "string", "description": "Kubernetes namespace" },
-                        "label_selector": { "type": "string", "description": "Label selector to scope pods (e.g. app=foo)" }
-                    },
-                    "required": ["namespace"],
-                    "additionalProperties": false
-                }
-            },
-            {
-                "name": "create_application",
-                "description": "Create a new deckwatch application in a namespace. Optionally seeds a starter deployment from a template (web-app, worker, cron-job, static-site).",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "namespace": { "type": "string", "description": "Kubernetes namespace" },
-                        "name": { "type": "string", "description": "Application name (lowercase alphanumeric or '-', max 53 chars)" },
-                        "description": { "type": "string", "description": "Human-readable description of the application" },
-                        "template_id": { "type": "string", "description": "Deployment template: web-app (default), worker, cron-job, static-site", "enum": ["web-app", "worker", "cron-job", "static-site"] },
-                        "create_deployment": { "type": "boolean", "description": "Seed a starter deployment from the template (default: true)" }
-                    },
-                    "required": ["namespace", "name"],
-                    "additionalProperties": false
-                }
-            },
-            {
-                "name": "list_addons",
-                "description": "List available deployment addons (sidecar containers like Redis, PostgreSQL, Memcached, etc.) with their default configuration.",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {},
-                    "additionalProperties": false
-                }
-            },
-            {
-                "name": "list_templates",
-                "description": "List available deployment templates (web-app, worker, cron-job, static-site, plus custom templates) with their pre-filled payloads.",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {},
-                    "additionalProperties": false
-                }
-            },
-            {
-                "name": "configure_gitops",
-                "description": "Enable GitOps for a deployment. Configures deckwatch to poll a git repo, build container images with Kaniko on new commits, and auto-deploy them.",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "namespace": { "type": "string", "description": "Kubernetes namespace" },
-                        "deployment_name": { "type": "string", "description": "Name of the deployment to configure GitOps for" },
-                        "repo_url": { "type": "string", "description": "Git repository URL (e.g. https://github.com/org/repo)" },
-                        "branch": { "type": "string", "description": "Branch to watch (default: main)" },
-                        "dockerfile_path": { "type": "string", "description": "Path to Dockerfile relative to repo root (default: Dockerfile)" },
-                        "docker_context": { "type": "string", "description": "Docker build context path (default: .)" },
-                        "oci_repository": { "type": "string", "description": "OCI registry destination for built images (e.g. ghcr.io/org/app). Defaults to the internal deckwatch registry if available." },
-                        "token_secret": { "type": "string", "description": "Name of K8s Secret containing git credentials (for private repos)" },
-                        "git_auth_user": { "type": "string", "description": "HTTP Basic auth username for git (auto-detected: oauth2 for GitLab, x-access-token for GitHub)" },
-                        "poll_interval_seconds": { "type": "integer", "description": "How often to poll for new commits (default: 30)" }
-                    },
-                    "required": ["namespace", "deployment_name", "repo_url"],
-                    "additionalProperties": false
-                }
-            },
-            {
-                "name": "create_ingress",
-                "description": "Create a Kubernetes Ingress resource. Automatically creates a backing ClusterIP Service if one doesn't exist.",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "namespace": { "type": "string", "description": "Kubernetes namespace" },
-                        "name": { "type": "string", "description": "Ingress name" },
-                        "host": { "type": "string", "description": "Hostname for the ingress rule (e.g. myapp.example.com)" },
-                        "service_name": { "type": "string", "description": "Backend service name" },
-                        "service_port": { "type": "integer", "description": "Backend service port (default: 80)" },
-                        "path": { "type": "string", "description": "URL path (default: /)" },
-                        "path_type": { "type": "string", "description": "Path matching type (default: Prefix)", "enum": ["Prefix", "Exact", "ImplementationSpecific"] },
-                        "ingress_class": { "type": "string", "description": "IngressClass name (e.g. alb, nginx)" },
-                        "annotations": { "type": "object", "description": "Ingress annotations as key-value pairs", "additionalProperties": { "type": "string" } }
-                    },
-                    "required": ["namespace", "name", "service_name"],
-                    "additionalProperties": false
-                }
-            },
-            {
-                "name": "update_ingress",
-                "description": "Update an existing Kubernetes Ingress resource (host, paths, annotations, TLS).",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "namespace": { "type": "string", "description": "Kubernetes namespace" },
-                        "name": { "type": "string", "description": "Ingress name" },
-                        "host": { "type": "string", "description": "Hostname for the ingress rule" },
-                        "service_name": { "type": "string", "description": "Backend service name" },
-                        "service_port": { "type": "integer", "description": "Backend service port (default: 80)" },
-                        "path": { "type": "string", "description": "URL path (default: /)" },
-                        "path_type": { "type": "string", "description": "Path matching type (default: Prefix)" },
-                        "ingress_class": { "type": "string", "description": "IngressClass name" },
-                        "annotations": { "type": "object", "description": "Ingress annotations as key-value pairs", "additionalProperties": { "type": "string" } }
-                    },
-                    "required": ["namespace", "name", "service_name"],
-                    "additionalProperties": false
-                }
-            },
-            {
-                "name": "create_service",
-                "description": "Create a Kubernetes ClusterIP Service pointing to pods with a matching app label.",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "namespace": { "type": "string", "description": "Kubernetes namespace" },
-                        "name": { "type": "string", "description": "Service name (also used as the app label selector)" },
-                        "port": { "type": "integer", "description": "Service port (default: 80)" },
-                        "target_port": { "type": "integer", "description": "Container port to forward to (defaults to same as port)" }
-                    },
-                    "required": ["namespace", "name"],
-                    "additionalProperties": false
-                }
-            }
-        ]
-    });
+    let perms = mcp_k8s::permissions::ActionPermissions::default();
+    let mut tools = mcp_k8s::mcp::tool_definitions(&perms);
+    tools.extend(mcp_k8s::resources::all_tool_definitions());
+    tools.extend(deckwatch_tool_definitions());
+    success_response(request, serde_json::json!({ "tools": tools }))
+}
 
-    success_response(request, tools)
+fn deckwatch_tool_definitions() -> Vec<serde_json::Value> {
+    vec![
+        serde_json::json!({
+            "name": "create_application",
+            "description": "Create a new deckwatch application in a namespace. Optionally seeds a starter deployment from a template.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "namespace": { "type": "string" },
+                    "name": { "type": "string", "description": "Application name (lowercase alphanumeric or '-', max 53 chars)" },
+                    "description": { "type": "string" },
+                    "template_id": { "type": "string", "enum": ["web-app", "worker", "cron-job", "static-site"] },
+                    "create_deployment": { "type": "boolean", "description": "Seed a starter deployment (default: true)" }
+                },
+                "required": ["namespace", "name"],
+                "additionalProperties": false
+            }
+        }),
+        serde_json::json!({
+            "name": "list_addons",
+            "description": "List available deployment addons (Redis, PostgreSQL, Memcached, etc.).",
+            "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false }
+        }),
+        serde_json::json!({
+            "name": "list_templates",
+            "description": "List available deployment templates with pre-filled payloads.",
+            "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false }
+        }),
+        serde_json::json!({
+            "name": "configure_gitops",
+            "description": "Enable GitOps for a deployment — poll a git repo, build with Kaniko, auto-deploy.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "namespace": { "type": "string" },
+                    "deployment_name": { "type": "string" },
+                    "repo_url": { "type": "string" },
+                    "branch": { "type": "string" },
+                    "dockerfile_path": { "type": "string" },
+                    "docker_context": { "type": "string" },
+                    "oci_repository": { "type": "string", "description": "Defaults to internal registry if available" },
+                    "token_secret": { "type": "string" },
+                    "git_auth_user": { "type": "string", "description": "Auto-detected: oauth2 for GitLab, x-access-token for GitHub" },
+                    "poll_interval_seconds": { "type": "integer" }
+                },
+                "required": ["namespace", "deployment_name", "repo_url"],
+                "additionalProperties": false
+            }
+        }),
+        serde_json::json!({
+            "name": "get_gitops_status",
+            "description": "Get GitOps configuration and last build status for a deployment (reads from deckwatch database).",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "namespace": { "type": "string" },
+                    "name": { "type": "string" }
+                },
+                "required": ["namespace", "name"],
+                "additionalProperties": false
+            }
+        }),
+    ]
 }
 
 // ---------------------------------------------------------------------------
@@ -346,290 +168,46 @@ async fn handle_tool_call(state: &AppState, request: &JsonRpcRequest) -> JsonRpc
     let args = &params["arguments"];
 
     let result = match tool_name {
-        "get_namespaces" => tool_get_namespaces(state).await,
-        "list_deployments" => tool_list_deployments(state, args).await,
-        "get_deployment" => tool_get_deployment(state, args).await,
-        "get_pod_logs" => tool_get_pod_logs(state, args).await,
-        "get_events" => tool_get_events(state, args).await,
-        "get_deployment_history" => tool_get_deployment_history(state, args).await,
-        "get_gitops_status" => tool_get_gitops_status(state, args).await,
-        "get_build_logs" => tool_get_build_logs(state, args).await,
-        "list_ingresses" => tool_list_ingresses(state, args).await,
-        "get_metrics" => tool_get_metrics(state, args).await,
-        "create_application" => tool_create_application(state, args).await,
-        "list_addons" => tool_list_addons().await,
-        "list_templates" => tool_list_templates(state).await,
-        "configure_gitops" => tool_configure_gitops(state, args).await,
-        "create_ingress" => tool_create_ingress(state, args).await,
-        "update_ingress" => tool_update_ingress(state, args).await,
-        "create_service" => tool_create_service(state, args).await,
-        _ => Err(format!("Unknown tool: {tool_name}")),
+        "create_application" => Some(tool_create_application(state, args).await),
+        "list_addons" => Some(tool_list_addons().await),
+        "list_templates" => Some(tool_list_templates(state).await),
+        "configure_gitops" => Some(tool_configure_gitops(state, args).await),
+        "get_gitops_status" => Some(tool_get_gitops_status(state, args).await),
+        _ => None,
+    };
+
+    let result = match result {
+        Some(r) => r,
+        None => {
+            let k8s_client = mcp_k8s::K8sClient::new(
+                state.kube_client.clone(),
+                state.allowed_namespaces.clone(),
+                mcp_k8s::permissions::ActionPermissions::default(),
+            );
+            if let Some(r) = mcp_k8s::mcp::handle_tool(&k8s_client, tool_name, args).await {
+                r
+            } else if let Some(r) =
+                mcp_k8s::resources::handle_tool(&k8s_client, tool_name, args).await
+            {
+                r
+            } else {
+                Err(format!("Unknown tool: {tool_name}"))
+            }
+        }
     };
 
     match result {
         Ok(text) => success_response(
             request,
-            serde_json::json!({
-                "content": [{ "type": "text", "text": text }]
-            }),
+            serde_json::json!({ "content": [{ "type": "text", "text": text }] }),
         ),
         Err(e) => error_response(request, -32000, &e),
     }
 }
 
 // ---------------------------------------------------------------------------
-// Tool implementations
+// Deckwatch-specific tool implementations
 // ---------------------------------------------------------------------------
-
-async fn tool_get_namespaces(state: &AppState) -> Result<String, String> {
-    let ns_api = state.namespaces_api();
-    let list = ns_api
-        .list(&ListParams::default())
-        .await
-        .map_err(|e| e.to_string())?;
-
-    let names: Vec<String> = list
-        .iter()
-        .filter_map(|ns| ns.metadata.name.clone())
-        .filter(|name| state.is_namespace_allowed(name))
-        .collect();
-
-    Ok(names.join("\n"))
-}
-
-async fn tool_list_deployments(
-    state: &AppState,
-    args: &serde_json::Value,
-) -> Result<String, String> {
-    let ns = args["namespace"].as_str().ok_or("namespace is required")?;
-    let api = state.deployments_api(ns).map_err(|e| e.to_string())?;
-    let list = api
-        .list(&ListParams::default())
-        .await
-        .map_err(|e| e.to_string())?;
-
-    let summaries: Vec<serde_json::Value> = list
-        .iter()
-        .map(|dep| {
-            let s = kube_ext::deployment_summary(dep);
-            serde_json::to_value(s).unwrap_or_default()
-        })
-        .collect();
-
-    serde_json::to_string_pretty(&summaries).map_err(|e| e.to_string())
-}
-
-async fn tool_get_deployment(state: &AppState, args: &serde_json::Value) -> Result<String, String> {
-    let ns = args["namespace"].as_str().ok_or("namespace is required")?;
-    let name = args["name"].as_str().ok_or("name is required")?;
-
-    let dep_api = state.deployments_api(ns).map_err(|e| e.to_string())?;
-    let dep = dep_api.get(name).await.map_err(|e| e.to_string())?;
-    let detail = kube_ext::deployment_detail(&dep);
-
-    // Fetch pods for the deployment
-    let pods = {
-        let pods_api = state.pods_api(ns).map_err(|e| e.to_string())?;
-        let selector = dep
-            .spec
-            .as_ref()
-            .and_then(|s| s.selector.match_labels.as_ref())
-            .map(|labels| {
-                labels
-                    .iter()
-                    .map(|(k, v)| format!("{k}={v}"))
-                    .collect::<Vec<_>>()
-                    .join(",")
-            })
-            .unwrap_or_default();
-        let lp = ListParams::default().labels(&selector);
-        let pod_list = pods_api.list(&lp).await.map_err(|e| e.to_string())?;
-        let summaries: Vec<serde_json::Value> = pod_list
-            .iter()
-            .map(|p| serde_json::to_value(kube_ext::pod_summary(p)).unwrap_or_default())
-            .collect();
-        summaries
-    };
-
-    // Fetch ingresses that reference this deployment's service
-    let ingresses = {
-        let ing_api = state.ingresses_api(ns).map_err(|e| e.to_string())?;
-        let all = ing_api
-            .list(&ListParams::default())
-            .await
-            .map_err(|e| e.to_string())?;
-        let matching: Vec<serde_json::Value> = all
-            .iter()
-            .filter(|ing| {
-                ing.spec
-                    .as_ref()
-                    .and_then(|s| s.rules.as_ref())
-                    .map(|rules| {
-                        rules.iter().any(|r| {
-                            r.http
-                                .as_ref()
-                                .map(|http| {
-                                    http.paths.iter().any(|p| {
-                                        p.backend
-                                            .service
-                                            .as_ref()
-                                            .map(|s| s.name == name)
-                                            .unwrap_or(false)
-                                    })
-                                })
-                                .unwrap_or(false)
-                        })
-                    })
-                    .unwrap_or(false)
-            })
-            .map(|ing| serde_json::to_value(kube_ext::ingress_summary(ing)).unwrap_or_default())
-            .collect();
-        matching
-    };
-
-    let result = serde_json::json!({
-        "detail": serde_json::to_value(detail).unwrap_or_default(),
-        "pods": pods,
-        "ingresses": ingresses,
-    });
-
-    serde_json::to_string_pretty(&result).map_err(|e| e.to_string())
-}
-
-async fn tool_get_pod_logs(state: &AppState, args: &serde_json::Value) -> Result<String, String> {
-    let ns = args["namespace"].as_str().ok_or("namespace is required")?;
-    let pod = args["pod_name"].as_str().ok_or("pod_name is required")?;
-    let tail = args["tail_lines"].as_i64();
-    let container = args["container"].as_str().map(|s| s.to_string());
-
-    let pods_api = state.pods_api(ns).map_err(|e| e.to_string())?;
-    let params = kube::api::LogParams {
-        tail_lines: tail,
-        container,
-        timestamps: true,
-        ..Default::default()
-    };
-    let logs = pods_api
-        .logs(pod, &params)
-        .await
-        .map_err(|e| e.to_string())?;
-    Ok(logs)
-}
-
-async fn tool_get_events(state: &AppState, args: &serde_json::Value) -> Result<String, String> {
-    let ns = args["namespace"].as_str().ok_or("namespace is required")?;
-    let resource_name = args["resource_name"].as_str();
-
-    let api = state.events_api(ns).map_err(|e| e.to_string())?;
-    let mut lp = ListParams::default();
-    if let Some(name) = resource_name {
-        lp = lp.fields(&format!("involvedObject.name={name}"));
-    }
-    let list = api.list(&lp).await.map_err(|e| e.to_string())?;
-
-    let mut events: Vec<String> = list
-        .iter()
-        .map(|e| {
-            let s = kube_ext::event_summary(e);
-            format!(
-                "[{}] {} {} {}: {}",
-                s.last_timestamp
-                    .as_deref()
-                    .or(s.first_timestamp.as_deref())
-                    .unwrap_or("?"),
-                s.event_type,
-                s.involved_object_kind,
-                s.involved_object_name,
-                s.message.as_deref().unwrap_or("(no message)"),
-            )
-        })
-        .collect();
-
-    // Sort newest first by the formatted timestamp prefix
-    events.sort_by(|a, b| b.cmp(a));
-
-    if events.is_empty() {
-        Ok("No events found.".to_string())
-    } else {
-        Ok(events.join("\n"))
-    }
-}
-
-async fn tool_get_deployment_history(
-    state: &AppState,
-    args: &serde_json::Value,
-) -> Result<String, String> {
-    let ns = args["namespace"].as_str().ok_or("namespace is required")?;
-    let name = args["name"].as_str().ok_or("name is required")?;
-
-    let dep_api = state.deployments_api(ns).map_err(|e| e.to_string())?;
-    let dep = dep_api.get(name).await.map_err(|e| e.to_string())?;
-
-    let selector = dep
-        .spec
-        .as_ref()
-        .and_then(|s| s.selector.match_labels.as_ref())
-        .map(|labels| {
-            labels
-                .iter()
-                .map(|(k, v)| format!("{k}={v}"))
-                .collect::<Vec<_>>()
-                .join(",")
-        })
-        .unwrap_or_default();
-
-    let rs_api: kube::Api<ReplicaSet> = kube::Api::namespaced(state.kube_client.clone(), ns);
-    let lp = ListParams::default().labels(&selector);
-    let rs_list = rs_api.list(&lp).await.map_err(|e| e.to_string())?;
-
-    let mut revisions: Vec<String> = rs_list
-        .items
-        .iter()
-        .filter_map(|rs| {
-            let annotations = rs.metadata.annotations.as_ref()?;
-            let revision: i64 = annotations
-                .get("deployment.kubernetes.io/revision")?
-                .parse()
-                .ok()?;
-            let image = rs
-                .spec
-                .as_ref()
-                .and_then(|s| s.template.as_ref())
-                .and_then(|t| t.spec.as_ref())
-                .and_then(|s| s.containers.first())
-                .and_then(|c| c.image.clone())
-                .unwrap_or_else(|| "<unknown>".to_string());
-            let replicas = rs.spec.as_ref().and_then(|s| s.replicas).unwrap_or(0);
-            let ready = rs
-                .status
-                .as_ref()
-                .and_then(|s| s.ready_replicas)
-                .unwrap_or(0);
-            let created = rs
-                .metadata
-                .creation_timestamp
-                .as_ref()
-                .map(|t| t.0.to_string())
-                .unwrap_or_else(|| "?".to_string());
-            let change_cause = annotations
-                .get("kubernetes.io/change-cause")
-                .cloned()
-                .unwrap_or_default();
-
-            Some(format!(
-                "Rev {revision}: image={image} replicas={replicas}/{ready} created={created} cause={change_cause}"
-            ))
-        })
-        .collect();
-
-    revisions.sort_by(|a, b| b.cmp(a));
-
-    if revisions.is_empty() {
-        Ok("No revision history found.".to_string())
-    } else {
-        Ok(revisions.join("\n"))
-    }
-}
 
 async fn tool_get_gitops_status(
     state: &AppState,
@@ -638,7 +216,6 @@ async fn tool_get_gitops_status(
     let ns = args["namespace"].as_str().ok_or("namespace is required")?;
     let name = args["name"].as_str().ok_or("name is required")?;
 
-    // Verify namespace is allowed
     let _ = state.deployments_api(ns).map_err(|e| e.to_string())?;
 
     let app_id = format!("{ns}/{name}");
@@ -668,138 +245,6 @@ async fn tool_get_gitops_status(
             serde_json::to_string_pretty(&result).map_err(|e| e.to_string())
         }
         None => Ok(format!("GitOps is not configured for {ns}/{name}.")),
-    }
-}
-
-async fn tool_get_build_logs(state: &AppState, args: &serde_json::Value) -> Result<String, String> {
-    let ns = args["namespace"].as_str().ok_or("namespace is required")?;
-    let job_name = args["job_name"].as_str().ok_or("job_name is required")?;
-
-    // Find the pod for this job
-    let pods_api = state.pods_api(ns).map_err(|e| e.to_string())?;
-    let lp = ListParams::default().labels(&format!("job-name={job_name}"));
-    let pods = pods_api.list(&lp).await.map_err(|e| e.to_string())?;
-
-    let pod_name = pods
-        .items
-        .first()
-        .and_then(|p| p.metadata.name.clone())
-        .ok_or_else(|| format!("No pod found for job {job_name}"))?;
-
-    let params = kube::api::LogParams {
-        timestamps: true,
-        ..Default::default()
-    };
-    let logs = pods_api
-        .logs(&pod_name, &params)
-        .await
-        .map_err(|e| e.to_string())?;
-    Ok(logs)
-}
-
-async fn tool_list_ingresses(state: &AppState, args: &serde_json::Value) -> Result<String, String> {
-    let ns = args["namespace"].as_str().ok_or("namespace is required")?;
-    let api = state.ingresses_api(ns).map_err(|e| e.to_string())?;
-    let list = api
-        .list(&ListParams::default())
-        .await
-        .map_err(|e| e.to_string())?;
-
-    let summaries: Vec<serde_json::Value> = list
-        .iter()
-        .map(|ing| serde_json::to_value(kube_ext::ingress_summary(ing)).unwrap_or_default())
-        .collect();
-
-    serde_json::to_string_pretty(&summaries).map_err(|e| e.to_string())
-}
-
-async fn tool_get_metrics(state: &AppState, args: &serde_json::Value) -> Result<String, String> {
-    let ns = args["namespace"].as_str().ok_or("namespace is required")?;
-    let label_selector = args["label_selector"].as_str();
-
-    if !state.is_namespace_allowed(ns) {
-        return Err(format!("Namespace '{ns}' is not in the allowed list"));
-    }
-
-    // Build the metrics API URI
-    let mut uri = format!("/apis/metrics.k8s.io/v1beta1/namespaces/{ns}/pods");
-    if let Some(sel) = label_selector.filter(|s| !s.is_empty()) {
-        uri.push_str("?labelSelector=");
-        // Minimal URL-encoding for label selectors
-        for b in sel.bytes() {
-            match b {
-                b'A'..=b'Z'
-                | b'a'..=b'z'
-                | b'0'..=b'9'
-                | b'-'
-                | b'_'
-                | b'.'
-                | b'~'
-                | b'='
-                | b',' => uri.push(b as char),
-                _ => uri.push_str(&format!("%{b:02X}")),
-            }
-        }
-    }
-
-    let req = axum::http::Request::builder()
-        .uri(&uri)
-        .body(Vec::new())
-        .map_err(|e| e.to_string())?;
-
-    // Use the same wire types as resource_metrics.rs
-    #[derive(Deserialize)]
-    struct MetricsList {
-        items: Vec<RawPodMetrics>,
-    }
-    #[derive(Deserialize)]
-    struct RawPodMetrics {
-        metadata: MetricsMeta,
-        #[allow(dead_code)]
-        timestamp: String,
-        containers: Vec<RawContainerMetrics>,
-    }
-    #[derive(Deserialize)]
-    struct MetricsMeta {
-        name: String,
-    }
-    #[derive(Deserialize)]
-    struct RawContainerMetrics {
-        name: String,
-        usage: Usage,
-    }
-    #[derive(Deserialize)]
-    struct Usage {
-        cpu: String,
-        memory: String,
-    }
-
-    let result: Result<MetricsList, kube::Error> = state.kube_client.request(req).await;
-
-    match result {
-        Ok(list) => {
-            let mut lines: Vec<String> = Vec::new();
-            for pod in list.items {
-                for c in pod.containers {
-                    lines.push(format!(
-                        "pod={} container={} cpu={} memory={}",
-                        pod.metadata.name, c.name, c.usage.cpu, c.usage.memory,
-                    ));
-                }
-            }
-            if lines.is_empty() {
-                Ok("No pod metrics found. Is metrics-server installed?".to_string())
-            } else {
-                Ok(lines.join("\n"))
-            }
-        }
-        Err(kube::Error::Api(api_err)) if api_err.code == 404 => {
-            Ok("metrics-server does not appear to be installed in this cluster.".to_string())
-        }
-        Err(kube::Error::Api(api_err)) if api_err.code == 503 => {
-            Ok("metrics-server is installed but not ready. Give it 60s after startup.".to_string())
-        }
-        Err(e) => Err(e.to_string()),
     }
 }
 
@@ -890,144 +335,6 @@ async fn tool_configure_gitops(
     .map_err(|e| format!("{e}"))?;
 
     serde_json::to_string_pretty(&result.0).map_err(|e| e.to_string())
-}
-
-async fn tool_create_ingress(state: &AppState, args: &serde_json::Value) -> Result<String, String> {
-    let ns = args["namespace"].as_str().ok_or("namespace is required")?;
-    let name = args["name"].as_str().ok_or("name is required")?;
-    let service_name = args["service_name"]
-        .as_str()
-        .ok_or("service_name is required")?;
-    let service_port = args["service_port"].as_i64().unwrap_or(80) as i32;
-    let path = args["path"].as_str().unwrap_or("/").to_string();
-    let path_type = args["path_type"].as_str().map(|s| s.to_string());
-    let host = args["host"].as_str().map(|s| s.to_string());
-    let ingress_class = args["ingress_class"].as_str().map(|s| s.to_string());
-    let annotations: Option<std::collections::BTreeMap<String, String>> = args
-        .get("annotations")
-        .and_then(|v| serde_json::from_value(v.clone()).ok());
-
-    let req = ingresses::CreateIngressRequest {
-        name: name.to_string(),
-        host,
-        paths: vec![ingresses::IngressPathInput {
-            path,
-            path_type,
-            service_name: service_name.to_string(),
-            service_port,
-        }],
-        ingress_class,
-        annotations,
-        tls: None,
-    };
-
-    let result = ingresses::create(
-        State(state.clone()),
-        axum::extract::Path(ns.to_string()),
-        Json(req),
-    )
-    .await
-    .map_err(|e| format!("{e}"))?;
-
-    let (_status, Json(detail)) = result;
-    serde_json::to_string_pretty(&detail).map_err(|e| e.to_string())
-}
-
-async fn tool_update_ingress(state: &AppState, args: &serde_json::Value) -> Result<String, String> {
-    let ns = args["namespace"].as_str().ok_or("namespace is required")?;
-    let name = args["name"].as_str().ok_or("name is required")?;
-    let service_name = args["service_name"]
-        .as_str()
-        .ok_or("service_name is required")?;
-    let service_port = args["service_port"].as_i64().unwrap_or(80) as i32;
-    let path = args["path"].as_str().unwrap_or("/").to_string();
-    let path_type = args["path_type"].as_str().map(|s| s.to_string());
-    let host = args["host"].as_str().map(|s| s.to_string());
-    let ingress_class = args["ingress_class"].as_str().map(|s| s.to_string());
-    let annotations: Option<std::collections::BTreeMap<String, String>> = args
-        .get("annotations")
-        .and_then(|v| serde_json::from_value(v.clone()).ok());
-
-    let req = ingresses::CreateIngressRequest {
-        name: name.to_string(),
-        host,
-        paths: vec![ingresses::IngressPathInput {
-            path,
-            path_type,
-            service_name: service_name.to_string(),
-            service_port,
-        }],
-        ingress_class,
-        annotations,
-        tls: None,
-    };
-
-    let result = ingresses::update(
-        State(state.clone()),
-        axum::extract::Path((ns.to_string(), name.to_string())),
-        Json(req),
-    )
-    .await
-    .map_err(|e| format!("{e}"))?;
-
-    serde_json::to_string_pretty(&result.0).map_err(|e| e.to_string())
-}
-
-async fn tool_create_service(state: &AppState, args: &serde_json::Value) -> Result<String, String> {
-    use k8s_openapi::api::core::v1::{Service, ServicePort, ServiceSpec};
-    use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
-    use k8s_openapi::apimachinery::pkg::util::intstr::IntOrString;
-    use kube::api::PostParams;
-
-    let ns = args["namespace"].as_str().ok_or("namespace is required")?;
-    let name = args["name"].as_str().ok_or("name is required")?;
-    let port = args["port"].as_i64().unwrap_or(80) as i32;
-    let target_port = args["target_port"].as_i64().unwrap_or(port as i64) as i32;
-
-    let mut labels = std::collections::BTreeMap::new();
-    labels.insert("app".to_string(), name.to_string());
-    labels.insert(
-        "app.kubernetes.io/managed-by".to_string(),
-        "deckwatch".to_string(),
-    );
-
-    let mut selector = std::collections::BTreeMap::new();
-    selector.insert("app".to_string(), name.to_string());
-
-    let svc = Service {
-        metadata: ObjectMeta {
-            name: Some(name.to_string()),
-            namespace: Some(ns.to_string()),
-            labels: Some(labels),
-            ..Default::default()
-        },
-        spec: Some(ServiceSpec {
-            selector: Some(selector),
-            ports: Some(vec![ServicePort {
-                port,
-                target_port: Some(IntOrString::Int(target_port)),
-                protocol: Some("TCP".to_string()),
-                ..Default::default()
-            }]),
-            ..Default::default()
-        }),
-        ..Default::default()
-    };
-
-    let svc_api = state.services_api(ns).map_err(|e| format!("{e}"))?;
-    let created = svc_api
-        .create(&PostParams::default(), &svc)
-        .await
-        .map_err(|e| format!("{e}"))?;
-
-    let result = serde_json::json!({
-        "name": created.metadata.name,
-        "namespace": ns,
-        "cluster_ip": created.spec.as_ref().and_then(|s| s.cluster_ip.clone()),
-        "port": port,
-        "target_port": target_port,
-    });
-    serde_json::to_string_pretty(&result).map_err(|e| e.to_string())
 }
 
 // ---------------------------------------------------------------------------

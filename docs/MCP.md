@@ -77,7 +77,7 @@ Deckwatch exposes the following MCP tools:
 
 | Tool | Description | Parameters |
 |------|-------------|------------|
-| `get_namespaces` | List all namespaces visible to deckwatch | — |
+| `list_namespaces` | List all namespaces visible to deckwatch | — |
 | `list_deployments` | List deployments in a namespace | `namespace` |
 | `list_ingresses` | List ingresses with hosts, classes, and addresses | `namespace` |
 
@@ -260,7 +260,7 @@ curl -X POST http://localhost:8080/mcp \
 # Call a tool
 curl -X POST http://localhost:8080/mcp \
   -H 'Content-Type: application/json' \
-  -d '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"get_namespaces","arguments":{}}}'
+  -d '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"list_namespaces","arguments":{}}}'
 
 # Get pod logs
 curl -X POST http://localhost:8080/mcp \
