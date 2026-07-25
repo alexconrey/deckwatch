@@ -2111,7 +2111,7 @@ checksum = "47e1ffaa40ddd1f3ed91f717a33c8c0ee23fff369e3aa8772b9605cc1d22f4c3"
 [[package]]
 name = "mcp-k8s"
 version = "0.1.0"
-source = "git+https://github.com/alexconrey/mcp-k8s.git#eee69c25edbc00bf18169a521e4e7c93a1ca05a7"
+source = "git+https://github.com/alexconrey/mcp-k8s.git#8e1d364c685d1510a733ef3d6fd1298131a20ea1"
 dependencies = [
  "axum",
  "axum-server",
@@ -2125,7 +2125,6 @@ dependencies = [
  "rustls",
  "serde",
  "serde_json",
- "subtle",
  "thiserror",
  "tokio",
  "tower-http",
@@ -3760,7 +3759,7 @@ version = "0.8.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c1c97747dbf44bb1ca44a561ece23508e99cb592e862f22222dcf42f51d1e451"
 dependencies = [
- "heck 0.4.1",
+ "heck 0.5.0",
  "proc-macro2",
  "quote",
  "syn 2.0.118",

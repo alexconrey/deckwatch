@@ -58,7 +58,6 @@ pub async fn handle_mcp(
     let response = match request.method.as_str() {
         "initialize" => handle_initialize(&request),
         "notifications/initialized" => return StatusCode::OK.into_response(),
-        "ping" => success_response(&request, serde_json::json!({})),
         "tools/list" => handle_tools_list(&request),
         "tools/call" => handle_tool_call(&state, &request).await,
         _ => method_not_found(&request),
