@@ -120,6 +120,36 @@ fn deckwatch_tool_definitions() -> Vec<serde_json::Value> {
             "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false }
         }),
         serde_json::json!({
+            "name": "attach_addon",
+            "description": "Attach a sidecar addon to a deployment (e.g. postgres, redis). For postgres, creates a PVC for persistent storage.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "namespace": { "type": "string" },
+                    "deployment_name": { "type": "string" },
+                    "addon_id": { "type": "string", "description": "Addon ID from list_addons (e.g. postgres, redis, memcached)" },
+                    "storage": { "type": "string", "description": "PVC size for postgres addon (default: 1Gi)" },
+                    "storage_class": { "type": "string", "description": "StorageClass for PVC (defaults to settings default)" }
+                },
+                "required": ["namespace", "deployment_name", "addon_id"],
+                "additionalProperties": false
+            }
+        }),
+        serde_json::json!({
+            "name": "detach_addon",
+            "description": "Detach a sidecar addon from a deployment. Removes the container and cleans up PVCs.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "namespace": { "type": "string" },
+                    "deployment_name": { "type": "string" },
+                    "addon_id": { "type": "string" }
+                },
+                "required": ["namespace", "deployment_name", "addon_id"],
+                "additionalProperties": false
+            }
+        }),
+        serde_json::json!({
             "name": "list_templates",
             "description": "List available deployment templates with pre-filled payloads.",
             "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false }
@@ -275,6 +305,8 @@ async fn handle_tool_call(state: &AppState, request: &JsonRpcRequest) -> JsonRpc
     let result = match tool_name {
         "create_application" => Some(tool_create_application(state, args).await),
         "list_addons" => Some(tool_list_addons().await),
+        "attach_addon" => Some(tool_attach_addon(state, args).await),
+        "detach_addon" => Some(tool_detach_addon(state, args).await),
         "list_templates" => Some(tool_list_templates(state).await),
         "configure_gitops" => Some(tool_configure_gitops(state, args).await),
         "get_gitops_status" => Some(tool_get_gitops_status(state, args).await),
@@ -363,6 +395,50 @@ async fn tool_get_gitops_status(
 async fn tool_list_addons() -> Result<String, String> {
     let Json(response) = addons::list().await;
     serde_json::to_string_pretty(&response).map_err(|e| e.to_string())
+}
+
+async fn tool_attach_addon(state: &AppState, args: &serde_json::Value) -> Result<String, String> {
+    let ns = args["namespace"].as_str().ok_or("namespace is required")?;
+    let name = args["deployment_name"]
+        .as_str()
+        .ok_or("deployment_name is required")?;
+    let addon_id = args["addon_id"].as_str().ok_or("addon_id is required")?;
+
+    let mut req_body = addons::AttachAddonRequest::default();
+    if let Some(s) = args["storage"].as_str() {
+        req_body.storage = Some(s.to_string());
+    }
+    if let Some(s) = args["storage_class"].as_str() {
+        req_body.storage_class = Some(s.to_string());
+    }
+
+    let result = addons::attach(
+        State(state.clone()),
+        axum::extract::Path((ns.to_string(), name.to_string(), addon_id.to_string())),
+        Some(Json(req_body)),
+    )
+    .await
+    .map_err(|e| format!("{e}"))?;
+
+    let (_status, Json(detail)) = result;
+    serde_json::to_string_pretty(&detail).map_err(|e| e.to_string())
+}
+
+async fn tool_detach_addon(state: &AppState, args: &serde_json::Value) -> Result<String, String> {
+    let ns = args["namespace"].as_str().ok_or("namespace is required")?;
+    let name = args["deployment_name"]
+        .as_str()
+        .ok_or("deployment_name is required")?;
+    let addon_id = args["addon_id"].as_str().ok_or("addon_id is required")?;
+
+    let result = addons::detach(
+        State(state.clone()),
+        axum::extract::Path((ns.to_string(), name.to_string(), addon_id.to_string())),
+    )
+    .await
+    .map_err(|e| format!("{e}"))?;
+
+    serde_json::to_string_pretty(&result.0).map_err(|e| e.to_string())
 }
 
 async fn tool_list_templates(state: &AppState) -> Result<String, String> {
