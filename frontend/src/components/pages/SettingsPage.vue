@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from "vue";
+import { gitTokensApi } from "@/api/gitTokens";
 import { ingressclassesApi } from "@/api/ingressclasses";
 import { settingsApi } from "@/api/settings";
 import { storageclassesApi } from "@/api/storageclasses";
@@ -20,6 +21,7 @@ import type {
   EncryptedCredentials,
   GitRepository,
   GitTokenSecret,
+  GitTokenSecretRequest,
   IngressClassSummary,
   IngressTemplate,
   NotificationEventType,
@@ -721,11 +723,104 @@ function removeRegistry(idx: number) {
   ociRegistries.value.splice(idx, 1);
 }
 
-function addTokenSecret() {
-  gitTokenSecrets.value.push({ name: "", secret_name: "", namespace: "" }); // namespace filled by backend
+// --- Git token dialog state ---
+
+const tokenDialogOpen = ref(false);
+const tokenDialogMode = ref<"create" | "update">("create");
+const tokenDialogSaving = ref(false);
+const tokenForm = ref<GitTokenSecretRequest>({ name: "", secret_name: "", token: "" });
+
+const tokenDeleteDialogOpen = ref(false);
+const tokenDeleteTarget = ref("");
+const tokenDeleting = ref(false);
+
+function openAddTokenDialog() {
+  tokenDialogMode.value = "create";
+  tokenForm.value = { name: "", secret_name: "", token: "" };
+  tokenDialogOpen.value = true;
 }
-function removeTokenSecret(idx: number) {
-  gitTokenSecrets.value.splice(idx, 1);
+
+function openUpdateTokenDialog(t: GitTokenSecret) {
+  tokenDialogMode.value = "update";
+  tokenForm.value = { name: t.name, secret_name: t.secret_name, token: "" };
+  tokenDialogOpen.value = true;
+}
+
+function autoGenerateSecretName() {
+  if (tokenDialogMode.value === "create" && !tokenForm.value.secret_name) {
+    const slug = tokenForm.value.name
+      .toLowerCase()
+      .replace(/[^a-z0-9-]/g, "-")
+      .replace(/-+/g, "-")
+      .replace(/^-|-$/g, "");
+    if (slug) {
+      tokenForm.value.secret_name = `${slug}-token`;
+    }
+  }
+}
+
+async function saveTokenSecret() {
+  autoGenerateSecretName();
+  if (!tokenForm.value.name || !tokenForm.value.secret_name || !tokenForm.value.token) return;
+  tokenDialogSaving.value = true;
+  try {
+    const result = await gitTokensApi.upsert(tokenForm.value);
+    const existing = gitTokenSecrets.value.findIndex(
+      (t) => t.secret_name === result.secret_name,
+    );
+    if (existing >= 0) {
+      gitTokenSecrets.value[existing] = {
+        name: result.name,
+        secret_name: result.secret_name,
+        namespace: result.namespace,
+      };
+    } else {
+      gitTokenSecrets.value.push({
+        name: result.name,
+        secret_name: result.secret_name,
+        namespace: result.namespace,
+      });
+    }
+    tokenDialogOpen.value = false;
+    snackbarMessage.value = tokenDialogMode.value === "create"
+      ? "Git token created"
+      : "Git token updated";
+    snackbarColor.value = "success";
+    snackbar.value = true;
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : "Failed to save git token";
+    snackbarMessage.value = msg;
+    snackbarColor.value = "error";
+    snackbar.value = true;
+  } finally {
+    tokenDialogSaving.value = false;
+  }
+}
+
+function confirmDeleteToken(secretName: string) {
+  tokenDeleteTarget.value = secretName;
+  tokenDeleteDialogOpen.value = true;
+}
+
+async function deleteTokenSecret() {
+  tokenDeleting.value = true;
+  try {
+    await gitTokensApi.remove(tokenDeleteTarget.value);
+    gitTokenSecrets.value = gitTokenSecrets.value.filter(
+      (t) => t.secret_name !== tokenDeleteTarget.value,
+    );
+    tokenDeleteDialogOpen.value = false;
+    snackbarMessage.value = "Git token deleted";
+    snackbarColor.value = "success";
+    snackbar.value = true;
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : "Failed to delete git token";
+    snackbarMessage.value = msg;
+    snackbarColor.value = "error";
+    snackbar.value = true;
+  } finally {
+    tokenDeleting.value = false;
+  }
 }
 
 function addIngressTemplate() {
@@ -2310,15 +2405,14 @@ onMounted(load);
               color="primary"
               variant="tonal"
               prepend-icon="mdi-plus"
-              @click="addTokenSecret"
+              @click="openAddTokenDialog"
             >
               Add token
             </v-btn>
           </div>
           <p class="text-body-2 text-secondary mb-4">
-            Points at a Kubernetes Secret with a <code>token</code> data key.
-            The same entry can be referenced by many deployments -- no more
-            per-deployment secret typing.
+            Each token creates a Kubernetes Secret with a <code>token</code>
+            data key. The same entry can be referenced by many deployments.
           </p>
 
           <div v-if="gitTokenSecrets.length === 0" class="text-center py-6 text-secondary">
@@ -2326,43 +2420,109 @@ onMounted(load);
           </div>
 
           <v-card
-            v-for="(t, idx) in gitTokenSecrets"
-            :key="`tok-${idx}`"
+            v-for="t in gitTokenSecrets"
+            :key="`tok-${t.secret_name}`"
             variant="outlined"
             class="mb-3 pa-3"
           >
             <v-row dense align="center">
-              <v-col cols="12" md="5">
+              <v-col cols="12" md="4">
+                <div class="text-subtitle-2">{{ t.name }}</div>
+                <div class="text-caption text-secondary">{{ t.secret_name }}</div>
+              </v-col>
+              <v-col cols="12" md="4">
                 <v-text-field
-                  v-model="t.name"
-                  label="Display name"
-                  placeholder="github-cicd"
-                  density="comfortable"
-                  hint=" "
-                  persistent-hint
+                  model-value="••••••••"
+                  label="Token"
+                  variant="outlined"
+                  density="compact"
+                  readonly
+                  hide-details
                 />
               </v-col>
-              <v-col cols="12" md="5">
-                <v-text-field
-                  v-model="t.secret_name"
-                  label="Kubernetes Secret name"
-                  placeholder="github-cicd-token"
-                  density="comfortable"
-                  hint="Must have a 'token' data key"
-                  persistent-hint
-                />
-              </v-col>
-              <v-col cols="12" md="1" class="text-right">
+              <v-col cols="12" md="4" class="text-right">
+                <v-btn
+                  size="small"
+                  variant="tonal"
+                  color="primary"
+                  class="mr-2"
+                  @click="openUpdateTokenDialog(t)"
+                >
+                  Update
+                </v-btn>
                 <v-btn
                   icon="mdi-delete"
                   variant="text"
                   color="error"
                   size="small"
-                  @click="removeTokenSecret(idx)"
+                  @click="confirmDeleteToken(t.secret_name)"
                 />
               </v-col>
             </v-row>
           </v-card>
+
+          <!-- Add/Update Token Dialog -->
+          <v-dialog v-model="tokenDialogOpen" max-width="540" persistent>
+            <v-card>
+              <v-card-title>
+                {{ tokenDialogMode === "create" ? "Add Git Token" : "Update Git Token" }}
+              </v-card-title>
+              <v-card-text>
+                <v-text-field
+                  v-model="tokenForm.name"
+                  label="Display name"
+                  placeholder="github-cicd"
+                  variant="outlined"
+                  density="comfortable"
+                  :rules="[v => !!v || 'Display name is required']"
+                  class="mb-2"
+                  @blur="autoGenerateSecretName"
+                />
+                <v-text-field
+                  v-model="tokenForm.secret_name"
+                  label="Kubernetes Secret name"
+                  placeholder="github-cicd-token"
+                  variant="outlined"
+                  density="comfortable"
+                  :disabled="tokenDialogMode === 'update'"
+                  :rules="[v => !!v || 'Secret name is required']"
+                  class="mb-2"
+                />
+                <v-text-field
+                  v-model="tokenForm.token"
+                  label="Token value"
+                  type="password"
+                  variant="outlined"
+                  density="comfortable"
+                  :rules="[v => !!v || 'Token is required']"
+                  :placeholder="tokenDialogMode === 'update' ? 'Enter new token value' : ''"
+                />
+              </v-card-text>
+              <v-card-actions>
+                <v-spacer />
+                <v-btn variant="text" @click="tokenDialogOpen = false">Cancel</v-btn>
+                <v-btn
+                  color="primary"
+                  variant="flat"
+                  :loading="tokenDialogSaving"
+                  :disabled="!tokenForm.name || !tokenForm.secret_name || !tokenForm.token"
+                  @click="saveTokenSecret"
+                >
+                  {{ tokenDialogMode === "create" ? "Create" : "Update" }}
+                </v-btn>
+              </v-card-actions>
+            </v-card>
+          </v-dialog>
+
+          <!-- Delete Token Confirmation -->
+          <ConfirmDialog
+            v-model="tokenDeleteDialogOpen"
+            title="Delete Git Token"
+            :message="`Are you sure you want to delete token '${tokenDeleteTarget}'? This will also delete the Kubernetes Secret.`"
+            confirm-text="Delete"
+            :loading="tokenDeleting"
+            @confirm="deleteTokenSecret"
+          />
         </div>
 
         <!-- Container Registries -->

@@ -2,6 +2,7 @@ mod m20260714_000001_initial;
 mod m20260722_000001_app_git_config;
 mod m20260722_000002_gitops_auth_user;
 mod m20260730_000001_build_log;
+mod m20260730_000002_gitops_encrypted_token;
 
 use sea_orm_migration::prelude::*;
 
@@ -15,6 +16,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20260722_000001_app_git_config::Migration),
             Box::new(m20260722_000002_gitops_auth_user::Migration),
             Box::new(m20260730_000001_build_log::Migration),
+            Box::new(m20260730_000002_gitops_encrypted_token::Migration),
         ]
     }
 }

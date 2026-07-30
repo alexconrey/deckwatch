@@ -137,7 +137,8 @@ fn deckwatch_tool_definitions() -> Vec<serde_json::Value> {
                     "dockerfile_path": { "type": "string" },
                     "docker_context": { "type": "string" },
                     "oci_repository": { "type": "string", "description": "Defaults to internal registry if available" },
-                    "token_secret": { "type": "string" },
+                    "token_secret": { "type": "string", "description": "Name of a shared token from Settings (looked up by display name)" },
+                    "token": { "type": "string", "description": "Per-app git token (encrypted and stored on this gitops config). Use instead of token_secret for project-scoped tokens." },
                     "git_auth_user": { "type": "string", "description": "Auto-detected: oauth2 for GitLab, x-access-token for GitHub" },
                     "poll_interval_seconds": { "type": "integer" }
                 },
@@ -450,6 +451,7 @@ async fn tool_configure_gitops(
         repo_url: repo_url.to_string(),
         branch: args["branch"].as_str().map(|s| s.to_string()),
         token_secret: args["token_secret"].as_str().map(|s| s.to_string()),
+        token: args["token"].as_str().map(|s| s.to_string()),
         git_auth_user: args["git_auth_user"].as_str().map(|s| s.to_string()),
         dockerfile_path: args["dockerfile_path"].as_str().map(|s| s.to_string()),
         docker_context: args["docker_context"].as_str().map(|s| s.to_string()),

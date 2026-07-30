@@ -721,6 +721,18 @@ export interface GitTokenSecret {
   namespace: string;
 }
 
+export interface GitTokenSecretRequest {
+  name: string;
+  secret_name: string;
+  token: string;
+}
+
+export interface GitTokenSecretResponse {
+  name: string;
+  secret_name: string;
+  namespace: string;
+}
+
 export interface BranchListResponse {
   branches: string[];
   default_branch: string | null;
