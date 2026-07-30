@@ -416,6 +416,13 @@ fn now_utc() -> sea_orm::entity::prelude::DateTimeUtc {
 
 /// Upsert the entire settings blob into the `settings` table as a single
 /// JSON value with key `"main"`.
+pub async fn upsert_settings_to_db_pub(
+    db: &sea_orm::DatabaseConnection,
+    settings: &DeckwatchSettings,
+) -> Result<(), sea_orm::DbErr> {
+    upsert_settings_to_db(db, settings).await
+}
+
 async fn upsert_settings_to_db(
     db: &sea_orm::DatabaseConnection,
     settings: &DeckwatchSettings,

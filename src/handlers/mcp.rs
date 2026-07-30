@@ -98,7 +98,7 @@ fn deckwatch_tool_definitions() -> Vec<serde_json::Value> {
     vec![
         serde_json::json!({
             "name": "create_application",
-            "description": "Create a new deckwatch application in a namespace. Optionally seeds a starter deployment from a template.",
+            "description": "Create a new deckwatch application in a namespace. Optionally seeds a starter deployment from a template and creates an ingress.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -106,7 +106,9 @@ fn deckwatch_tool_definitions() -> Vec<serde_json::Value> {
                     "name": { "type": "string", "description": "Application name (lowercase alphanumeric or '-', max 53 chars)" },
                     "description": { "type": "string" },
                     "template_id": { "type": "string", "enum": ["web-app", "worker", "cron-job", "static-site"] },
-                    "create_deployment": { "type": "boolean", "description": "Seed a starter deployment (default: true)" }
+                    "create_deployment": { "type": "boolean", "description": "Seed a starter deployment (default: true)" },
+                    "ingress_host": { "type": "string", "description": "If set, creates an ingress with this hostname using the default ingress template" },
+                    "ingress_template": { "type": "string", "description": "Ingress template name to use (from Settings). Uses default template if not specified." }
                 },
                 "required": ["namespace", "name"],
                 "additionalProperties": false
@@ -215,6 +217,48 @@ fn deckwatch_tool_definitions() -> Vec<serde_json::Value> {
             "description": "List available ingress templates configured in deckwatch Settings. Templates provide pre-configured annotations and ingress class for creating ingresses.",
             "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false }
         }),
+        serde_json::json!({
+            "name": "create_ingress_template",
+            "description": "Create a new ingress template in deckwatch Settings. Templates define default annotations and ingress class applied when creating ingresses.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string", "description": "Template name (e.g. 'internal-alb', 'public-nginx')" },
+                    "ingress_class": { "type": "string", "description": "IngressClass name (e.g. 'alb', 'nginx')" },
+                    "annotations": { "type": "object", "description": "Default annotations as key-value pairs", "additionalProperties": { "type": "string" } },
+                    "is_default": { "type": "boolean", "description": "Set as the default template for new ingresses (default: false)" }
+                },
+                "required": ["name"],
+                "additionalProperties": false
+            }
+        }),
+        serde_json::json!({
+            "name": "update_ingress_template",
+            "description": "Update an existing ingress template. Only modifies template-owned annotations on ingresses that use it — user-added annotations are preserved.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string", "description": "Template name to update" },
+                    "ingress_class": { "type": "string" },
+                    "annotations": { "type": "object", "description": "New annotations (replaces template annotations, user annotations preserved)", "additionalProperties": { "type": "string" } },
+                    "is_default": { "type": "boolean" }
+                },
+                "required": ["name"],
+                "additionalProperties": false
+            }
+        }),
+        serde_json::json!({
+            "name": "delete_ingress_template",
+            "description": "Delete an ingress template from deckwatch Settings.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string", "description": "Template name to delete" }
+                },
+                "required": ["name"],
+                "additionalProperties": false
+            }
+        }),
     ]
 }
 
@@ -237,6 +281,9 @@ async fn handle_tool_call(state: &AppState, request: &JsonRpcRequest) -> JsonRpc
         "create_ingress" => Some(tool_create_ingress(state, args).await),
         "update_ingress" => Some(tool_update_ingress(state, args).await),
         "list_ingress_templates" => Some(tool_list_ingress_templates(state).await),
+        "create_ingress_template" => Some(tool_create_ingress_template(state, args).await),
+        "update_ingress_template" => Some(tool_update_ingress_template(state, args).await),
+        "delete_ingress_template" => Some(tool_delete_ingress_template(state, args).await),
         _ => None,
     };
 
@@ -351,6 +398,31 @@ async fn tool_create_application(
     .map_err(|e| format!("{e}"))?;
 
     let (_status, Json(detail)) = result;
+
+    if let Some(host) = args["ingress_host"].as_str() {
+        let template = args["ingress_template"].as_str().map(|s| s.to_string());
+        let ingress_req = ingresses::CreateIngressRequest {
+            name: name.to_string(),
+            host: Some(host.to_string()),
+            paths: vec![ingresses::IngressPathInput {
+                path: "/".to_string(),
+                path_type: Some("Prefix".to_string()),
+                service_name: name.to_string(),
+                service_port: 80,
+            }],
+            ingress_class: None,
+            annotations: None,
+            tls: None,
+            template,
+        };
+        let _ = ingresses::create(
+            State(state.clone()),
+            axum::extract::Path(ns.to_string()),
+            Json(ingress_req),
+        )
+        .await;
+    }
+
     serde_json::to_string_pretty(&detail).map_err(|e| e.to_string())
 }
 
@@ -505,6 +577,108 @@ async fn tool_update_ingress(state: &AppState, args: &serde_json::Value) -> Resu
 async fn tool_list_ingress_templates(state: &AppState) -> Result<String, String> {
     let s = settings::load_settings_from_db(state).await;
     serde_json::to_string_pretty(&s.ingress_templates).map_err(|e| e.to_string())
+}
+
+async fn tool_create_ingress_template(
+    state: &AppState,
+    args: &serde_json::Value,
+) -> Result<String, String> {
+    let name = args["name"].as_str().ok_or("name is required")?;
+    let ingress_class = args["ingress_class"].as_str().map(|s| s.to_string());
+    let annotations: std::collections::BTreeMap<String, String> = args
+        .get("annotations")
+        .and_then(|v| serde_json::from_value(v.clone()).ok())
+        .unwrap_or_default();
+    let is_default = args["is_default"].as_bool().unwrap_or(false);
+
+    let mut s = settings::load_settings_from_db(state).await;
+    if s.ingress_templates.iter().any(|t| t.name == name) {
+        return Err(format!("ingress template '{name}' already exists"));
+    }
+
+    if is_default {
+        for t in &mut s.ingress_templates {
+            t.is_default = false;
+        }
+    }
+
+    s.ingress_templates.push(settings::IngressTemplate {
+        name: name.to_string(),
+        ingress_class,
+        annotations,
+        is_default,
+    });
+
+    settings::upsert_settings_to_db_pub(&state.db, &s)
+        .await
+        .map_err(|e| format!("{e}"))?;
+
+    serde_json::to_string_pretty(s.ingress_templates.last().unwrap()).map_err(|e| e.to_string())
+}
+
+async fn tool_update_ingress_template(
+    state: &AppState,
+    args: &serde_json::Value,
+) -> Result<String, String> {
+    let name = args["name"].as_str().ok_or("name is required")?;
+
+    let mut s = settings::load_settings_from_db(state).await;
+    let tmpl = s
+        .ingress_templates
+        .iter_mut()
+        .find(|t| t.name == name)
+        .ok_or_else(|| format!("ingress template '{name}' not found"))?;
+
+    if let Some(ic) = args["ingress_class"].as_str() {
+        tmpl.ingress_class = Some(ic.to_string());
+    }
+    if let Some(anns) = args.get("annotations").and_then(|v| {
+        serde_json::from_value::<std::collections::BTreeMap<String, String>>(v.clone()).ok()
+    }) {
+        tmpl.annotations = anns;
+    }
+    if let Some(d) = args["is_default"].as_bool() {
+        if d {
+            let target_name = name.to_string();
+            for t in &mut s.ingress_templates {
+                t.is_default = t.name == target_name;
+            }
+        } else {
+            let tmpl = s
+                .ingress_templates
+                .iter_mut()
+                .find(|t| t.name == name)
+                .unwrap();
+            tmpl.is_default = false;
+        }
+    }
+
+    settings::upsert_settings_to_db_pub(&state.db, &s)
+        .await
+        .map_err(|e| format!("{e}"))?;
+
+    let updated = s.ingress_templates.iter().find(|t| t.name == name).unwrap();
+    serde_json::to_string_pretty(updated).map_err(|e| e.to_string())
+}
+
+async fn tool_delete_ingress_template(
+    state: &AppState,
+    args: &serde_json::Value,
+) -> Result<String, String> {
+    let name = args["name"].as_str().ok_or("name is required")?;
+
+    let mut s = settings::load_settings_from_db(state).await;
+    let before = s.ingress_templates.len();
+    s.ingress_templates.retain(|t| t.name != name);
+    if s.ingress_templates.len() == before {
+        return Err(format!("ingress template '{name}' not found"));
+    }
+
+    settings::upsert_settings_to_db_pub(&state.db, &s)
+        .await
+        .map_err(|e| format!("{e}"))?;
+
+    Ok(format!("deleted ingress template '{name}'"))
 }
 
 // ---------------------------------------------------------------------------
