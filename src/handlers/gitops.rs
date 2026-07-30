@@ -106,6 +106,7 @@ pub struct BuildSummary {
     pub started_at: Option<String>,
     pub completed_at: Option<String>,
     pub image_tag: String,
+    pub build_log: Option<String>,
 }
 
 /// Name of the Kubernetes Secret that holds a per-deployment webhook signing
@@ -572,7 +573,22 @@ pub async fn trigger_build(
     let dep = dep?;
 
     let token = if !config_row.token_secret.is_empty() {
-        let secrets_api = state.secrets_api(&ns)?;
+        // Resolve the namespace where the token Secret actually lives from the
+        // settings entry. Fall back to the deployment namespace for backward
+        // compatibility with tokens not registered in settings.
+        let settings = crate::handlers::settings::load_settings_from_db(&state).await;
+        let token_entry = settings
+            .git_token_secrets
+            .iter()
+            .find(|t| t.secret_name == config_row.token_secret);
+        let secret_ns = token_entry
+            .map(|t| t.namespace.as_str())
+            .unwrap_or(ns.as_str());
+        // Use Api::namespaced directly instead of state.secrets_api() so we
+        // bypass the namespace allowlist check — the token namespace (e.g.
+        // "deckwatch") may not be in the allowed set.
+        let secrets_api: kube::Api<k8s_openapi::api::core::v1::Secret> =
+            kube::Api::namespaced(state.kube_client.clone(), secret_ns);
         let t = K8sTimer::new("secrets", "get");
         let secret = secrets_api.get(&config_row.token_secret).await;
         t.finish(secret.is_ok());
@@ -635,6 +651,7 @@ pub async fn trigger_build(
             started_at: sea_orm::ActiveValue::Set(Some(now)),
             completed_at: sea_orm::ActiveValue::Set(None),
             error_message: sea_orm::ActiveValue::Set(None),
+            build_log: sea_orm::ActiveValue::Set(None),
             created_at: sea_orm::ActiveValue::Set(now),
         };
         if let Err(e) = builds::Entity::insert(build_row).exec(&state.db).await {
@@ -674,6 +691,7 @@ pub async fn list_builds(
             started_at: row.started_at.map(|t| t.to_rfc3339()),
             completed_at: row.completed_at.map(|t| t.to_rfc3339()),
             image_tag: row.image_tag,
+            build_log: row.build_log,
         })
         .collect();
 

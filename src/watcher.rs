@@ -5,10 +5,10 @@ use std::time::Instant;
 use k8s_openapi::api::apps::v1::Deployment;
 use k8s_openapi::api::batch::v1::{Job, JobSpec};
 use k8s_openapi::api::core::v1::{
-    Container, EnvVar, EnvVarSource, PodSpec, PodTemplateSpec, SecretKeySelector,
+    Container, EnvVar, EnvVarSource, PodSpec, PodTemplateSpec, Secret, SecretKeySelector,
 };
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
-use kube::api::{ListParams, Patch, PatchParams, PostParams};
+use kube::api::{ListParams, LogParams, Patch, PatchParams, PostParams};
 use kube::{Api, ResourceExt};
 
 use sea_orm::entity::prelude::*;
@@ -128,7 +128,19 @@ async fn check_and_build(
     let repo_url = &config.repo_url;
     let branch = &config.branch;
     let token = if !config.token_secret.is_empty() {
-        let secrets_api = state.secrets_api(ns)?;
+        // Resolve the namespace where the token Secret actually lives from the
+        // settings entry. Fall back to the deployment namespace for backward
+        // compatibility with tokens not registered in settings.
+        let settings = crate::handlers::settings::load_settings_from_db(state).await;
+        let token_entry = settings
+            .git_token_secrets
+            .iter()
+            .find(|t| t.secret_name == config.token_secret);
+        let secret_ns = token_entry.map(|t| t.namespace.as_str()).unwrap_or(ns);
+        // Use Api::namespaced directly instead of state.secrets_api() so we
+        // bypass the namespace allowlist check — the token namespace (e.g.
+        // "deckwatch") may not be in the allowed set.
+        let secrets_api: Api<Secret> = Api::namespaced(state.kube_client.clone(), secret_ns);
         match secrets_api.get(&config.token_secret).await {
             Ok(secret) => secret
                 .data
@@ -237,6 +249,7 @@ async fn check_and_build(
             started_at: Set(Some(now)),
             completed_at: Set(None),
             error_message: Set(None),
+            build_log: Set(None),
             created_at: Set(now),
         };
         if let Err(e) = builds::Entity::insert(build_row).exec(&state.db).await {
@@ -568,6 +581,11 @@ async fn monitor_builds(state: &AppState) -> anyhow::Result<()> {
 
         let now = now_utc();
 
+        // Capture the build pod's logs BEFORE deleting the job. The pod
+        // will be garbage-collected along with the Job, so this is our
+        // only window to persist them.
+        let build_log = capture_build_log(state, ns, job_name).await;
+
         if succeeded > 0 {
             let oci_repo = &config.oci_repository;
             let commit_sha = config.last_commit_sha.as_deref().unwrap_or("");
@@ -613,7 +631,7 @@ async fn monitor_builds(state: &AppState) -> anyhow::Result<()> {
             metrics::record_gitops_build(ns, "success");
 
             // Update the builds DB row.
-            update_build_status(&state.db, job_name, "succeeded", None).await;
+            update_build_status(&state.db, job_name, "succeeded", None, build_log).await;
         } else {
             tracing::warn!(deployment = %dep_name, "build failed");
 
@@ -633,6 +651,7 @@ async fn monitor_builds(state: &AppState) -> anyhow::Result<()> {
                 job_name,
                 "failed",
                 Some("Kaniko build job failed"),
+                build_log,
             )
             .await;
         }
@@ -675,6 +694,66 @@ where
     Ok(())
 }
 
+/// Maximum number of bytes to store for a build log. Logs larger than this
+/// are truncated to the last `MAX_BUILD_LOG_BYTES` bytes so the most recent
+/// (and usually most relevant) output is preserved.
+const MAX_BUILD_LOG_BYTES: usize = 64 * 1024;
+
+/// Capture build pod logs for the given job. Returns `None` (with a warning)
+/// if the pod or its logs cannot be retrieved — log capture must never block
+/// the cleanup path.
+async fn capture_build_log(state: &AppState, ns: &str, job_name: &str) -> Option<String> {
+    let pods_api = match state.pods_api(ns) {
+        Ok(api) => api,
+        Err(e) => {
+            tracing::warn!(error = %e, job_name, "failed to get pods API for build log capture");
+            return None;
+        }
+    };
+
+    let lp = ListParams::default().labels(&format!("job-name={job_name}"));
+    let pod_list = match pods_api.list(&lp).await {
+        Ok(list) => list,
+        Err(e) => {
+            tracing::warn!(error = %e, job_name, "failed to list pods for build log capture");
+            return None;
+        }
+    };
+
+    let pod_name = pod_list
+        .items
+        .first()
+        .and_then(|p| p.metadata.name.as_deref())?;
+
+    let log_params = LogParams {
+        timestamps: true,
+        ..Default::default()
+    };
+
+    match pods_api.logs(pod_name, &log_params).await {
+        Ok(logs) => {
+            if logs.len() > MAX_BUILD_LOG_BYTES {
+                // Keep the tail — the end of the log is usually the most
+                // informative (error messages, final build steps).
+                let truncated = &logs[logs.len() - MAX_BUILD_LOG_BYTES..];
+                // Find the first newline so we don't start mid-line.
+                let start = truncated.find('\n').map(|i| i + 1).unwrap_or(0);
+                Some(format!(
+                    "[truncated — showing last ~{}KB]\n{}",
+                    MAX_BUILD_LOG_BYTES / 1024,
+                    &truncated[start..]
+                ))
+            } else {
+                Some(logs)
+            }
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, job_name, pod_name, "failed to fetch build pod logs");
+            None
+        }
+    }
+}
+
 /// Update a build row in the database by job name. Fire-and-forget — logs a
 /// warning on failure so the watcher loop is not interrupted.
 async fn update_build_status(
@@ -682,6 +761,7 @@ async fn update_build_status(
     job_name: &str,
     status: &str,
     error_message: Option<&str>,
+    build_log: Option<String>,
 ) {
     use sea_orm::QueryFilter;
 
@@ -706,6 +786,7 @@ async fn update_build_status(
     active.status = Set(status.to_string());
     active.completed_at = Set(Some(now_utc));
     active.error_message = Set(error_message.map(|s| s.to_string()));
+    active.build_log = Set(build_log);
 
     if let Err(e) = active.update(db).await {
         tracing::warn!(error = %e, job_name, "failed to update build row in database");
