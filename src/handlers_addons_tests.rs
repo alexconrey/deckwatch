@@ -351,3 +351,24 @@ fn inject_then_remove_is_a_round_trip() {
     assert_eq!(env[0].name, "USER_VAR");
     assert_eq!(env[0].value.as_deref(), Some("keep"));
 }
+
+// ---- attach request storage_class ----
+
+#[test]
+fn attach_request_deserializes_with_storage_class() {
+    let json = serde_json::json!({
+        "storage": "5Gi",
+        "storage_class": "gp3"
+    });
+    let req: AttachAddonRequest = serde_json::from_value(json).unwrap();
+    assert_eq!(req.storage.as_deref(), Some("5Gi"));
+    assert_eq!(req.storage_class.as_deref(), Some("gp3"));
+}
+
+#[test]
+fn attach_request_deserializes_without_storage_class() {
+    let json = serde_json::json!({});
+    let req: AttachAddonRequest = serde_json::from_value(json).unwrap();
+    assert!(req.storage_class.is_none());
+    assert!(req.storage.is_none());
+}
