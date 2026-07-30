@@ -109,7 +109,16 @@ pub fn build_router(
             get(pods::list_for_deployment),
         )
         .route("/api/ingressclasses", get(ingresses::list_classes))
-        .route("/api/storageclasses", get(storageclasses::list))
+        .route(
+            "/api/storageclasses",
+            get(storageclasses::list).post(storageclasses::create),
+        )
+        .route(
+            "/api/storageclasses/{name}",
+            get(storageclasses::get)
+                .put(storageclasses::update)
+                .delete(storageclasses::delete),
+        )
         .route(
             "/api/namespaces/{ns}/ingresses",
             get(ingresses::list).post(ingresses::create),
