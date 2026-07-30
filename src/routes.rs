@@ -12,10 +12,10 @@ use crate::auth::{self, AuthConfig};
 use crate::handlers::registry::RegistryStore;
 use crate::handlers::{
     addons, admission, ai_fix, applications, autoscaling, configmaps_ui, cronjobs, deployments,
-    deployments_ux, diagnostics, docs, events, exec, git, gitops, health, ingresses, license, logs,
-    mcp, monitoring, namespaces, nodes, pods, portforward, prometheus_query, promote, registry,
-    registry_ui, resource_metrics, secrets, settings, storageclasses, templates, tracing_handler,
-    webhooks,
+    deployments_ux, diagnostics, docs, events, exec, git, gitops, health, ingressclasses,
+    ingresses, license, logs, mcp, monitoring, namespaces, nodes, pods, portforward,
+    prometheus_query, promote, registry, registry_ui, resource_metrics, secrets, settings,
+    storageclasses, templates, tracing_handler, webhooks,
 };
 use crate::metrics;
 use crate::state::AppState;
@@ -108,7 +108,16 @@ pub fn build_router(
             "/api/namespaces/{ns}/deployments/{name}/pods",
             get(pods::list_for_deployment),
         )
-        .route("/api/ingressclasses", get(ingresses::list_classes))
+        .route(
+            "/api/ingressclasses",
+            get(ingressclasses::list).post(ingressclasses::create),
+        )
+        .route(
+            "/api/ingressclasses/{name}",
+            get(ingressclasses::get)
+                .put(ingressclasses::update)
+                .delete(ingressclasses::delete),
+        )
         .route(
             "/api/ingress-templates",
             get(settings::list_ingress_templates),
