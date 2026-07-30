@@ -69,8 +69,6 @@ pub struct AttachAddonRequest {
     pub resource_requests: Option<ResourceSpec>,
     #[serde(default)]
     pub storage: Option<String>,
-    #[serde(default)]
-    pub storage_class: Option<String>,
 }
 
 // PATCH body for editing an already-attached addon. All fields are optional;
@@ -379,14 +377,6 @@ pub async fn attach(
         let pvc_name = format!("{name}-{container_name}-data");
         let storage_size = overrides.storage.as_deref().unwrap_or("1Gi").to_string();
 
-        let storage_class_name = match overrides.storage_class.clone() {
-            Some(sc) => Some(sc),
-            None => {
-                let settings = crate::handlers::settings::load_settings_from_db(&state).await;
-                settings.default_storage_class
-            }
-        };
-
         let pvc = PersistentVolumeClaim {
             metadata: ObjectMeta {
                 name: Some(pvc_name.clone()),
@@ -395,7 +385,6 @@ pub async fn attach(
             },
             spec: Some(PersistentVolumeClaimSpec {
                 access_modes: Some(vec!["ReadWriteOnce".to_string()]),
-                storage_class_name,
                 resources: Some(k8s_openapi::api::core::v1::VolumeResourceRequirements {
                     requests: Some({
                         let mut m = BTreeMap::new();

@@ -2,12 +2,9 @@
 import { computed, onMounted, ref } from "vue";
 import { addonsApi } from "@/api/addons";
 import { deploymentsApi } from "@/api/deployments";
-import { settingsApi } from "@/api/settings";
-import { storageclassesApi } from "@/api/storageclasses";
 import type {
   AddonDefinition,
   ContainerStatusSummary,
-  StorageClassSummary,
   UpdateAddonRequest,
 } from "@/types/api";
 import ConfirmDialog from "@/components/common/ConfirmDialog.vue";
@@ -37,9 +34,6 @@ const attaching = ref<string | null>(null);
 const editing = ref<AttachedAddon | null>(null);
 const saving = ref(false);
 
-const storageClasses = ref<StorageClassSummary[]>([]);
-const selectedStorageClass = ref<string>("");
-
 const ADDON_ANNOTATION_PREFIX = "deckwatch.addon/";
 // Backend records the env-var names it injected into the primary container
 // for each addon under `deckwatch.addon-env/<container>` as a comma-separated
@@ -53,17 +47,6 @@ const loadCatalog = async () => {
   } catch (e) {
     error.value = e instanceof Error ? e.message : "Failed to load addon catalog";
   }
-};
-
-const loadStorageClasses = async () => {
-  try {
-    const [scRes, settings] = await Promise.all([
-      storageclassesApi.list(),
-      settingsApi.get(),
-    ]);
-    storageClasses.value = scRes.storage_classes;
-    selectedStorageClass.value = settings.default_storage_class ?? "";
-  } catch { /* silent */ }
 };
 
 const loadAttached = async () => {
@@ -87,7 +70,7 @@ const loadAttached = async () => {
 };
 
 onMounted(async () => {
-  await Promise.all([loadCatalog(), loadAttached(), loadStorageClasses()]);
+  await Promise.all([loadCatalog(), loadAttached()]);
 });
 
 const attachedIds = computed(() => new Set(attached.value.map((a) => a.addonId)));
@@ -96,11 +79,7 @@ const handleAttach = async (addon: AddonDefinition) => {
   attaching.value = addon.id;
   error.value = null;
   try {
-    const body: Record<string, unknown> = {};
-    if (addon.id === "postgres" && selectedStorageClass.value) {
-      body.storage_class = selectedStorageClass.value;
-    }
-    await addonsApi.attach(props.namespace, props.deploymentName, addon.id, body);
+    await addonsApi.attach(props.namespace, props.deploymentName, addon.id);
     await loadAttached();
     emit("changed");
     showCatalog.value = false;
@@ -226,23 +205,6 @@ const ENV_TOOLTIP =
         <v-card-text>
           <v-list>
             <v-list-item v-for="addon in catalog" :key="addon.id" :title="addon.name" :subtitle="addon.description">
-              <template v-if="addon.id === 'postgres' && storageClasses.length > 0 && !attachedIds.has(addon.id)" #default>
-                <v-select
-                  v-model="selectedStorageClass"
-                  :items="[
-                    { title: 'None (cluster default)', value: '' },
-                    ...storageClasses.map((sc) => ({ title: sc.name, value: sc.name })),
-                  ]"
-                  item-title="title"
-                  item-value="value"
-                  label="Storage Class"
-                  variant="outlined"
-                  density="compact"
-                  hide-details
-                  class="mt-2"
-                  style="max-width: 320px"
-                />
-              </template>
               <template #append>
                 <v-btn
                   size="small" color="primary" variant="flat"

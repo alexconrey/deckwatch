@@ -14,8 +14,7 @@ use crate::handlers::{
     addons, admission, ai_fix, applications, autoscaling, configmaps_ui, cronjobs, deployments,
     deployments_ux, diagnostics, docs, events, exec, git, gitops, health, ingresses, license, logs,
     mcp, monitoring, namespaces, nodes, pods, portforward, prometheus_query, promote, registry,
-    registry_ui, resource_metrics, secrets, settings, storageclasses, templates, tracing_handler,
-    webhooks,
+    registry_ui, resource_metrics, secrets, settings, templates, tracing_handler, webhooks,
 };
 use crate::metrics;
 use crate::state::AppState;
@@ -109,7 +108,6 @@ pub fn build_router(
             get(pods::list_for_deployment),
         )
         .route("/api/ingressclasses", get(ingresses::list_classes))
-        .route("/api/storageclasses", get(storageclasses::list))
         .route(
             "/api/namespaces/{ns}/ingresses",
             get(ingresses::list).post(ingresses::create),

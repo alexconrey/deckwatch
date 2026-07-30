@@ -33,7 +33,6 @@ pub mod resource_metrics;
 pub mod s3_backend;
 pub mod secrets;
 pub mod settings;
-pub mod storageclasses;
 pub mod templates;
 pub mod tracing_handler;
 pub mod webhooks;

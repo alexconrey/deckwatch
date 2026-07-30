@@ -5,7 +5,6 @@ use k8s_openapi::api::core::v1::{
     ConfigMap, Event, Namespace, Node, PersistentVolumeClaim, Pod, Secret, Service,
 };
 use k8s_openapi::api::networking::v1::{Ingress, IngressClass};
-use k8s_openapi::api::storage::v1::StorageClass;
 use kube::api::{ApiResource, DynamicObject, GroupVersionKind};
 use kube::discovery;
 use kube::Api;
@@ -137,10 +136,6 @@ impl AppState {
     }
 
     pub fn ingressclasses_api(&self) -> Api<IngressClass> {
-        Api::all(self.kube_client.clone())
-    }
-
-    pub fn storageclasses_api(&self) -> Api<StorageClass> {
         Api::all(self.kube_client.clone())
     }
 }
