@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use axum::extract::State;
+use axum::extract::{Path, State};
 use axum::Json;
 use k8s_openapi::api::core::v1::ConfigMap;
 use sea_orm::entity::prelude::*;
@@ -225,15 +225,13 @@ fn default_registry_type() -> String {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct GitTokenSecret {
-    /// Display name shown in the dropdown.
     pub name: String,
-    /// Kubernetes Secret holding a `token` data key. The GitOps poller and
-    /// Kaniko job both read this at build time.
+    #[serde(default)]
     pub secret_name: String,
-    /// Namespace the Secret lives in. Usually the same as the deployment,
-    /// but split out so a single "shared" token in one namespace can be
-    /// referenced from many.
+    #[serde(default)]
     pub namespace: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub encrypted_token: Option<String>,
 }
 
 /// Distributed-tracing consumer settings. Written by the operator, read by
@@ -627,6 +625,108 @@ pub async fn test_notification(
         .await
         .map_err(|e| AppError::BadRequest(format!("test notification failed: {e}")))?;
     Ok(Json(serde_json::json!({"status": "sent"})))
+}
+
+// ---- Git token secret management ----
+
+#[derive(Debug, Deserialize)]
+pub struct GitTokenSecretRequest {
+    pub name: String,
+    #[serde(default)]
+    pub secret_name: Option<String>,
+    pub token: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct GitTokenSecretResponse {
+    pub name: String,
+    pub secret_name: String,
+    pub namespace: String,
+}
+
+pub async fn put_git_token_secret(
+    State(state): State<AppState>,
+    Json(req): Json<GitTokenSecretRequest>,
+) -> Result<Json<GitTokenSecretResponse>, AppError> {
+    if req.name.is_empty() {
+        return Err(AppError::BadRequest("display name is required".to_string()));
+    }
+    if req.token.is_empty() {
+        return Err(AppError::BadRequest("token is required".to_string()));
+    }
+
+    let encrypted = crate::crypto::encrypt(&state.encryption_key, &req.token)
+        .map_err(|e| AppError::BadRequest(format!("encryption failed: {e}")))?;
+
+    let mut settings = load_settings_from_db(&state).await;
+    if let Some(existing) = settings
+        .git_token_secrets
+        .iter_mut()
+        .find(|e| e.name == req.name)
+    {
+        existing.encrypted_token = Some(encrypted);
+    } else {
+        settings.git_token_secrets.push(GitTokenSecret {
+            name: req.name.clone(),
+            secret_name: req.secret_name.unwrap_or_default(),
+            namespace: String::new(),
+            encrypted_token: Some(encrypted),
+        });
+    }
+    upsert_settings_to_db(&state.db, &settings)
+        .await
+        .map_err(|e| AppError::BadRequest(format!("failed to save settings: {e}")))?;
+
+    if let Err(e) = crate::audit::log_action(
+        &state.db,
+        "create",
+        "git-token",
+        &req.name,
+        "",
+        &format!("created/updated git token '{}'", req.name),
+    )
+    .await
+    {
+        tracing::warn!(error = %e, "failed to write audit log for git token");
+    }
+
+    Ok(Json(GitTokenSecretResponse {
+        name: req.name,
+        secret_name: String::new(),
+        namespace: String::new(),
+    }))
+}
+
+pub async fn delete_git_token_secret(
+    State(state): State<AppState>,
+    Path(token_name): Path<String>,
+) -> Result<Json<serde_json::Value>, AppError> {
+    let mut settings = load_settings_from_db(&state).await;
+    let before = settings.git_token_secrets.len();
+    settings.git_token_secrets.retain(|e| e.name != token_name);
+    if settings.git_token_secrets.len() == before {
+        return Err(AppError::NotFound(format!(
+            "git token '{token_name}' not found"
+        )));
+    }
+    upsert_settings_to_db(&state.db, &settings)
+        .await
+        .map_err(|e| AppError::BadRequest(format!("failed to save settings: {e}")))?;
+
+    if let Err(e) = crate::audit::log_action(
+        &state.db,
+        "delete",
+        "git-token",
+        &token_name,
+        "",
+        &format!("deleted git token '{token_name}'"),
+    )
+    .await
+    {
+        tracing::warn!(error = %e, "failed to write audit log for git token secret deletion");
+    }
+
+    Ok(Json(serde_json::json!({"status": "deleted"})))
 }
 
 #[cfg(test)]

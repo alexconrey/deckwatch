@@ -323,6 +323,15 @@ pub fn build_router(
             "/api/namespaces/{ns}/pods/{pod_name}/exec",
             get(exec::exec_ws),
         )
+        // Git token secret management (K8s Secret + settings pointer)
+        .route(
+            "/api/git-token-secrets",
+            axum::routing::put(settings::put_git_token_secret),
+        )
+        .route(
+            "/api/git-token-secrets/{name}",
+            axum::routing::delete(settings::delete_git_token_secret),
+        )
         // Encrypted credential management (API keys stored in DB)
         .route("/api/settings/credentials", post(settings::set_credentials))
         // Notifications
