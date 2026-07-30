@@ -4,6 +4,7 @@ import { gitopsApi } from "@/api/gitops";
 import { diagnosticsApi } from "@/api/diagnostics";
 import { ApiError } from "@/api/client";
 import { usePolling } from "@/composables/usePolling";
+import { deepPatch, patchArray } from "@/utils/deepPatch";
 import type {
   GitOpsStatus,
   GitOpsConfigRequest,
@@ -90,10 +91,15 @@ const closeLogsDialog = () => {
 
 const fetchStatus = async () => {
   try {
-    status.value = await gitopsApi.getConfig(
+    const newData = await gitopsApi.getConfig(
       props.namespace,
       props.deploymentName,
     );
+    if (status.value) {
+      deepPatch(status.value, newData);
+    } else {
+      status.value = newData;
+    }
   } catch (e) {
     error.value =
       e instanceof Error ? e.message : "Failed to fetch gitops status";
@@ -106,7 +112,11 @@ const fetchBuilds = async () => {
       props.namespace,
       props.deploymentName,
     );
-    builds.value = res.builds;
+    if (builds.value.length === 0) {
+      builds.value = res.builds;
+    } else {
+      patchArray(builds.value, res.builds, "job_name");
+    }
   } catch {
     /* ignore */
   }

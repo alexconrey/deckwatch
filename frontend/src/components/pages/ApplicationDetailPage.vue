@@ -3,6 +3,7 @@ import { computed, ref, watch } from "vue";
 import { useRouter } from "vue-router";
 import { applicationsApi } from "@/api/applications";
 import { usePolling } from "@/composables/usePolling";
+import { deepPatch } from "@/utils/deepPatch";
 import { usePodMetrics } from "@/composables/useResourceMetrics";
 import type {
   ApplicationDetail,
@@ -64,7 +65,12 @@ const editGit = ref<ApplicationGitConfig>({
 
 const fetchDetail = async () => {
   try {
-    detail.value = await applicationsApi.get(props.namespace, props.name);
+    const newData = await applicationsApi.get(props.namespace, props.name);
+    if (detail.value) {
+      deepPatch(detail.value, newData);
+    } else {
+      detail.value = newData;
+    }
     loading.value = false;
   } catch (e) {
     error.value =

@@ -3,6 +3,7 @@ import { ref } from "vue";
 import { useRouter } from "vue-router";
 import { podsApi } from "@/api/pods";
 import { usePolling } from "@/composables/usePolling";
+import { deepPatch } from "@/utils/deepPatch";
 import type { PodSummary } from "@/types/api";
 import PodStatusIcon from "@/components/views/pod/PodStatusIcon.vue";
 import { formatAge } from "@/utils/format";
@@ -19,7 +20,12 @@ const error = ref<string | null>(null);
 
 const fetchPod = async () => {
   try {
-    pod.value = await podsApi.get(props.namespace, props.podName);
+    const newData = await podsApi.get(props.namespace, props.podName);
+    if (pod.value) {
+      deepPatch(pod.value, newData);
+    } else {
+      pod.value = newData;
+    }
     loading.value = false;
   } catch (e) {
     error.value = e instanceof Error ? e.message : "Failed to fetch pod";

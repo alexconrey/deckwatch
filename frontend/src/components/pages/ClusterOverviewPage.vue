@@ -3,6 +3,7 @@ import { computed, ref } from "vue";
 import { usePolling } from "@/composables/usePolling";
 import { nodesApi } from "@/api/nodes";
 import { useNodeMetrics } from "@/composables/useResourceMetrics";
+import { patchArray } from "@/utils/deepPatch";
 import EventsFeed from "@/components/common/EventsFeed.vue";
 import MetricSparkline from "@/components/common/MetricSparkline.vue";
 import type { NodeSummary } from "@/types/api";
@@ -18,7 +19,11 @@ const refresh = async () => {
   error.value = null;
   try {
     const response = await nodesApi.list();
-    nodes.value = response.nodes;
+    if (nodes.value.length === 0) {
+      nodes.value = response.nodes;
+    } else {
+      patchArray(nodes.value, response.nodes);
+    }
   } catch (e) {
     error.value = e instanceof Error ? e.message : "Failed to fetch nodes";
   } finally {
