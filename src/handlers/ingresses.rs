@@ -16,6 +16,7 @@ use serde::Deserialize;
 
 use crate::audit;
 use crate::error::AppError;
+use crate::handlers::settings::load_settings_from_db;
 use crate::kube_ext::{ingress_detail, ingress_summary, IngressDetail, IngressSummary};
 use crate::metrics::K8sTimer;
 use crate::state::AppState;
@@ -33,6 +34,7 @@ pub struct CreateIngressRequest {
     pub ingress_class: Option<String>,
     pub annotations: Option<BTreeMap<String, String>>,
     pub tls: Option<Vec<TlsInput>>,
+    pub template: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -89,6 +91,35 @@ pub async fn create(
         ));
     }
 
+    let settings = load_settings_from_db(&state).await;
+    let resolved_template = if let Some(ref tpl_name) = req.template {
+        settings
+            .ingress_templates
+            .iter()
+            .find(|t| t.name == *tpl_name)
+    } else {
+        settings.ingress_templates.iter().find(|t| t.is_default)
+    };
+
+    let effective_class = req
+        .ingress_class
+        .clone()
+        .or_else(|| resolved_template.and_then(|t| t.ingress_class.clone()));
+
+    let effective_annotations = {
+        let mut merged = resolved_template
+            .map(|t| t.annotations.clone())
+            .unwrap_or_default();
+        if let Some(ref req_annots) = req.annotations {
+            merged.extend(req_annots.iter().map(|(k, v)| (k.clone(), v.clone())));
+        }
+        if merged.is_empty() {
+            None
+        } else {
+            Some(merged)
+        }
+    };
+
     let svc_api = state.services_api(&ns)?;
     for p in &req.paths {
         ensure_service(&svc_api, &p.service_name, p.service_port).await?;
@@ -141,11 +172,11 @@ pub async fn create(
             name: Some(req.name.clone()),
             namespace: Some(ns.clone()),
             labels: Some(labels),
-            annotations: req.annotations,
+            annotations: effective_annotations,
             ..Default::default()
         },
         spec: Some(IngressSpec {
-            ingress_class_name: req.ingress_class,
+            ingress_class_name: effective_class,
             rules: Some(rules),
             tls,
             ..Default::default()

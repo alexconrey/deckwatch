@@ -110,6 +110,10 @@ pub fn build_router(
         )
         .route("/api/ingressclasses", get(ingresses::list_classes))
         .route(
+            "/api/ingress-templates",
+            get(settings::list_ingress_templates),
+        )
+        .route(
             "/api/storageclasses",
             get(storageclasses::list).post(storageclasses::create),
         )

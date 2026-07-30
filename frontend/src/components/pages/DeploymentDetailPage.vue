@@ -2,9 +2,10 @@
 import { ref, computed, watch } from "vue";
 import { useRouter } from "vue-router";
 import { deploymentsApi } from "@/api/deployments";
-import { ingressesApi } from "@/api/ingresses";
+import { ingressesApi, ingressTemplatesApi } from "@/api/ingresses";
 import { ingressClassesApi } from "@/api/ingresses";
 import type { IngressClassInfo } from "@/api/ingresses";
+import type { IngressTemplate } from "@/types/api";
 import { autoscalingApi } from "@/api/autoscaling";
 import { usePolling } from "@/composables/usePolling";
 import type {
@@ -148,6 +149,9 @@ const editingIngressName = ref<string | null>(null);
 const deleteIngressName = ref<string | null>(null);
 const ingressClasses = ref<IngressClassInfo[]>([]);
 const ingressClassNames = ref<string[]>([]);
+const ingressTemplates = ref<IngressTemplate[]>([]);
+const selectedIngressTemplate = ref<string | null>(null);
+const ingressAnnotations = ref<{ key: string; value: string }[]>([]);
 const ingressForm = ref({
   name: "",
   host: "",
@@ -166,6 +170,40 @@ const fetchIngressClasses = async () => {
     // Non-critical; fall back to manual entry via combobox
   }
 };
+
+const fetchIngressTemplates = async () => {
+  try {
+    ingressTemplates.value = await ingressTemplatesApi.list();
+  } catch {
+    ingressTemplates.value = [];
+  }
+};
+
+const ingressTemplateItems = computed(() => {
+  const items: { title: string; value: string | null }[] = [
+    { title: "None", value: null },
+  ];
+  for (const t of ingressTemplates.value) {
+    items.push({ title: t.name, value: t.name });
+  }
+  return items;
+});
+
+function applyIngressTemplate(templateName: string | null) {
+  selectedIngressTemplate.value = templateName;
+  if (!templateName) {
+    ingressAnnotations.value = [];
+    return;
+  }
+  const tpl = ingressTemplates.value.find((t) => t.name === templateName);
+  if (!tpl) return;
+  if (tpl.ingress_class) {
+    ingressForm.value.ingressClass = tpl.ingress_class;
+  }
+  ingressAnnotations.value = Object.entries(tpl.annotations).map(
+    ([key, value]) => ({ key, value }),
+  );
+}
 
 // Derive the first container port from the deployment's probe config or
 // fall back to the default 80. The deployment detail doesn't expose raw
@@ -506,7 +544,7 @@ const handleSidecarChanged = async (updated?: DeploymentDetailResponse) => {
 
 const openCreateIngress = async () => {
   editingIngressName.value = null;
-  await fetchIngressClasses();
+  await Promise.all([fetchIngressClasses(), fetchIngressTemplates()]);
   const defaultClass =
     ingressClasses.value.find((c) => c.is_default)?.name ?? "";
   ingressForm.value = {
@@ -517,13 +555,20 @@ const openCreateIngress = async () => {
     port: firstContainerPort.value,
     ingressClass: defaultClass,
   };
+  const defaultTemplate = ingressTemplates.value.find((t) => t.is_default);
+  if (defaultTemplate) {
+    applyIngressTemplate(defaultTemplate.name);
+  } else {
+    selectedIngressTemplate.value = null;
+    ingressAnnotations.value = [];
+  }
   showIngressDialog.value = true;
 };
 
 const openEditIngress = async (ingressName: string) => {
   actionLoading.value = true;
   try {
-    await fetchIngressClasses();
+    await Promise.all([fetchIngressClasses(), fetchIngressTemplates()]);
     const ing = await ingressesApi.get(props.namespace, ingressName);
     const firstRule = ing.rules[0];
     const firstPath = firstRule?.paths[0];
@@ -536,6 +581,10 @@ const openEditIngress = async (ingressName: string) => {
       port: firstPath?.service_port ?? firstContainerPort.value,
       ingressClass: ing.ingress_class ?? "",
     };
+    selectedIngressTemplate.value = null;
+    ingressAnnotations.value = Object.entries(ing.annotations ?? {}).map(
+      ([key, value]) => ({ key, value }),
+    );
     showIngressDialog.value = true;
   } catch (e) {
     error.value =
@@ -547,6 +596,10 @@ const openEditIngress = async (ingressName: string) => {
 
 const handleSaveIngress = async () => {
   actionLoading.value = true;
+  const annotations: Record<string, string> = {};
+  for (const row of ingressAnnotations.value) {
+    if (row.key.trim()) annotations[row.key.trim()] = row.value;
+  }
   const payload = {
     name: ingressForm.value.name,
     host: ingressForm.value.host || undefined,
@@ -559,6 +612,8 @@ const handleSaveIngress = async () => {
       },
     ],
     ingress_class: ingressForm.value.ingressClass || undefined,
+    annotations: Object.keys(annotations).length > 0 ? annotations : undefined,
+    template: selectedIngressTemplate.value ?? undefined,
   };
   try {
     if (editingIngressName.value) {
@@ -1194,12 +1249,25 @@ const handleDeleteIngress = async () => {
     </v-dialog>
 
     <!-- Ingress Create/Edit Dialog -->
-    <v-dialog v-model="showIngressDialog" max-width="520">
+    <v-dialog v-model="showIngressDialog" max-width="640">
       <v-card>
         <v-card-title>
           {{ editingIngressName ? "Edit Ingress" : "Add Ingress" }}
         </v-card-title>
         <v-card-text>
+          <v-select
+            v-if="ingressTemplates.length > 0"
+            :model-value="selectedIngressTemplate"
+            :items="ingressTemplateItems"
+            item-title="title"
+            item-value="value"
+            label="Template"
+            variant="outlined"
+            density="comfortable"
+            class="mb-3"
+            @update:model-value="applyIngressTemplate"
+          />
+
           <v-text-field
             v-model="ingressForm.name"
             label="Ingress Name"
@@ -1240,7 +1308,56 @@ const handleDeleteIngress = async () => {
             label="Ingress Class"
             placeholder="Select or type a class"
             clearable
+            class="mb-3"
           />
+
+          <div class="d-flex align-center mb-2">
+            <span class="text-subtitle-2">Annotations</span>
+            <v-spacer />
+            <v-btn
+              size="x-small"
+              variant="tonal"
+              color="primary"
+              prepend-icon="mdi-plus"
+              @click="ingressAnnotations.push({ key: '', value: '' })"
+            >
+              Add
+            </v-btn>
+          </div>
+          <v-row
+            v-for="(row, idx) in ingressAnnotations"
+            :key="`ing-ann-${idx}`"
+            dense
+            align="center"
+          >
+            <v-col cols="5">
+              <v-text-field
+                v-model="row.key"
+                label="Key"
+                variant="outlined"
+                density="compact"
+                hide-details
+              />
+            </v-col>
+            <v-col cols="5">
+              <v-text-field
+                v-model="row.value"
+                label="Value"
+                variant="outlined"
+                density="compact"
+                hide-details
+              />
+            </v-col>
+            <v-col cols="2" class="text-right">
+              <v-btn
+                icon="mdi-delete"
+                variant="text"
+                color="error"
+                size="x-small"
+                @click="ingressAnnotations.splice(idx, 1)"
+              />
+            </v-col>
+          </v-row>
         </v-card-text>
         <v-card-actions>
           <v-spacer />

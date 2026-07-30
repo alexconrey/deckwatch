@@ -3,6 +3,7 @@ import type {
   CreateIngressRequest,
   IngressDetail,
   IngressListResponse,
+  IngressTemplate,
 } from "@/types/api";
 
 export interface IngressClassInfo {
@@ -17,6 +18,11 @@ export interface IngressClassListResponse {
 export const ingressClassesApi = {
   list: () =>
     apiFetch<IngressClassListResponse>("/ingressclasses"),
+};
+
+export const ingressTemplatesApi = {
+  list: () =>
+    apiFetch<IngressTemplate[]>("/ingress-templates"),
 };
 
 export const ingressesApi = {
