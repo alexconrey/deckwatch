@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from "vue";
 import { settingsApi } from "@/api/settings";
+import { storageclassesApi } from "@/api/storageclasses";
 import { templatesApi } from "@/api/templates";
 import { useAiSettings } from "@/composables/useAiSettings";
 import { useClusterAlertSettings } from "@/composables/useClusterAlertSettings";
@@ -20,6 +21,7 @@ import type {
   OciRegistry,
   OciRegistryType,
   ResourceDefaults,
+  StorageClassSummary,
   TemplateCategory,
 } from "@/types/api";
 
@@ -36,6 +38,7 @@ const NOTIFICATION_EVENTS: { value: NotificationEventType; title: string; hint: 
 
 type SectionId =
   | "general"
+  | "storage"
   | "auth"
   | "ai_providers"
   | "observability"
@@ -46,6 +49,7 @@ type SectionId =
 
 const navItems: { id: SectionId; title: string; icon: string }[] = [
   { id: "general", title: "General", icon: "mdi-tune" },
+  { id: "storage", title: "Storage", icon: "mdi-database" },
   { id: "auth", title: "Authentication", icon: "mdi-shield-account" },
   { id: "ai_providers", title: "AI Providers", icon: "mdi-robot" },
   { id: "observability", title: "Observability", icon: "mdi-chart-line" },
@@ -131,6 +135,9 @@ const anthropicKeyInput = ref("");
 const gcpSaKeyInput = ref("");
 const savingCredentials = ref(false);
 
+const storageClasses = ref<StorageClassSummary[]>([]);
+const defaultStorageClass = ref<string | null>(null);
+
 const gitRepositories = ref<GitRepository[]>([]);
 const ociRegistries = ref<OciRegistry[]>([]);
 const gitTokenSecrets = ref<GitTokenSecret[]>([]);
@@ -212,7 +219,15 @@ function applySettings(s: DeckwatchSettings) {
     anthropic_api_key: null,
     gcp_sa_key: null,
   };
+  defaultStorageClass.value = s.default_storage_class ?? null;
 }
+
+const loadStorageClasses = async () => {
+  try {
+    const res = await storageclassesApi.list();
+    storageClasses.value = res.storage_classes;
+  } catch { /* silent */ }
+};
 
 async function load() {
   loading.value = true;
@@ -221,6 +236,7 @@ async function load() {
     const [s, t] = await Promise.all([
       settingsApi.get(),
       templatesApi.list(),
+      loadStorageClasses(),
     ]);
     applySettings(s);
     applyTemplates(t.templates);
@@ -268,6 +284,7 @@ function buildPayload(): DeckwatchSettings {
     ai_claude_enabled: aiClaudeEnabled.value,
     ai_codex_enabled: aiCodexEnabled.value,
     ai_provider: aiProvider.value,
+    default_storage_class: defaultStorageClass.value || null,
   };
 }
 
@@ -785,6 +802,79 @@ onMounted(load);
             </div>
 
           </template>
+        </div>
+
+        <!-- Storage -->
+        <div v-else-if="section === 'storage'">
+          <h3 class="text-h6 mb-2">Default storage class</h3>
+          <p class="text-body-2 text-secondary mb-3">
+            When set, addons that provision persistent volumes (e.g. PostgreSQL)
+            will use this storage class instead of the cluster default. Leave as
+            "None" to let the cluster decide.
+          </p>
+
+          <v-select
+            v-model="defaultStorageClass"
+            :items="[
+              { title: 'None (cluster default)', value: '' },
+              ...storageClasses.map((sc) => ({ title: sc.name, value: sc.name })),
+            ]"
+            item-title="title"
+            item-value="value"
+            label="Default Storage Class"
+            variant="outlined"
+            density="comfortable"
+            class="mb-6"
+          />
+
+          <v-divider class="mb-6" />
+
+          <h3 class="text-h6 mb-2">Available storage classes</h3>
+          <p class="text-body-2 text-secondary mb-3">
+            Read-only list of storage classes discovered in the cluster.
+          </p>
+
+          <div v-if="storageClasses.length === 0" class="text-center py-6 text-secondary">
+            No storage classes found in the cluster.
+          </div>
+
+          <v-table v-else density="comfortable">
+            <thead>
+              <tr>
+                <th>Name</th>
+                <th>Provisioner</th>
+                <th>Reclaim Policy</th>
+                <th>Volume Binding Mode</th>
+                <th>Allow Expansion</th>
+                <th>Default</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="sc in storageClasses" :key="sc.name">
+                <td>{{ sc.name }}</td>
+                <td>{{ sc.provisioner }}</td>
+                <td>{{ sc.reclaim_policy ?? "-" }}</td>
+                <td>{{ sc.volume_binding_mode ?? "-" }}</td>
+                <td>
+                  <v-icon
+                    :icon="sc.allow_volume_expansion ? 'mdi-check-circle' : 'mdi-close-circle'"
+                    :color="sc.allow_volume_expansion ? 'success' : 'grey'"
+                    size="small"
+                  />
+                </td>
+                <td>
+                  <v-chip
+                    v-if="sc.is_default"
+                    size="x-small"
+                    color="primary"
+                    variant="tonal"
+                  >
+                    default
+                  </v-chip>
+                </td>
+              </tr>
+            </tbody>
+          </v-table>
         </div>
 
         <!-- Authentication -->
