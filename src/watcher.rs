@@ -4,9 +4,7 @@ use std::time::Instant;
 
 use k8s_openapi::api::apps::v1::Deployment;
 use k8s_openapi::api::batch::v1::{Job, JobSpec};
-use k8s_openapi::api::core::v1::{
-    Container, EnvVar, EnvVarSource, PodSpec, PodTemplateSpec, Secret, SecretKeySelector,
-};
+use k8s_openapi::api::core::v1::{Container, EnvVar, PodSpec, PodTemplateSpec, Secret};
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
 use kube::api::{ListParams, LogParams, Patch, PatchParams, PostParams};
 use kube::{Api, ResourceExt};
@@ -127,28 +125,21 @@ async fn check_and_build(
 ) -> anyhow::Result<()> {
     let repo_url = &config.repo_url;
     let branch = &config.branch;
-    let token = if !config.token_secret.is_empty() {
-        // Resolve the namespace where the token Secret actually lives from the
-        // settings entry. Fall back to the deployment namespace for backward
-        // compatibility with tokens not registered in settings.
+    let token = if let Some(encrypted) = config.encrypted_token.as_deref() {
+        // Per-app encrypted token (stored on the gitops config itself)
+        crate::crypto::decrypt(&state.encryption_key, encrypted).unwrap_or_default()
+    } else if !config.token_secret.is_empty() {
+        // Shared token from settings (looked up by name)
         let settings = crate::handlers::settings::load_settings_from_db(state).await;
         let token_entry = settings
             .git_token_secrets
             .iter()
-            .find(|t| t.secret_name == config.token_secret);
-        let secret_ns = token_entry.map(|t| t.namespace.as_str()).unwrap_or(ns);
-        // Use Api::namespaced directly instead of state.secrets_api() so we
-        // bypass the namespace allowlist check — the token namespace (e.g.
-        // "deckwatch") may not be in the allowed set.
-        let secrets_api: Api<Secret> = Api::namespaced(state.kube_client.clone(), secret_ns);
-        match secrets_api.get(&config.token_secret).await {
-            Ok(secret) => secret
-                .data
-                .as_ref()
-                .and_then(|d| d.get("token"))
-                .map(|v| String::from_utf8_lossy(&v.0).to_string())
-                .unwrap_or_default(),
-            Err(_) => String::new(),
+            .find(|t| t.name == config.token_secret || t.secret_name == config.token_secret);
+        match token_entry.and_then(|t| t.encrypted_token.as_deref()) {
+            Some(encrypted) => {
+                crate::crypto::decrypt(&state.encryption_key, encrypted).unwrap_or_default()
+            }
+            None => String::new(),
         }
     } else {
         String::new()
@@ -412,7 +403,6 @@ async fn trigger_build(
     let dockerfile = &config.dockerfile_path;
     let context = &config.docker_context;
     let oci_repo = &config.oci_repository;
-    let token_secret = &config.token_secret;
 
     // When an internal registry URL is configured, rewrite the Kaniko push
     // destination to use it (pods can reach the ClusterIP Service but the
@@ -482,7 +472,7 @@ async fn trigger_build(
                         name: "kaniko".to_string(),
                         image: Some("gcr.io/kaniko-project/executor:latest".to_string()),
                         args: Some(args),
-                        env: if token_secret.is_empty() {
+                        env: if token.is_empty() {
                             None
                         } else {
                             Some(vec![
@@ -493,14 +483,7 @@ async fn trigger_build(
                                 },
                                 EnvVar {
                                     name: "GIT_PASSWORD".to_string(),
-                                    value_from: Some(EnvVarSource {
-                                        secret_key_ref: Some(SecretKeySelector {
-                                            name: token_secret.to_string(),
-                                            key: "token".to_string(),
-                                            ..Default::default()
-                                        }),
-                                        ..Default::default()
-                                    }),
+                                    value: Some(token.to_string()),
                                     ..Default::default()
                                 },
                             ])

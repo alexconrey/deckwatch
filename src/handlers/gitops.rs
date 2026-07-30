@@ -31,6 +31,8 @@ pub struct GitOpsConfigRequest {
     pub repo_url: String,
     pub branch: Option<String>,
     pub token_secret: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token: Option<String>,
     /// Username for HTTP Basic auth when cloning private repos.
     /// Auto-detected from hostname when empty: `oauth2` for GitLab,
     /// `x-access-token` for GitHub, `x-token-auth` for Bitbucket.
@@ -163,6 +165,7 @@ pub async fn get_config(
                     token_secret: sea_orm::ActiveValue::Set(
                         get_ann(&dep, "git-token-secret").unwrap_or("").to_string(),
                     ),
+                    encrypted_token: sea_orm::ActiveValue::Set(None),
                     git_auth_user: sea_orm::ActiveValue::Set(String::new()),
                     dockerfile_path: sea_orm::ActiveValue::Set(
                         get_ann(&dep, "dockerfile-path")
@@ -337,6 +340,13 @@ pub async fn set_config(
 
     let branch = req.branch.unwrap_or_else(|| "main".to_string());
     let token_secret = req.token_secret.unwrap_or_default();
+    let encrypted_token = match &req.token {
+        Some(t) if !t.is_empty() => Some(
+            crate::crypto::encrypt(&state.encryption_key, t)
+                .map_err(|e| AppError::BadRequest(format!("encryption failed: {e}")))?,
+        ),
+        _ => None,
+    };
     let git_auth_user = req.git_auth_user.unwrap_or_default();
     let dockerfile_path = req
         .dockerfile_path
@@ -354,6 +364,9 @@ pub async fn set_config(
             active.repo_url = sea_orm::ActiveValue::Set(req.repo_url);
             active.branch = sea_orm::ActiveValue::Set(branch);
             active.token_secret = sea_orm::ActiveValue::Set(token_secret);
+            if let Some(ref et) = encrypted_token {
+                active.encrypted_token = sea_orm::ActiveValue::Set(Some(et.clone()));
+            }
             active.git_auth_user = sea_orm::ActiveValue::Set(git_auth_user.clone());
             active.dockerfile_path = sea_orm::ActiveValue::Set(dockerfile_path);
             active.docker_context = sea_orm::ActiveValue::Set(docker_context);
@@ -376,6 +389,7 @@ pub async fn set_config(
                 repo_url: sea_orm::ActiveValue::Set(req.repo_url),
                 branch: sea_orm::ActiveValue::Set(branch),
                 token_secret: sea_orm::ActiveValue::Set(token_secret),
+                encrypted_token: sea_orm::ActiveValue::Set(encrypted_token),
                 git_auth_user: sea_orm::ActiveValue::Set(git_auth_user),
                 dockerfile_path: sea_orm::ActiveValue::Set(dockerfile_path),
                 docker_context: sea_orm::ActiveValue::Set(docker_context),
@@ -572,33 +586,19 @@ pub async fn trigger_build(
     t.finish(dep.is_ok());
     let dep = dep?;
 
-    let token = if !config_row.token_secret.is_empty() {
-        // Resolve the namespace where the token Secret actually lives from the
-        // settings entry. Fall back to the deployment namespace for backward
-        // compatibility with tokens not registered in settings.
+    let token = if let Some(encrypted) = config_row.encrypted_token.as_deref() {
+        crate::crypto::decrypt(&state.encryption_key, encrypted)
+            .map_err(|e| AppError::BadRequest(format!("token decrypt failed: {e}")))?
+    } else if !config_row.token_secret.is_empty() {
         let settings = crate::handlers::settings::load_settings_from_db(&state).await;
-        let token_entry = settings
-            .git_token_secrets
-            .iter()
-            .find(|t| t.secret_name == config_row.token_secret);
-        let secret_ns = token_entry
-            .map(|t| t.namespace.as_str())
-            .unwrap_or(ns.as_str());
-        // Use Api::namespaced directly instead of state.secrets_api() so we
-        // bypass the namespace allowlist check — the token namespace (e.g.
-        // "deckwatch") may not be in the allowed set.
-        let secrets_api: kube::Api<k8s_openapi::api::core::v1::Secret> =
-            kube::Api::namespaced(state.kube_client.clone(), secret_ns);
-        let t = K8sTimer::new("secrets", "get");
-        let secret = secrets_api.get(&config_row.token_secret).await;
-        t.finish(secret.is_ok());
-        let secret = secret?;
-        secret
-            .data
-            .as_ref()
-            .and_then(|d| d.get("token"))
-            .map(|v| String::from_utf8_lossy(&v.0).to_string())
-            .unwrap_or_default()
+        let token_entry = settings.git_token_secrets.iter().find(|t| {
+            t.name == config_row.token_secret || t.secret_name == config_row.token_secret
+        });
+        match token_entry.and_then(|t| t.encrypted_token.as_deref()) {
+            Some(encrypted) => crate::crypto::decrypt(&state.encryption_key, encrypted)
+                .map_err(|e| AppError::BadRequest(format!("token decrypt failed: {e}")))?,
+            None => String::new(),
+        }
     } else {
         String::new()
     };
