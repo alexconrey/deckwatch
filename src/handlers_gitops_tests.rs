@@ -200,6 +200,7 @@ fn build_summary_serializes_all_fields() {
         started_at: Some("2025-06-01T12:00:00Z".to_string()),
         completed_at: Some("2025-06-01T12:05:00Z".to_string()),
         image_tag: "abc1234".to_string(),
+        build_log: Some("step 1 done\nstep 2 done\n".to_string()),
     };
 
     let value = serde_json::to_value(&summary).expect("serialize");
@@ -209,6 +210,7 @@ fn build_summary_serializes_all_fields() {
     assert_eq!(value["started_at"], "2025-06-01T12:00:00Z");
     assert_eq!(value["completed_at"], "2025-06-01T12:05:00Z");
     assert_eq!(value["image_tag"], "abc1234");
+    assert_eq!(value["build_log"], "step 1 done\nstep 2 done\n");
 }
 
 #[test]
@@ -220,11 +222,13 @@ fn build_summary_serializes_optional_timestamps_as_null() {
         started_at: None,
         completed_at: None,
         image_tag: "deadbee".to_string(),
+        build_log: None,
     };
 
     let value = serde_json::to_value(&summary).expect("serialize");
     assert!(value["started_at"].is_null());
     assert!(value["completed_at"].is_null());
+    assert!(value["build_log"].is_null());
 }
 
 #[test]
@@ -245,6 +249,7 @@ fn build_list_response_serializes_multiple_builds() {
                 started_at: Some("2025-01-01T00:00:00Z".to_string()),
                 completed_at: Some("2025-01-01T00:05:00Z".to_string()),
                 image_tag: "aaa".to_string(),
+                build_log: Some("done".to_string()),
             },
             BuildSummary {
                 job_name: "build-2".to_string(),
@@ -253,6 +258,7 @@ fn build_list_response_serializes_multiple_builds() {
                 started_at: Some("2025-01-02T00:00:00Z".to_string()),
                 completed_at: None,
                 image_tag: "bbb".to_string(),
+                build_log: None,
             },
         ],
     };
