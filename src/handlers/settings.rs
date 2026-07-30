@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use axum::extract::State;
 use axum::Json;
 use k8s_openapi::api::core::v1::ConfigMap;
@@ -85,6 +87,10 @@ pub struct DeckwatchSettings {
     /// never returned to the frontend.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub credentials: Option<EncryptedCredentials>,
+    /// Named annotation presets for ingress creation. Admins define templates
+    /// once (e.g. ALB annotations for EKS) and users pick one in the dialog.
+    #[serde(default)]
+    pub ingress_templates: Vec<IngressTemplate>,
 }
 
 /// Encrypted credential storage. Each field holds an AES-256-GCM ciphertext
@@ -266,6 +272,17 @@ pub struct TracingSettings {
     /// datasource query pre-filled (Tempo). Empty hides the "Open in UI" link.
     #[serde(default)]
     pub ui_url: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct IngressTemplate {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ingress_class: Option<String>,
+    #[serde(default)]
+    pub annotations: BTreeMap<String, String>,
+    #[serde(default)]
+    pub is_default: bool,
 }
 
 pub async fn get_settings(
@@ -474,6 +491,7 @@ fn default_settings(state: &AppState) -> DeckwatchSettings {
         ai_codex_enabled: true,
         ai_provider: AiProviderConfig::default(),
         credentials: None,
+        ingress_templates: Vec::new(),
     }
 }
 
@@ -582,6 +600,13 @@ pub async fn set_credentials(
     };
 
     Ok(Json(resp))
+}
+
+pub async fn list_ingress_templates(
+    State(state): State<AppState>,
+) -> Result<Json<Vec<IngressTemplate>>, AppError> {
+    let settings = load_settings_from_db(&state).await;
+    Ok(Json(settings.ingress_templates))
 }
 
 pub async fn test_notification(

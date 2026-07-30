@@ -214,10 +214,18 @@ export interface CreateIngressRequest {
   ingress_class?: string;
   annotations?: Record<string, string>;
   tls?: { hosts: string[]; secret_name?: string }[];
+  template?: string;
 }
 
 export interface IngressListResponse {
   ingresses: IngressSummary[];
+}
+
+export interface IngressTemplate {
+  name: string;
+  ingress_class: string | null;
+  annotations: Record<string, string>;
+  is_default: boolean;
 }
 
 // --- GitOps types ---
@@ -578,6 +586,7 @@ export interface DeckwatchSettings {
   tracing?: TracingSettings | null;
   credentials?: EncryptedCredentials | null;
   default_storage_class?: string | null;
+  ingress_templates?: IngressTemplate[];
 }
 
 export interface CostSettings {
