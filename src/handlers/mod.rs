@@ -15,6 +15,7 @@ pub mod git;
 pub mod git_provider;
 pub mod gitops;
 pub mod health;
+pub mod ingressclasses;
 pub mod ingresses;
 pub mod license;
 pub mod logs;

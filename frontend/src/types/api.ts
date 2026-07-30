@@ -228,6 +228,42 @@ export interface IngressTemplate {
   is_default: boolean;
 }
 
+// --- IngressClass types ---
+
+export interface IngressClassParametersRef {
+  api_group: string | null;
+  kind: string;
+  name: string;
+  namespace: string | null;
+  scope: string | null;
+}
+
+export interface IngressClassSummary {
+  name: string;
+  controller: string;
+  is_default: boolean;
+  parameters: IngressClassParametersRef | null;
+}
+
+export interface IngressClassListResponse {
+  ingress_classes: IngressClassSummary[];
+}
+
+export interface CreateIngressClassRequest {
+  name: string;
+  controller: string;
+  is_default?: boolean;
+  parameters?: CreateIngressClassParametersRef | null;
+}
+
+export interface CreateIngressClassParametersRef {
+  api_group?: string | null;
+  kind: string;
+  name: string;
+  namespace?: string | null;
+  scope?: string | null;
+}
+
 // --- GitOps types ---
 
 export interface GitOpsConfig {

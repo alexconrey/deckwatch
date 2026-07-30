@@ -4,7 +4,6 @@ use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::Json;
 use k8s_openapi::api::core::v1::{Service, ServicePort, ServiceSpec};
-use k8s_openapi::api::networking::v1::IngressClass;
 use k8s_openapi::api::networking::v1::{
     HTTPIngressPath, HTTPIngressRuleValue, Ingress, IngressBackend, IngressRule,
     IngressServiceBackend, IngressSpec, IngressTLS, ServiceBackendPort,
@@ -312,42 +311,6 @@ pub async fn delete(
     }
 
     Ok(StatusCode::NO_CONTENT)
-}
-
-#[derive(serde::Serialize)]
-pub struct IngressClassInfo {
-    pub name: String,
-    pub is_default: bool,
-}
-
-#[derive(serde::Serialize)]
-pub struct IngressClassListResponse {
-    pub classes: Vec<IngressClassInfo>,
-}
-
-pub async fn list_classes(
-    State(state): State<AppState>,
-) -> Result<Json<IngressClassListResponse>, AppError> {
-    let api: kube::Api<IngressClass> = state.ingressclasses_api();
-    let t = K8sTimer::new("ingressclasses", "list");
-    let result = api.list(&ListParams::default()).await;
-    t.finish(result.is_ok());
-    let list = result?;
-    let classes: Vec<IngressClassInfo> = list
-        .iter()
-        .filter_map(|ic| {
-            let name = ic.metadata.name.as_deref()?.to_string();
-            let is_default = ic
-                .metadata
-                .annotations
-                .as_ref()
-                .and_then(|a| a.get("ingressclass.kubernetes.io/is-default-class"))
-                .map(|v| v == "true")
-                .unwrap_or(false);
-            Some(IngressClassInfo { name, is_default })
-        })
-        .collect();
-    Ok(Json(IngressClassListResponse { classes }))
 }
 
 async fn ensure_service(

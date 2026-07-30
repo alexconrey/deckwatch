@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from "vue";
+import { ingressclassesApi } from "@/api/ingressclasses";
 import { settingsApi } from "@/api/settings";
 import { storageclassesApi } from "@/api/storageclasses";
 import { templatesApi } from "@/api/templates";
@@ -12,12 +13,14 @@ import type {
   AiProviderType,
   AuthSettings,
   CostSettings,
+  CreateIngressClassRequest,
   CreateStorageClassRequest,
   DeckwatchSettings,
   DeploymentTemplate,
   EncryptedCredentials,
   GitRepository,
   GitTokenSecret,
+  IngressClassSummary,
   IngressTemplate,
   NotificationEventType,
   NotificationSettings,
@@ -265,6 +268,113 @@ async function deleteStorageClass() {
   }
 }
 
+const ingressClasses = ref<IngressClassSummary[]>([]);
+
+const icDialogOpen = ref(false);
+const icDialogEditing = ref(false);
+const icDialogSaving = ref(false);
+const icForm = ref<CreateIngressClassRequest>({
+  name: "",
+  controller: "",
+  is_default: false,
+  parameters: null,
+});
+const icShowParameters = ref(false);
+
+const icDeleteDialogOpen = ref(false);
+const icDeleteTarget = ref("");
+const icDeleting = ref(false);
+
+const loadIngressClasses = async () => {
+  try {
+    const res = await ingressclassesApi.list();
+    ingressClasses.value = res.ingress_classes;
+  } catch { /* silent */ }
+};
+
+function openCreateIngressClass() {
+  icDialogEditing.value = false;
+  icForm.value = {
+    name: "",
+    controller: "",
+    is_default: false,
+    parameters: null,
+  };
+  icShowParameters.value = false;
+  icDialogOpen.value = true;
+}
+
+function openEditIngressClass(ic: IngressClassSummary) {
+  icDialogEditing.value = true;
+  icForm.value = {
+    name: ic.name,
+    controller: ic.controller,
+    is_default: ic.is_default,
+    parameters: ic.parameters
+      ? {
+          api_group: ic.parameters.api_group,
+          kind: ic.parameters.kind,
+          name: ic.parameters.name,
+          namespace: ic.parameters.namespace,
+          scope: ic.parameters.scope,
+        }
+      : null,
+  };
+  icShowParameters.value = !!ic.parameters;
+  icDialogOpen.value = true;
+}
+
+async function saveIngressClass() {
+  icDialogSaving.value = true;
+  try {
+    const req: CreateIngressClassRequest = {
+      ...icForm.value,
+      parameters: icShowParameters.value ? icForm.value.parameters : null,
+    };
+    if (icDialogEditing.value) {
+      await ingressclassesApi.update(req.name, req);
+    } else {
+      await ingressclassesApi.create(req);
+    }
+    icDialogOpen.value = false;
+    await loadIngressClasses();
+    snackbarMessage.value = icDialogEditing.value ? "Ingress class updated" : "Ingress class created";
+    snackbarColor.value = "success";
+    snackbar.value = true;
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : "Failed to save ingress class";
+    snackbarMessage.value = msg;
+    snackbarColor.value = "error";
+    snackbar.value = true;
+  } finally {
+    icDialogSaving.value = false;
+  }
+}
+
+function confirmDeleteIngressClass(name: string) {
+  icDeleteTarget.value = name;
+  icDeleteDialogOpen.value = true;
+}
+
+async function deleteIngressClass() {
+  icDeleting.value = true;
+  try {
+    await ingressclassesApi.delete(icDeleteTarget.value);
+    icDeleteDialogOpen.value = false;
+    await loadIngressClasses();
+    snackbarMessage.value = "Ingress class deleted";
+    snackbarColor.value = "success";
+    snackbar.value = true;
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : "Failed to delete ingress class";
+    snackbarMessage.value = msg;
+    snackbarColor.value = "error";
+    snackbar.value = true;
+  } finally {
+    icDeleting.value = false;
+  }
+}
+
 const ingressTemplates = ref<IngressTemplate[]>([]);
 
 const gitRepositories = ref<GitRepository[]>([]);
@@ -370,6 +480,7 @@ async function load() {
       settingsApi.get(),
       templatesApi.list(),
       loadStorageClasses(),
+      loadIngressClasses(),
     ]);
     applySettings(s);
     applyTemplates(t.templates);
@@ -1244,166 +1355,207 @@ onMounted(load);
         <!-- Networking -->
         <div v-else-if="section === 'networking'">
           <div class="d-flex align-center mb-2">
-            <h3 class="text-h6">Ingress templates</h3>
+            <h3 class="text-h6">Ingress classes</h3>
             <v-spacer />
             <v-btn
               size="small"
               color="primary"
               variant="tonal"
               prepend-icon="mdi-plus"
-              @click="addIngressTemplate"
+              @click="openCreateIngressClass"
             >
-              Add template
+              Create Ingress Class
             </v-btn>
           </div>
-          <p class="text-body-2 text-secondary mb-4">
-            Named annotation presets for ingress creation. Define templates
-            once (e.g. ALB annotations for EKS) and users pick one in the
-            ingress dialog. The default template is applied automatically
-            when no template is explicitly selected.
+          <p class="text-body-2 text-secondary mb-3">
+            Manage IngressClass resources in the cluster. Each class maps to a
+            specific ingress controller (e.g. ALB, nginx).
           </p>
 
-          <div
-            v-if="ingressTemplates.length === 0"
-            class="text-center py-6 text-secondary"
-          >
-            No ingress templates configured. Click "Add template" to create one.
+          <div v-if="ingressClasses.length === 0" class="text-center py-6 text-secondary">
+            No ingress classes found in the cluster.
           </div>
 
-          <v-expansion-panels v-else variant="accordion" class="mb-2">
-            <v-expansion-panel
-              v-for="(tpl, idx) in ingressTemplates"
-              :key="`itpl-${idx}`"
-            >
-              <v-expansion-panel-title>
-                <div class="d-flex align-center" style="width: 100%">
-                  <v-icon icon="mdi-lan" class="mr-3" />
-                  <div class="flex-grow-1">
-                    <div class="text-subtitle-1">{{ tpl.name || "(unnamed)" }}</div>
-                    <div class="text-caption text-secondary">
-                      {{ tpl.ingress_class || "no class" }}
-                      &middot;
-                      {{ Object.keys(tpl.annotations).length }} annotation(s)
-                    </div>
-                  </div>
+          <v-table v-else density="comfortable">
+            <thead>
+              <tr>
+                <th>Name</th>
+                <th>Controller</th>
+                <th>Default</th>
+                <th>Parameters</th>
+                <th class="text-right">Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="ic in ingressClasses" :key="ic.name">
+                <td>{{ ic.name }}</td>
+                <td>{{ ic.controller }}</td>
+                <td>
                   <v-chip
-                    v-if="tpl.is_default"
+                    v-if="ic.is_default"
                     size="x-small"
                     color="primary"
                     variant="tonal"
-                    class="mr-2"
                   >
                     default
                   </v-chip>
-                </div>
-              </v-expansion-panel-title>
-              <v-expansion-panel-text>
-                <v-row dense>
-                  <v-col cols="12" md="5">
-                    <v-text-field
-                      v-model="tpl.name"
-                      label="Template name"
-                      placeholder="alb-internet-facing"
-                      density="comfortable"
-                      :rules="[v => !!v || 'Name is required']"
-                    />
-                  </v-col>
-                  <v-col cols="12" md="5">
-                    <v-text-field
-                      v-model="tpl.ingress_class"
-                      label="Ingress class"
-                      placeholder="alb"
-                      density="comfortable"
-                    />
-                  </v-col>
-                  <v-col cols="12" md="2" class="d-flex align-center">
-                    <v-checkbox
-                      :model-value="tpl.is_default"
-                      label="Default"
-                      density="comfortable"
-                      hide-details
-                      @update:model-value="(v: boolean) => { if (v) setIngressTemplateDefault(idx); else tpl.is_default = false; }"
-                    />
-                  </v-col>
-                </v-row>
-
-                <v-divider class="my-4" />
-
-                <div class="d-flex align-center mb-2">
-                  <span class="text-subtitle-2">Annotations</span>
-                  <v-spacer />
+                </td>
+                <td>
+                  <span v-if="ic.parameters" class="text-caption">
+                    {{ ic.parameters.kind }}/{{ ic.parameters.name }}
+                  </span>
+                  <span v-else class="text-secondary">-</span>
+                </td>
+                <td class="text-right">
                   <v-btn
-                    size="x-small"
-                    variant="tonal"
-                    color="primary"
-                    prepend-icon="mdi-plus"
-                    @click="addIngressTemplateAnnotation(idx)"
-                  >
-                    Add
-                  </v-btn>
-                </div>
-
-                <div
-                  v-if="Object.keys(tpl.annotations).length === 0"
-                  class="text-body-2 text-secondary mb-3"
-                >
-                  No annotations. Click "Add" to define key-value pairs.
-                </div>
-
-                <v-row
-                  v-for="(value, key) in tpl.annotations"
-                  :key="`itpl-${idx}-ann-${key}`"
-                  dense
-                  align="center"
-                >
-                  <v-col cols="5">
-                    <v-text-field
-                      :model-value="key"
-                      label="Key"
-                      variant="outlined"
-                      density="compact"
-                      hide-details
-                      placeholder="alb.ingress.kubernetes.io/scheme"
-                      @update:model-value="(v: string) => updateIngressTemplateAnnotationKey(idx, key as string, v)"
-                    />
-                  </v-col>
-                  <v-col cols="5">
-                    <v-text-field
-                      :model-value="value"
-                      label="Value"
-                      variant="outlined"
-                      density="compact"
-                      hide-details
-                      placeholder="internet-facing"
-                      @update:model-value="(v: string) => updateIngressTemplateAnnotationValue(idx, key as string, v)"
-                    />
-                  </v-col>
-                  <v-col cols="2" class="text-right">
-                    <v-btn
-                      icon="mdi-delete"
-                      variant="text"
-                      color="error"
-                      size="x-small"
-                      @click="removeIngressTemplateAnnotation(idx, key as string)"
-                    />
-                  </v-col>
-                </v-row>
-
-                <v-divider class="my-4" />
-                <div class="d-flex justify-end">
+                    icon="mdi-pencil"
+                    variant="text"
+                    size="small"
+                    @click="openEditIngressClass(ic)"
+                  />
                   <v-btn
+                    icon="mdi-delete"
                     variant="text"
                     color="error"
                     size="small"
-                    prepend-icon="mdi-delete"
-                    @click="removeIngressTemplate(idx)"
-                  >
-                    Delete template
-                  </v-btn>
-                </div>
-              </v-expansion-panel-text>
-            </v-expansion-panel>
-          </v-expansion-panels>
+                    @click="confirmDeleteIngressClass(ic.name)"
+                  />
+                </td>
+              </tr>
+            </tbody>
+          </v-table>
+
+          <v-dialog v-model="icDialogOpen" max-width="640" persistent>
+            <v-card>
+              <v-card-title>
+                {{ icDialogEditing ? "Edit Ingress Class" : "Create Ingress Class" }}
+              </v-card-title>
+              <v-card-text>
+                <v-text-field
+                  v-model="icForm.name"
+                  label="Name"
+                  variant="outlined"
+                  density="comfortable"
+                  :disabled="icDialogEditing"
+                  :rules="[v => !!v || 'Name is required']"
+                  class="mb-2"
+                />
+                <v-text-field
+                  v-model="icForm.controller"
+                  label="Controller"
+                  placeholder="ingress.k8s.aws/alb"
+                  variant="outlined"
+                  density="comfortable"
+                  :rules="[v => !!v || 'Controller is required']"
+                  class="mb-2"
+                />
+                <v-checkbox
+                  v-model="icForm.is_default"
+                  label="Set as Default"
+                  density="comfortable"
+                  hide-details
+                  class="mb-4"
+                />
+                <v-checkbox
+                  v-model="icShowParameters"
+                  label="Configure parameters reference"
+                  density="comfortable"
+                  hide-details
+                  class="mb-4"
+                />
+                <template v-if="icShowParameters">
+                  <v-text-field
+                    :model-value="icForm.parameters?.api_group ?? ''"
+                    label="API Group"
+                    placeholder="elbv2.k8s.aws"
+                    variant="outlined"
+                    density="comfortable"
+                    class="mb-2"
+                    @update:model-value="(v: string) => {
+                      if (!icForm.parameters) icForm.parameters = { kind: '', name: '' };
+                      icForm.parameters.api_group = v || null;
+                    }"
+                  />
+                  <v-text-field
+                    :model-value="icForm.parameters?.kind ?? ''"
+                    label="Kind"
+                    placeholder="IngressClassParams"
+                    variant="outlined"
+                    density="comfortable"
+                    :rules="[v => !!v || 'Kind is required']"
+                    class="mb-2"
+                    @update:model-value="(v: string) => {
+                      if (!icForm.parameters) icForm.parameters = { kind: '', name: '' };
+                      icForm.parameters.kind = v;
+                    }"
+                  />
+                  <v-text-field
+                    :model-value="icForm.parameters?.name ?? ''"
+                    label="Name"
+                    placeholder="my-params"
+                    variant="outlined"
+                    density="comfortable"
+                    :rules="[v => !!v || 'Name is required']"
+                    class="mb-2"
+                    @update:model-value="(v: string) => {
+                      if (!icForm.parameters) icForm.parameters = { kind: '', name: '' };
+                      icForm.parameters.name = v;
+                    }"
+                  />
+                  <v-row>
+                    <v-col cols="12" md="6">
+                      <v-text-field
+                        :model-value="icForm.parameters?.namespace ?? ''"
+                        label="Namespace"
+                        placeholder="kube-system"
+                        variant="outlined"
+                        density="comfortable"
+                        @update:model-value="(v: string) => {
+                          if (!icForm.parameters) icForm.parameters = { kind: '', name: '' };
+                          icForm.parameters.namespace = v || null;
+                        }"
+                      />
+                    </v-col>
+                    <v-col cols="12" md="6">
+                      <v-select
+                        :model-value="icForm.parameters?.scope ?? 'Cluster'"
+                        :items="['Cluster', 'Namespace']"
+                        label="Scope"
+                        variant="outlined"
+                        density="comfortable"
+                        @update:model-value="(v: string) => {
+                          if (!icForm.parameters) icForm.parameters = { kind: '', name: '' };
+                          icForm.parameters.scope = v;
+                        }"
+                      />
+                    </v-col>
+                  </v-row>
+                </template>
+              </v-card-text>
+              <v-card-actions>
+                <v-spacer />
+                <v-btn variant="text" @click="icDialogOpen = false">Cancel</v-btn>
+                <v-btn
+                  color="primary"
+                  variant="flat"
+                  :loading="icDialogSaving"
+                  :disabled="!icForm.name || !icForm.controller"
+                  @click="saveIngressClass"
+                >
+                  {{ icDialogEditing ? "Update" : "Create" }}
+                </v-btn>
+              </v-card-actions>
+            </v-card>
+          </v-dialog>
+
+          <ConfirmDialog
+            v-model="icDeleteDialogOpen"
+            title="Delete Ingress Class"
+            :message="`Are you sure you want to delete ingress class '${icDeleteTarget}'? This cannot be undone.`"
+            confirm-text="Delete"
+            :loading="icDeleting"
+            @confirm="deleteIngressClass"
+          />
         </div>
 
         <!-- Authentication -->
@@ -1904,6 +2056,170 @@ onMounted(load);
                     size="small"
                     prepend-icon="mdi-delete"
                     @click="removeTemplate(idx)"
+                  >
+                    Delete template
+                  </v-btn>
+                </div>
+              </v-expansion-panel-text>
+            </v-expansion-panel>
+          </v-expansion-panels>
+
+          <v-divider class="my-6" />
+
+          <div class="d-flex align-center mb-2">
+            <h3 class="text-h6">Ingress templates</h3>
+            <v-spacer />
+            <v-btn
+              size="small"
+              color="primary"
+              variant="tonal"
+              prepend-icon="mdi-plus"
+              @click="addIngressTemplate"
+            >
+              Add template
+            </v-btn>
+          </div>
+          <p class="text-body-2 text-secondary mb-4">
+            Named annotation presets for ingress creation. Define templates
+            once (e.g. ALB annotations for EKS) and users pick one in the
+            ingress dialog. The default template is applied automatically
+            when no template is explicitly selected.
+          </p>
+
+          <div
+            v-if="ingressTemplates.length === 0"
+            class="text-center py-6 text-secondary"
+          >
+            No ingress templates configured. Click "Add template" to create one.
+          </div>
+
+          <v-expansion-panels v-else variant="accordion" class="mb-2">
+            <v-expansion-panel
+              v-for="(tpl, idx) in ingressTemplates"
+              :key="`itpl-${idx}`"
+            >
+              <v-expansion-panel-title>
+                <div class="d-flex align-center" style="width: 100%">
+                  <v-icon icon="mdi-lan" class="mr-3" />
+                  <div class="flex-grow-1">
+                    <div class="text-subtitle-1">{{ tpl.name || "(unnamed)" }}</div>
+                    <div class="text-caption text-secondary">
+                      {{ tpl.ingress_class || "no class" }}
+                      &middot;
+                      {{ Object.keys(tpl.annotations).length }} annotation(s)
+                    </div>
+                  </div>
+                  <v-chip
+                    v-if="tpl.is_default"
+                    size="x-small"
+                    color="primary"
+                    variant="tonal"
+                    class="mr-2"
+                  >
+                    default
+                  </v-chip>
+                </div>
+              </v-expansion-panel-title>
+              <v-expansion-panel-text>
+                <v-row dense>
+                  <v-col cols="12" md="5">
+                    <v-text-field
+                      v-model="tpl.name"
+                      label="Template name"
+                      placeholder="alb-internet-facing"
+                      density="comfortable"
+                      :rules="[v => !!v || 'Name is required']"
+                    />
+                  </v-col>
+                  <v-col cols="12" md="5">
+                    <v-text-field
+                      v-model="tpl.ingress_class"
+                      label="Ingress class"
+                      placeholder="alb"
+                      density="comfortable"
+                    />
+                  </v-col>
+                  <v-col cols="12" md="2" class="d-flex align-center">
+                    <v-checkbox
+                      :model-value="tpl.is_default"
+                      label="Default"
+                      density="comfortable"
+                      hide-details
+                      @update:model-value="(v: boolean) => { if (v) setIngressTemplateDefault(idx); else tpl.is_default = false; }"
+                    />
+                  </v-col>
+                </v-row>
+
+                <v-divider class="my-4" />
+
+                <div class="d-flex align-center mb-2">
+                  <span class="text-subtitle-2">Annotations</span>
+                  <v-spacer />
+                  <v-btn
+                    size="x-small"
+                    variant="tonal"
+                    color="primary"
+                    prepend-icon="mdi-plus"
+                    @click="addIngressTemplateAnnotation(idx)"
+                  >
+                    Add
+                  </v-btn>
+                </div>
+
+                <div
+                  v-if="Object.keys(tpl.annotations).length === 0"
+                  class="text-body-2 text-secondary mb-3"
+                >
+                  No annotations. Click "Add" to define key-value pairs.
+                </div>
+
+                <v-row
+                  v-for="(value, key) in tpl.annotations"
+                  :key="`itpl-${idx}-ann-${key}`"
+                  dense
+                  align="center"
+                >
+                  <v-col cols="5">
+                    <v-text-field
+                      :model-value="key"
+                      label="Key"
+                      variant="outlined"
+                      density="compact"
+                      hide-details
+                      placeholder="alb.ingress.kubernetes.io/scheme"
+                      @update:model-value="(v: string) => updateIngressTemplateAnnotationKey(idx, key as string, v)"
+                    />
+                  </v-col>
+                  <v-col cols="5">
+                    <v-text-field
+                      :model-value="value"
+                      label="Value"
+                      variant="outlined"
+                      density="compact"
+                      hide-details
+                      placeholder="internet-facing"
+                      @update:model-value="(v: string) => updateIngressTemplateAnnotationValue(idx, key as string, v)"
+                    />
+                  </v-col>
+                  <v-col cols="2" class="text-right">
+                    <v-btn
+                      icon="mdi-delete"
+                      variant="text"
+                      color="error"
+                      size="x-small"
+                      @click="removeIngressTemplateAnnotation(idx, key as string)"
+                    />
+                  </v-col>
+                </v-row>
+
+                <v-divider class="my-4" />
+                <div class="d-flex justify-end">
+                  <v-btn
+                    variant="text"
+                    color="error"
+                    size="small"
+                    prepend-icon="mdi-delete"
+                    @click="removeIngressTemplate(idx)"
                   >
                     Delete template
                   </v-btn>
