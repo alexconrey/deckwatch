@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::entities::gitops_configs;
 use crate::handlers::applications;
-use crate::handlers::{addons, gitops, templates};
+use crate::handlers::{addons, gitops, ingresses, settings, templates};
 use crate::state::AppState;
 
 // ---------------------------------------------------------------------------
@@ -169,6 +169,52 @@ fn deckwatch_tool_definitions() -> Vec<serde_json::Value> {
                 "additionalProperties": false
             }
         }),
+        serde_json::json!({
+            "name": "create_ingress",
+            "description": "Create a Kubernetes Ingress resource. Automatically creates a backing ClusterIP Service if one doesn't exist. Supports ingress templates for pre-configured annotations.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "namespace": { "type": "string" },
+                    "name": { "type": "string", "description": "Ingress name" },
+                    "host": { "type": "string", "description": "Hostname for the ingress rule (e.g. myapp.example.com)" },
+                    "service_name": { "type": "string", "description": "Backend service name" },
+                    "service_port": { "type": "integer", "description": "Backend service port (default: 80)" },
+                    "path": { "type": "string", "description": "URL path (default: /)" },
+                    "path_type": { "type": "string", "description": "Path matching type (default: Prefix)" },
+                    "ingress_class": { "type": "string", "description": "IngressClass name" },
+                    "template": { "type": "string", "description": "Ingress template name from Settings. Applies default annotations and ingress class." },
+                    "annotations": { "type": "object", "description": "Additional annotations (merged with template, request wins)", "additionalProperties": { "type": "string" } }
+                },
+                "required": ["namespace", "name", "service_name"],
+                "additionalProperties": false
+            }
+        }),
+        serde_json::json!({
+            "name": "update_ingress",
+            "description": "Update an existing Kubernetes Ingress resource (host, paths, annotations, TLS).",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "namespace": { "type": "string" },
+                    "name": { "type": "string" },
+                    "host": { "type": "string" },
+                    "service_name": { "type": "string" },
+                    "service_port": { "type": "integer" },
+                    "path": { "type": "string" },
+                    "path_type": { "type": "string" },
+                    "ingress_class": { "type": "string" },
+                    "annotations": { "type": "object", "additionalProperties": { "type": "string" } }
+                },
+                "required": ["namespace", "name", "service_name"],
+                "additionalProperties": false
+            }
+        }),
+        serde_json::json!({
+            "name": "list_ingress_templates",
+            "description": "List available ingress templates configured in deckwatch Settings. Templates provide pre-configured annotations and ingress class for creating ingresses.",
+            "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false }
+        }),
     ]
 }
 
@@ -188,6 +234,9 @@ async fn handle_tool_call(state: &AppState, request: &JsonRpcRequest) -> JsonRpc
         "configure_gitops" => Some(tool_configure_gitops(state, args).await),
         "get_gitops_status" => Some(tool_get_gitops_status(state, args).await),
         "trigger_gitops_build" => Some(tool_trigger_gitops_build(state, args).await),
+        "create_ingress" => Some(tool_create_ingress(state, args).await),
+        "update_ingress" => Some(tool_update_ingress(state, args).await),
+        "list_ingress_templates" => Some(tool_list_ingress_templates(state).await),
         _ => None,
     };
 
@@ -367,6 +416,95 @@ async fn tool_trigger_gitops_build(
     .map_err(|e| format!("{e}"))?;
 
     serde_json::to_string_pretty(&result.0).map_err(|e| e.to_string())
+}
+
+async fn tool_create_ingress(state: &AppState, args: &serde_json::Value) -> Result<String, String> {
+    let ns = args["namespace"].as_str().ok_or("namespace is required")?;
+    let name = args["name"].as_str().ok_or("name is required")?;
+    let service_name = args["service_name"]
+        .as_str()
+        .ok_or("service_name is required")?;
+    let service_port = args["service_port"].as_i64().unwrap_or(80) as i32;
+    let path = args["path"].as_str().unwrap_or("/").to_string();
+    let path_type = args["path_type"].as_str().map(|s| s.to_string());
+    let host = args["host"].as_str().map(|s| s.to_string());
+    let ingress_class = args["ingress_class"].as_str().map(|s| s.to_string());
+    let template = args["template"].as_str().map(|s| s.to_string());
+    let annotations: Option<std::collections::BTreeMap<String, String>> = args
+        .get("annotations")
+        .and_then(|v| serde_json::from_value(v.clone()).ok());
+
+    let req = ingresses::CreateIngressRequest {
+        name: name.to_string(),
+        host,
+        paths: vec![ingresses::IngressPathInput {
+            path,
+            path_type,
+            service_name: service_name.to_string(),
+            service_port,
+        }],
+        ingress_class,
+        annotations,
+        tls: None,
+        template,
+    };
+
+    let result = ingresses::create(
+        State(state.clone()),
+        axum::extract::Path(ns.to_string()),
+        Json(req),
+    )
+    .await
+    .map_err(|e| format!("{e}"))?;
+
+    let (_status, Json(detail)) = result;
+    serde_json::to_string_pretty(&detail).map_err(|e| e.to_string())
+}
+
+async fn tool_update_ingress(state: &AppState, args: &serde_json::Value) -> Result<String, String> {
+    let ns = args["namespace"].as_str().ok_or("namespace is required")?;
+    let name = args["name"].as_str().ok_or("name is required")?;
+    let service_name = args["service_name"]
+        .as_str()
+        .ok_or("service_name is required")?;
+    let service_port = args["service_port"].as_i64().unwrap_or(80) as i32;
+    let path = args["path"].as_str().unwrap_or("/").to_string();
+    let path_type = args["path_type"].as_str().map(|s| s.to_string());
+    let host = args["host"].as_str().map(|s| s.to_string());
+    let ingress_class = args["ingress_class"].as_str().map(|s| s.to_string());
+    let annotations: Option<std::collections::BTreeMap<String, String>> = args
+        .get("annotations")
+        .and_then(|v| serde_json::from_value(v.clone()).ok());
+
+    let req = ingresses::CreateIngressRequest {
+        name: name.to_string(),
+        host,
+        paths: vec![ingresses::IngressPathInput {
+            path,
+            path_type,
+            service_name: service_name.to_string(),
+            service_port,
+        }],
+        ingress_class,
+        annotations,
+        tls: None,
+        template: None,
+    };
+
+    let result = ingresses::update(
+        State(state.clone()),
+        axum::extract::Path((ns.to_string(), name.to_string())),
+        Json(req),
+    )
+    .await
+    .map_err(|e| format!("{e}"))?;
+
+    serde_json::to_string_pretty(&result.0).map_err(|e| e.to_string())
+}
+
+async fn tool_list_ingress_templates(state: &AppState) -> Result<String, String> {
+    let s = settings::load_settings_from_db(state).await;
+    serde_json::to_string_pretty(&s.ingress_templates).map_err(|e| e.to_string())
 }
 
 // ---------------------------------------------------------------------------
