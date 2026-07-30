@@ -26,6 +26,8 @@ pub struct DeckwatchSettings {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_resource_limits: Option<ResourceDefaults>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_storage_class: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auth: Option<AuthSettings>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub notifications: Option<NotificationSettings>,
@@ -454,6 +456,7 @@ fn default_settings(state: &AppState) -> DeckwatchSettings {
     DeckwatchSettings {
         allowed_namespaces: state.allowed_namespaces.clone(),
         default_resource_limits: None,
+        default_storage_class: None,
         auth: Some(AuthSettings::default()),
         notifications: Some(NotificationSettings::default()),
         git_repositories: Vec::new(),

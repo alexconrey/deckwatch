@@ -325,6 +325,21 @@ export interface NodeListResponse {
   nodes: NodeSummary[];
 }
 
+// --- StorageClass types ---
+
+export interface StorageClassSummary {
+  name: string;
+  provisioner: string;
+  reclaim_policy: string | null;
+  volume_binding_mode: string | null;
+  allow_volume_expansion: boolean;
+  is_default: boolean;
+}
+
+export interface StorageClassListResponse {
+  storage_classes: StorageClassSummary[];
+}
+
 // --- Probe update ---
 
 export interface UpdateProbesRequest {
@@ -379,6 +394,7 @@ export interface AttachAddonRequest {
   resource_limits?: ResourceSpec;
   resource_requests?: ResourceSpec;
   storage?: string;
+  storage_class?: string;
 }
 
 // --- AI Diagnostics types ---
@@ -548,6 +564,7 @@ export interface DeckwatchSettings {
   cost?: CostSettings | null;
   tracing?: TracingSettings | null;
   credentials?: EncryptedCredentials | null;
+  default_storage_class?: string | null;
 }
 
 export interface CostSettings {
