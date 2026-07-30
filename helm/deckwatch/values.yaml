@@ -164,3 +164,9 @@ database:
 templates:
   configMapName: "deckwatch-templates"
   overrides: []
+
+# Extra Kubernetes resources to create alongside deckwatch. Each entry
+# is rendered as a standalone manifest. Use this for environment-specific
+# resources like ExternalSecrets, NetworkPolicies, etc. without modifying
+# the chart itself.
+extraResources: []

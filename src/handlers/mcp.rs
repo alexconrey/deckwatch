@@ -156,6 +156,19 @@ fn deckwatch_tool_definitions() -> Vec<serde_json::Value> {
                 "additionalProperties": false
             }
         }),
+        serde_json::json!({
+            "name": "trigger_gitops_build",
+            "description": "Trigger a GitOps build for a deployment. Clones the repo, builds a container image with Kaniko, and deploys it.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "namespace": { "type": "string" },
+                    "name": { "type": "string", "description": "Deployment name" }
+                },
+                "required": ["namespace", "name"],
+                "additionalProperties": false
+            }
+        }),
     ]
 }
 
@@ -174,6 +187,7 @@ async fn handle_tool_call(state: &AppState, request: &JsonRpcRequest) -> JsonRpc
         "list_templates" => Some(tool_list_templates(state).await),
         "configure_gitops" => Some(tool_configure_gitops(state, args).await),
         "get_gitops_status" => Some(tool_get_gitops_status(state, args).await),
+        "trigger_gitops_build" => Some(tool_trigger_gitops_build(state, args).await),
         _ => None,
     };
 
@@ -331,6 +345,23 @@ async fn tool_configure_gitops(
         State(state.clone()),
         axum::extract::Path((ns.to_string(), name.to_string())),
         Json(req),
+    )
+    .await
+    .map_err(|e| format!("{e}"))?;
+
+    serde_json::to_string_pretty(&result.0).map_err(|e| e.to_string())
+}
+
+async fn tool_trigger_gitops_build(
+    state: &AppState,
+    args: &serde_json::Value,
+) -> Result<String, String> {
+    let ns = args["namespace"].as_str().ok_or("namespace is required")?;
+    let name = args["name"].as_str().ok_or("name is required")?;
+
+    let result = gitops::trigger_build(
+        State(state.clone()),
+        axum::extract::Path((ns.to_string(), name.to_string())),
     )
     .await
     .map_err(|e| format!("{e}"))?;
