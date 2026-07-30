@@ -6,11 +6,13 @@ import { templatesApi } from "@/api/templates";
 import { useAiSettings } from "@/composables/useAiSettings";
 import { useClusterAlertSettings } from "@/composables/useClusterAlertSettings";
 import AuditLogPage from "@/components/pages/AuditLogPage.vue";
+import ConfirmDialog from "@/components/common/ConfirmDialog.vue";
 import type {
   AiProviderConfig,
   AiProviderType,
   AuthSettings,
   CostSettings,
+  CreateStorageClassRequest,
   DeckwatchSettings,
   DeploymentTemplate,
   EncryptedCredentials,
@@ -137,6 +139,128 @@ const savingCredentials = ref(false);
 
 const storageClasses = ref<StorageClassSummary[]>([]);
 const defaultStorageClass = ref<string | null>(null);
+
+const scDialogOpen = ref(false);
+const scDialogEditing = ref(false);
+const scDialogSaving = ref(false);
+const scForm = ref<CreateStorageClassRequest>({
+  name: "",
+  provisioner: "",
+  reclaim_policy: "Delete",
+  volume_binding_mode: "WaitForFirstConsumer",
+  allow_volume_expansion: false,
+  mount_options: [],
+  parameters: {},
+  is_default: false,
+});
+const scMountOptionsText = ref("");
+const scParamRows = ref<{ key: string; value: string }[]>([]);
+
+const scDeleteDialogOpen = ref(false);
+const scDeleteTarget = ref("");
+const scDeleting = ref(false);
+
+function openCreateStorageClass() {
+  scDialogEditing.value = false;
+  scForm.value = {
+    name: "",
+    provisioner: "",
+    reclaim_policy: "Delete",
+    volume_binding_mode: "WaitForFirstConsumer",
+    allow_volume_expansion: false,
+    mount_options: [],
+    parameters: {},
+    is_default: false,
+  };
+  scMountOptionsText.value = "";
+  scParamRows.value = [];
+  scDialogOpen.value = true;
+}
+
+function openEditStorageClass(sc: StorageClassSummary) {
+  scDialogEditing.value = true;
+  scForm.value = {
+    name: sc.name,
+    provisioner: sc.provisioner,
+    reclaim_policy: sc.reclaim_policy ?? "Delete",
+    volume_binding_mode: sc.volume_binding_mode ?? "WaitForFirstConsumer",
+    allow_volume_expansion: sc.allow_volume_expansion,
+    mount_options: sc.mount_options ?? [],
+    parameters: sc.parameters ?? {},
+    is_default: sc.is_default,
+  };
+  scMountOptionsText.value = (sc.mount_options ?? []).join(", ");
+  scParamRows.value = Object.entries(sc.parameters ?? {}).map(([key, value]) => ({ key, value }));
+  scDialogOpen.value = true;
+}
+
+function addScParamRow() {
+  scParamRows.value.push({ key: "", value: "" });
+}
+
+function removeScParamRow(idx: number) {
+  scParamRows.value.splice(idx, 1);
+}
+
+async function saveStorageClass() {
+  scDialogSaving.value = true;
+  try {
+    const mountOpts = scMountOptionsText.value
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean);
+    const params: Record<string, string> = {};
+    for (const row of scParamRows.value) {
+      if (row.key.trim()) params[row.key.trim()] = row.value;
+    }
+    const req: CreateStorageClassRequest = {
+      ...scForm.value,
+      mount_options: mountOpts.length > 0 ? mountOpts : undefined,
+      parameters: Object.keys(params).length > 0 ? params : undefined,
+    };
+    if (scDialogEditing.value) {
+      await storageclassesApi.update(req.name, req);
+    } else {
+      await storageclassesApi.create(req);
+    }
+    scDialogOpen.value = false;
+    await loadStorageClasses();
+    snackbarMessage.value = scDialogEditing.value ? "Storage class updated" : "Storage class created";
+    snackbarColor.value = "success";
+    snackbar.value = true;
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : "Failed to save storage class";
+    snackbarMessage.value = msg;
+    snackbarColor.value = "error";
+    snackbar.value = true;
+  } finally {
+    scDialogSaving.value = false;
+  }
+}
+
+function confirmDeleteStorageClass(name: string) {
+  scDeleteTarget.value = name;
+  scDeleteDialogOpen.value = true;
+}
+
+async function deleteStorageClass() {
+  scDeleting.value = true;
+  try {
+    await storageclassesApi.delete(scDeleteTarget.value);
+    scDeleteDialogOpen.value = false;
+    await loadStorageClasses();
+    snackbarMessage.value = "Storage class deleted";
+    snackbarColor.value = "success";
+    snackbar.value = true;
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : "Failed to delete storage class";
+    snackbarMessage.value = msg;
+    snackbarColor.value = "error";
+    snackbar.value = true;
+  } finally {
+    scDeleting.value = false;
+  }
+}
 
 const gitRepositories = ref<GitRepository[]>([]);
 const ociRegistries = ref<OciRegistry[]>([]);
@@ -314,8 +438,8 @@ function validateManagedLists(): string | null {
     seen.add(`reg:${r.name}`);
   }
   for (const t of gitTokenSecrets.value) {
-    if (!t.name || !t.secret_name || !t.namespace) {
-      return "Every Git token needs a name, secret name, and namespace.";
+    if (!t.name || !t.secret_name) {
+      return "Every Git token needs a display name and secret name.";
     }
     if (seen.has(`tok:${t.name}`)) return `Duplicate token name: ${t.name}`;
     seen.add(`tok:${t.name}`);
@@ -469,7 +593,7 @@ function removeRegistry(idx: number) {
 }
 
 function addTokenSecret() {
-  gitTokenSecrets.value.push({ name: "", secret_name: "", namespace: "" });
+  gitTokenSecrets.value.push({ name: "", secret_name: "", namespace: "" }); // namespace filled by backend
 }
 function removeTokenSecret(idx: number) {
   gitTokenSecrets.value.splice(idx, 1);
@@ -829,9 +953,21 @@ onMounted(load);
 
           <v-divider class="mb-6" />
 
-          <h3 class="text-h6 mb-2">Available storage classes</h3>
+          <div class="d-flex align-center mb-2">
+            <h3 class="text-h6">Storage classes</h3>
+            <v-spacer />
+            <v-btn
+              size="small"
+              color="primary"
+              variant="tonal"
+              prepend-icon="mdi-plus"
+              @click="openCreateStorageClass"
+            >
+              Create Storage Class
+            </v-btn>
+          </div>
           <p class="text-body-2 text-secondary mb-3">
-            Read-only list of storage classes discovered in the cluster.
+            Manage StorageClass resources in the cluster.
           </p>
 
           <div v-if="storageClasses.length === 0" class="text-center py-6 text-secondary">
@@ -847,6 +983,7 @@ onMounted(load);
                 <th>Volume Binding Mode</th>
                 <th>Allow Expansion</th>
                 <th>Default</th>
+                <th class="text-right">Actions</th>
               </tr>
             </thead>
             <tbody>
@@ -872,9 +1009,167 @@ onMounted(load);
                     default
                   </v-chip>
                 </td>
+                <td class="text-right">
+                  <v-btn
+                    icon="mdi-pencil"
+                    variant="text"
+                    size="small"
+                    @click="openEditStorageClass(sc)"
+                  />
+                  <v-btn
+                    icon="mdi-delete"
+                    variant="text"
+                    color="error"
+                    size="small"
+                    @click="confirmDeleteStorageClass(sc.name)"
+                  />
+                </td>
               </tr>
             </tbody>
           </v-table>
+
+          <!-- Create / Edit Storage Class Dialog -->
+          <v-dialog v-model="scDialogOpen" max-width="640" persistent>
+            <v-card>
+              <v-card-title>
+                {{ scDialogEditing ? "Edit Storage Class" : "Create Storage Class" }}
+              </v-card-title>
+              <v-card-text>
+                <v-text-field
+                  v-model="scForm.name"
+                  label="Name"
+                  variant="outlined"
+                  density="comfortable"
+                  :disabled="scDialogEditing"
+                  :rules="[v => !!v || 'Name is required']"
+                  class="mb-2"
+                />
+                <v-text-field
+                  v-model="scForm.provisioner"
+                  label="Provisioner"
+                  placeholder="ebs.csi.aws.com"
+                  variant="outlined"
+                  density="comfortable"
+                  :rules="[v => !!v || 'Provisioner is required']"
+                  class="mb-2"
+                />
+                <v-row>
+                  <v-col cols="12" md="6">
+                    <v-select
+                      v-model="scForm.reclaim_policy"
+                      :items="['Delete', 'Retain', 'Recycle']"
+                      label="Reclaim Policy"
+                      variant="outlined"
+                      density="comfortable"
+                    />
+                  </v-col>
+                  <v-col cols="12" md="6">
+                    <v-select
+                      v-model="scForm.volume_binding_mode"
+                      :items="['Immediate', 'WaitForFirstConsumer']"
+                      label="Volume Binding Mode"
+                      variant="outlined"
+                      density="comfortable"
+                    />
+                  </v-col>
+                </v-row>
+                <v-checkbox
+                  v-model="scForm.allow_volume_expansion"
+                  label="Allow Volume Expansion"
+                  density="comfortable"
+                  hide-details
+                  class="mb-2"
+                />
+                <v-checkbox
+                  v-model="scForm.is_default"
+                  label="Set as Default"
+                  density="comfortable"
+                  hide-details
+                  class="mb-4"
+                />
+                <v-text-field
+                  v-model="scMountOptionsText"
+                  label="Mount Options"
+                  placeholder="debug, discard"
+                  variant="outlined"
+                  density="comfortable"
+                  hint="Comma-separated mount options"
+                  persistent-hint
+                  class="mb-4"
+                />
+                <div class="d-flex align-center mb-2">
+                  <span class="text-subtitle-2">Parameters</span>
+                  <v-spacer />
+                  <v-btn
+                    size="x-small"
+                    variant="tonal"
+                    color="primary"
+                    prepend-icon="mdi-plus"
+                    @click="addScParamRow"
+                  >
+                    Add
+                  </v-btn>
+                </div>
+                <v-row
+                  v-for="(row, idx) in scParamRows"
+                  :key="`sc-param-${idx}`"
+                  dense
+                  align="center"
+                >
+                  <v-col cols="5">
+                    <v-text-field
+                      v-model="row.key"
+                      label="Key"
+                      variant="outlined"
+                      density="compact"
+                      hide-details
+                    />
+                  </v-col>
+                  <v-col cols="5">
+                    <v-text-field
+                      v-model="row.value"
+                      label="Value"
+                      variant="outlined"
+                      density="compact"
+                      hide-details
+                    />
+                  </v-col>
+                  <v-col cols="2" class="text-right">
+                    <v-btn
+                      icon="mdi-delete"
+                      variant="text"
+                      color="error"
+                      size="x-small"
+                      @click="removeScParamRow(idx)"
+                    />
+                  </v-col>
+                </v-row>
+              </v-card-text>
+              <v-card-actions>
+                <v-spacer />
+                <v-btn variant="text" @click="scDialogOpen = false">Cancel</v-btn>
+                <v-btn
+                  color="primary"
+                  variant="flat"
+                  :loading="scDialogSaving"
+                  :disabled="!scForm.name || !scForm.provisioner"
+                  @click="saveStorageClass"
+                >
+                  {{ scDialogEditing ? "Update" : "Create" }}
+                </v-btn>
+              </v-card-actions>
+            </v-card>
+          </v-dialog>
+
+          <!-- Delete Storage Class Confirmation -->
+          <ConfirmDialog
+            v-model="scDeleteDialogOpen"
+            title="Delete Storage Class"
+            :message="`Are you sure you want to delete storage class '${scDeleteTarget}'? This cannot be undone.`"
+            confirm-text="Delete"
+            :loading="scDeleting"
+            @confirm="deleteStorageClass"
+          />
         </div>
 
         <!-- Authentication -->
@@ -1487,31 +1782,24 @@ onMounted(load);
             class="mb-3 pa-3"
           >
             <v-row dense align="center">
-              <v-col cols="12" md="3">
+              <v-col cols="12" md="5">
                 <v-text-field
                   v-model="t.name"
                   label="Display name"
                   placeholder="github-cicd"
                   density="comfortable"
-                  hide-details
+                  hint=" "
+                  persistent-hint
                 />
               </v-col>
-              <v-col cols="12" md="4">
+              <v-col cols="12" md="5">
                 <v-text-field
                   v-model="t.secret_name"
-                  label="Secret name"
+                  label="Kubernetes Secret name"
                   placeholder="github-cicd-token"
                   density="comfortable"
-                  hide-details
-                />
-              </v-col>
-              <v-col cols="12" md="4">
-                <v-text-field
-                  v-model="t.namespace"
-                  label="Namespace"
-                  placeholder="deckwatch"
-                  density="comfortable"
-                  hide-details
+                  hint="Must have a 'token' data key"
+                  persistent-hint
                 />
               </v-col>
               <v-col cols="12" md="1" class="text-right">

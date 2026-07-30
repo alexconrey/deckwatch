@@ -334,10 +334,23 @@ export interface StorageClassSummary {
   volume_binding_mode: string | null;
   allow_volume_expansion: boolean;
   is_default: boolean;
+  mount_options: string[] | null;
+  parameters: Record<string, string> | null;
 }
 
 export interface StorageClassListResponse {
   storage_classes: StorageClassSummary[];
+}
+
+export interface CreateStorageClassRequest {
+  name: string;
+  provisioner: string;
+  reclaim_policy?: string;
+  volume_binding_mode?: string;
+  allow_volume_expansion?: boolean;
+  mount_options?: string[];
+  parameters?: Record<string, string>;
+  is_default?: boolean;
 }
 
 // --- Probe update ---

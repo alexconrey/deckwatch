@@ -358,6 +358,12 @@ pub async fn put_settings(
     // from the deployment env var, not user data.
     settings.oci_registries.retain(|r| !r.builtin);
 
+    for t in &mut settings.git_token_secrets {
+        if t.namespace.is_empty() {
+            t.namespace.clone_from(&state.settings_namespace);
+        }
+    }
+
     upsert_settings_to_db(&state.db, &settings)
         .await
         .map_err(|e| AppError::BadRequest(format!("failed to save settings: {e}")))?;
