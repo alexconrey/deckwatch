@@ -1,6 +1,7 @@
 import { defineStore } from "pinia";
 import { ref } from "vue";
 import { applicationsApi } from "@/api/applications";
+import { patchArray } from "@/utils/deepPatch";
 import type { ApplicationSummary } from "@/types/api";
 
 export const useApplicationsStore = defineStore("applications", () => {
@@ -14,7 +15,11 @@ export const useApplicationsStore = defineStore("applications", () => {
     error.value = null;
     try {
       const response = await applicationsApi.list(namespace);
-      applications.value = response.applications;
+      if (applications.value.length === 0) {
+        applications.value = response.applications;
+      } else {
+        patchArray(applications.value, response.applications);
+      }
     } catch (e) {
       error.value =
         e instanceof Error ? e.message : "Failed to fetch applications";

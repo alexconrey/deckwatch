@@ -9,6 +9,7 @@ import { secretsApi } from "@/api/secrets";
 import { configmapsApi } from "@/api/configmaps";
 import { settingsApi } from "@/api/settings";
 import { ApiError } from "@/api/client";
+import { patchArray } from "@/utils/deepPatch";
 import type {
   CostSettings,
   CronJobSummary,
@@ -231,7 +232,11 @@ const fetchCronjobs = async (namespace: string) => {
   cronjobsError.value = null;
   try {
     const response = await cronjobsApi.list(namespace);
-    cronjobs.value = response.cronjobs;
+    if (cronjobs.value.length === 0) {
+      cronjobs.value = response.cronjobs;
+    } else {
+      patchArray(cronjobs.value, response.cronjobs);
+    }
   } catch (e) {
     cronjobsError.value =
       e instanceof Error ? e.message : "Failed to fetch cronjobs";
@@ -246,7 +251,11 @@ const fetchSecrets = async (namespace: string) => {
   secretsError.value = null;
   try {
     const res = await secretsApi.list(namespace);
-    secrets.value = res.secrets;
+    if (secrets.value.length === 0) {
+      secrets.value = res.secrets;
+    } else {
+      patchArray(secrets.value, res.secrets);
+    }
   } catch (e) {
     secretsError.value =
       e instanceof ApiError ? e.body.message
@@ -263,7 +272,11 @@ const fetchConfigMaps = async (namespace: string) => {
   configmapsError.value = null;
   try {
     const res = await configmapsApi.list(namespace);
-    configmaps.value = res.configmaps;
+    if (configmaps.value.length === 0) {
+      configmaps.value = res.configmaps;
+    } else {
+      patchArray(configmaps.value, res.configmaps);
+    }
   } catch (e) {
     configmapsError.value =
       e instanceof ApiError ? e.body.message

@@ -2,6 +2,7 @@
 import { ref, computed, watch } from "vue";
 import { useRouter } from "vue-router";
 import { deploymentsApi } from "@/api/deployments";
+import { deepPatch } from "@/utils/deepPatch";
 import { ingressesApi, ingressTemplatesApi } from "@/api/ingresses";
 import { ingressClassesApi } from "@/api/ingresses";
 import type { IngressClassInfo } from "@/api/ingresses";
@@ -219,7 +220,12 @@ const firstContainerPort = computed<number>(() => {
 
 const fetchDetail = async () => {
   try {
-    detail.value = await deploymentsApi.get(props.namespace, props.name);
+    const newData = await deploymentsApi.get(props.namespace, props.name);
+    if (detail.value) {
+      deepPatch(detail.value, newData);
+    } else {
+      detail.value = newData;
+    }
     loading.value = false;
   } catch (e) {
     error.value =

@@ -1,6 +1,7 @@
 import { defineStore } from "pinia";
 import { ref } from "vue";
 import { deploymentsApi } from "@/api/deployments";
+import { patchArray } from "@/utils/deepPatch";
 import type { DeploymentSummary } from "@/types/api";
 
 export const useDeploymentsStore = defineStore("deployments", () => {
@@ -14,7 +15,11 @@ export const useDeploymentsStore = defineStore("deployments", () => {
     error.value = null;
     try {
       const response = await deploymentsApi.list(namespace);
-      deployments.value = response.deployments;
+      if (deployments.value.length === 0) {
+        deployments.value = response.deployments;
+      } else {
+        patchArray(deployments.value, response.deployments);
+      }
     } catch (e) {
       error.value =
         e instanceof Error ? e.message : "Failed to fetch deployments";
