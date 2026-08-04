@@ -1,4 +1,5 @@
 use super::*;
+use crate::handlers::ingressclasses::{IngressClassListResponse, IngressClassSummary};
 use serde_json;
 use std::collections::BTreeMap;
 
@@ -135,13 +136,15 @@ fn tls_input_deserializes_without_secret_name() {
     assert!(tls[0].secret_name.is_none());
 }
 
-// ---- IngressClassInfo serialization ----
+// ---- IngressClassSummary serialization ----
 
 #[test]
-fn ingress_class_info_serializes_default() {
-    let info = IngressClassInfo {
+fn ingress_class_summary_serializes_default() {
+    let info = IngressClassSummary {
         name: "alb".to_string(),
+        controller: "ingress.k8s.aws/alb".to_string(),
         is_default: true,
+        parameters: None,
     };
     let value = serde_json::to_value(&info).expect("serialize");
     assert_eq!(value["name"], "alb");
@@ -149,10 +152,12 @@ fn ingress_class_info_serializes_default() {
 }
 
 #[test]
-fn ingress_class_info_serializes_non_default() {
-    let info = IngressClassInfo {
+fn ingress_class_summary_serializes_non_default() {
+    let info = IngressClassSummary {
         name: "nginx".to_string(),
+        controller: "k8s.io/ingress-nginx".to_string(),
         is_default: false,
+        parameters: None,
     };
     let value = serde_json::to_value(&info).expect("serialize");
     assert_eq!(value["name"], "nginx");
@@ -163,27 +168,31 @@ fn ingress_class_info_serializes_non_default() {
 
 #[test]
 fn ingress_class_list_response_serializes_empty() {
-    let resp = IngressClassListResponse { classes: vec![] };
+    let resp = IngressClassListResponse { ingress_classes: vec![] };
     let value = serde_json::to_value(&resp).expect("serialize");
-    assert_eq!(value["classes"], serde_json::json!([]));
+    assert_eq!(value["ingress_classes"], serde_json::json!([]));
 }
 
 #[test]
 fn ingress_class_list_response_serializes_multiple() {
     let resp = IngressClassListResponse {
-        classes: vec![
-            IngressClassInfo {
+        ingress_classes: vec![
+            IngressClassSummary {
                 name: "alb".to_string(),
+                controller: "ingress.k8s.aws/alb".to_string(),
                 is_default: true,
+                parameters: None,
             },
-            IngressClassInfo {
+            IngressClassSummary {
                 name: "nginx".to_string(),
+                controller: "k8s.io/ingress-nginx".to_string(),
                 is_default: false,
+                parameters: None,
             },
         ],
     };
     let value = serde_json::to_value(&resp).expect("serialize");
-    let classes = value["classes"].as_array().expect("classes array");
+    let classes = value["ingress_classes"].as_array().expect("ingress_classes array");
     assert_eq!(classes.len(), 2);
     assert_eq!(classes[0]["name"], "alb");
     assert_eq!(classes[0]["is_default"], true);

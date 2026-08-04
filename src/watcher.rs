@@ -4,7 +4,10 @@ use std::time::Instant;
 
 use k8s_openapi::api::apps::v1::Deployment;
 use k8s_openapi::api::batch::v1::{Job, JobSpec};
-use k8s_openapi::api::core::v1::{Container, EnvVar, PodSpec, PodTemplateSpec, Secret};
+use k8s_openapi::api::core::v1::{
+    Container, EnvVar, NodeAffinity, NodeSelector, NodeSelectorRequirement, NodeSelectorTerm,
+    PodSpec, PodTemplateSpec, Secret,
+};
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
 use kube::api::{ListParams, LogParams, Patch, PatchParams, PostParams};
 use kube::{Api, ResourceExt};
@@ -381,6 +384,124 @@ pub async fn trigger_build_public(
     trigger_build(state, ns, dep, commit_sha, token, &auth_user).await
 }
 
+/// The set of architectures to build for multi-arch images. Each entry
+/// corresponds to a Kaniko `--customPlatform` value and a Kubernetes
+/// `kubernetes.io/arch` node-selector term so the build pod lands on a
+/// node of the correct architecture.
+const BUILD_ARCHES: &[(&str, &str)] = &[("linux/amd64", "amd64"), ("linux/arm64", "arm64")];
+
+/// Build a `NodeAffinity` that forces a pod onto a node with the given
+/// architecture (e.g. `amd64` or `arm64`).
+fn arch_node_affinity(arch: &str) -> k8s_openapi::api::core::v1::Affinity {
+    k8s_openapi::api::core::v1::Affinity {
+        node_affinity: Some(NodeAffinity {
+            required_during_scheduling_ignored_during_execution: Some(NodeSelector {
+                node_selector_terms: vec![NodeSelectorTerm {
+                    match_expressions: Some(vec![NodeSelectorRequirement {
+                        key: "kubernetes.io/arch".to_string(),
+                        operator: "In".to_string(),
+                        values: Some(vec![arch.to_string()]),
+                    }]),
+                    ..Default::default()
+                }],
+            }),
+            ..Default::default()
+        }),
+        ..Default::default()
+    }
+}
+
+/// Resolve the Kaniko push destination, rewriting the public registry URL to
+/// the in-cluster URL when the internal registry is configured.
+fn resolve_kaniko_destination(state: &AppState, oci_repo: &str) -> String {
+    rewrite_registry_url(
+        state.registry_internal_url.as_deref(),
+        state.registry_public_url.as_deref(),
+        oci_repo,
+    )
+}
+
+/// Pure helper: rewrite `oci_repo` from public to internal URL when both are
+/// configured and `oci_repo` matches the public prefix.
+fn rewrite_registry_url(
+    internal_url: Option<&str>,
+    public_url: Option<&str>,
+    oci_repo: &str,
+) -> String {
+    match (internal_url, public_url) {
+        (Some(internal), Some(public)) if oci_repo.starts_with(public) => {
+            oci_repo.replacen(public, internal, 1)
+        }
+        _ => oci_repo.to_string(),
+    }
+}
+
+/// Return `true` when the destination points at the embedded deckwatch
+/// registry, which speaks plain HTTP and needs `--insecure-registry`.
+fn is_internal_registry(state: &AppState, kaniko_destination: &str) -> bool {
+    check_internal_registry(
+        state.registry_public_url.as_deref(),
+        state.registry_internal_url.as_deref(),
+        kaniko_destination,
+    )
+}
+
+/// Pure helper: returns true when `kaniko_destination` starts with the
+/// public or internal registry URL prefix.
+fn check_internal_registry(
+    public_url: Option<&str>,
+    internal_url: Option<&str>,
+    kaniko_destination: &str,
+) -> bool {
+    public_url
+        .or(internal_url)
+        .map(|url| kaniko_destination.starts_with(url))
+        .unwrap_or(false)
+}
+
+/// Create a Kubernetes Job and wait for any prior Job with the same name to
+/// be cleaned up (retries up to 5 times on 409 AlreadyExists).
+async fn create_job_with_cleanup(jobs_api: &Api<Job>, job: &Job) -> anyhow::Result<()> {
+    let job_name = job
+        .metadata
+        .name
+        .as_deref()
+        .unwrap_or("unknown");
+
+    // Clean up any existing job with the same name. Use background
+    // propagation and retry the create if the old object is still
+    // finalizing (409 AlreadyExists).
+    let dp = kube::api::DeleteParams {
+        propagation_policy: Some(kube::api::PropagationPolicy::Background),
+        ..Default::default()
+    };
+    let _ = jobs_api.delete(job_name, &dp).await;
+
+    let mut attempts = 0;
+    loop {
+        match jobs_api.create(&PostParams::default(), job).await {
+            Ok(_) => break,
+            Err(kube::Error::Api(e)) if e.code == 409 && attempts < 5 => {
+                attempts += 1;
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            }
+            Err(e) => return Err(e.into()),
+        }
+    }
+    Ok(())
+}
+
+/// Trigger a multi-architecture build.
+///
+/// Creates one Kaniko Job per architecture (amd64, arm64), each pinned to a
+/// node of the matching architecture via node affinity. Each job pushes to
+/// an arch-suffixed tag (e.g. `:abc1234-amd64`). When all arch jobs succeed,
+/// `monitor_builds` creates a manifest-assembly Job that uses `crane` to
+/// combine them into a single manifest list at the canonical tag (`:abc1234`).
+///
+/// Returns the "build group" job name prefix used to track all related jobs.
+/// The individual per-arch jobs are named `{prefix}-{arch}` and the manifest
+/// job is named `{prefix}-manifest`.
 async fn trigger_build(
     state: &AppState,
     ns: &str,
@@ -407,15 +528,7 @@ async fn trigger_build(
     let context = &config.docker_context;
     let oci_repo = &config.oci_repository;
 
-    // When an internal registry URL is configured, rewrite the Kaniko push
-    // destination to use it (pods can reach the ClusterIP Service but the
-    // kubelet can't). The deployment image reference keeps the public URL.
-    let kaniko_destination = match (&state.registry_internal_url, &state.registry_public_url) {
-        (Some(internal), Some(public)) if oci_repo.starts_with(public.as_str()) => {
-            oci_repo.replacen(public.as_str(), internal.as_str(), 1)
-        }
-        _ => oci_repo.clone(),
-    };
+    let kaniko_destination = resolve_kaniko_destination(state, oci_repo);
 
     let repo_no_scheme = repo_url
         .strip_prefix("https://")
@@ -428,69 +541,187 @@ async fn trigger_build(
         format!("git://{auth_user}:{token}@{repo_no_scheme}#refs/heads/{branch}")
     };
 
-    let mut args = vec![
-        format!("--dockerfile={dockerfile}"),
-        format!("--context={kaniko_context}"),
-        format!("--destination={kaniko_destination}:{short_sha}"),
-        "--cache=true".to_string(),
-        "--snapshot-mode=redo".to_string(),
-    ];
+    let internal_registry = is_internal_registry(state, &kaniko_destination);
+    let registry_host = kaniko_destination.split('/').next().unwrap_or("");
 
-    // The embedded registry uses plain HTTP; tell Kaniko not to require TLS.
-    let is_internal_registry = state
-        .registry_public_url
-        .as_deref()
-        .or(state.registry_internal_url.as_deref())
-        .map(|url| kaniko_destination.starts_with(url))
-        .unwrap_or(false);
-    if is_internal_registry {
-        let registry_host = kaniko_destination.split('/').next().unwrap_or("");
-        if !registry_host.is_empty() {
+    let jobs_api = state.jobs_api(ns)?;
+
+    // Create one Kaniko Job per target architecture.
+    for &(platform, arch) in BUILD_ARCHES {
+        let arch_job_name = format!("{job_name}-{arch}");
+        let arch_tag = format!("{short_sha}-{arch}");
+
+        let mut args = vec![
+            format!("--dockerfile={dockerfile}"),
+            format!("--context={kaniko_context}"),
+            format!("--destination={kaniko_destination}:{arch_tag}"),
+            format!("--customPlatform={platform}"),
+            "--cache=true".to_string(),
+            "--snapshot-mode=redo".to_string(),
+        ];
+
+        if internal_registry && !registry_host.is_empty() {
             args.push(format!("--insecure-registry={registry_host}"));
         }
+
+        if context != "." {
+            args.push(format!("--context-sub-path={context}"));
+        }
+
+        let mut labels = BTreeMap::new();
+        labels.insert("deckwatch.io/build".to_string(), "true".to_string());
+        labels.insert("deckwatch.io/deployment".to_string(), dep_name.clone());
+        labels.insert(
+            "deckwatch.io/build-group".to_string(),
+            job_name.clone(),
+        );
+        labels.insert("deckwatch.io/build-arch".to_string(), arch.to_string());
+
+        let job = Job {
+            metadata: ObjectMeta {
+                name: Some(arch_job_name.clone()),
+                namespace: Some(ns.to_string()),
+                labels: Some(labels),
+                ..Default::default()
+            },
+            spec: Some(JobSpec {
+                ttl_seconds_after_finished: Some(3600),
+                backoff_limit: Some(0),
+                template: PodTemplateSpec {
+                    spec: Some(PodSpec {
+                        restart_policy: Some("Never".to_string()),
+                        affinity: Some(arch_node_affinity(arch)),
+                        containers: vec![Container {
+                            name: "kaniko".to_string(),
+                            image: Some(
+                                "gcr.io/kaniko-project/executor:latest".to_string(),
+                            ),
+                            args: Some(args),
+                            env: if token.is_empty() {
+                                None
+                            } else {
+                                Some(vec![
+                                    EnvVar {
+                                        name: "GIT_USERNAME".to_string(),
+                                        value: Some(auth_user.to_string()),
+                                        ..Default::default()
+                                    },
+                                    EnvVar {
+                                        name: "GIT_PASSWORD".to_string(),
+                                        value: Some(token.to_string()),
+                                        ..Default::default()
+                                    },
+                                ])
+                            },
+                            ..Default::default()
+                        }],
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                },
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        create_job_with_cleanup(&jobs_api, &job).await?;
+
+        tracing::info!(
+            deployment = %dep_name,
+            arch = %arch,
+            job = %arch_job_name,
+            "created kaniko build job for architecture"
+        );
     }
 
-    if context != "." {
-        args.push(format!("--context-sub-path={context}"));
+    Ok(job_name)
+}
+
+/// Create the manifest-assembly Job that combines per-architecture images
+/// into a single OCI manifest list using `crane`. This runs after all
+/// per-arch Kaniko jobs succeed.
+///
+/// The Job uses `gcr.io/go-containerregistry/crane:latest` which is the
+/// official image for the `crane` CLI tool.
+async fn create_manifest_job(
+    state: &AppState,
+    ns: &str,
+    dep_name: &str,
+    build_group: &str,
+    short_sha: &str,
+) -> anyhow::Result<String> {
+    let app_id = format!("{ns}/{dep_name}");
+    let config = gitops_configs::Entity::find()
+        .filter(gitops_configs::Column::ApplicationId.eq(&app_id))
+        .one(&state.db)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("no gitops config found for {app_id}"))?;
+
+    let oci_repo = &config.oci_repository;
+    let kaniko_destination = resolve_kaniko_destination(state, oci_repo);
+    let internal_registry = is_internal_registry(state, &kaniko_destination);
+
+    let manifest_job_name = format!("{build_group}-manifest");
+
+    // Build the list of arch-specific image refs to combine.
+    let arch_refs: Vec<String> = BUILD_ARCHES
+        .iter()
+        .map(|&(_, arch)| format!("{kaniko_destination}:{short_sha}-{arch}"))
+        .collect();
+
+    let manifest_tag = format!("{kaniko_destination}:{short_sha}");
+
+    // `crane mutate --manifest` isn't available; use `crane index append`
+    // which creates a manifest list from existing images.
+    //
+    // crane index append \
+    //   --manifest <img1> --manifest <img2> \
+    //   --tag <destination>:<tag>
+    //
+    // For insecure registries we pass --insecure.
+    let mut crane_args: Vec<String> = vec!["index".to_string(), "append".to_string()];
+    for img_ref in &arch_refs {
+        crane_args.push("--manifest".to_string());
+        crane_args.push(img_ref.clone());
+    }
+    crane_args.push("--tag".to_string());
+    crane_args.push(manifest_tag);
+
+    if internal_registry {
+        crane_args.push("--insecure".to_string());
     }
 
     let mut labels = BTreeMap::new();
     labels.insert("deckwatch.io/build".to_string(), "true".to_string());
-    labels.insert("deckwatch.io/deployment".to_string(), dep_name.clone());
+    labels.insert("deckwatch.io/deployment".to_string(), dep_name.to_string());
+    labels.insert(
+        "deckwatch.io/build-group".to_string(),
+        build_group.to_string(),
+    );
+    labels.insert(
+        "deckwatch.io/build-phase".to_string(),
+        "manifest".to_string(),
+    );
 
     let job = Job {
         metadata: ObjectMeta {
-            name: Some(job_name.clone()),
+            name: Some(manifest_job_name.clone()),
             namespace: Some(ns.to_string()),
             labels: Some(labels),
             ..Default::default()
         },
         spec: Some(JobSpec {
             ttl_seconds_after_finished: Some(3600),
-            backoff_limit: Some(0),
+            backoff_limit: Some(1),
             template: PodTemplateSpec {
                 spec: Some(PodSpec {
                     restart_policy: Some("Never".to_string()),
                     containers: vec![Container {
-                        name: "kaniko".to_string(),
-                        image: Some("gcr.io/kaniko-project/executor:latest".to_string()),
-                        args: Some(args),
-                        env: if token.is_empty() {
-                            None
-                        } else {
-                            Some(vec![
-                                EnvVar {
-                                    name: "GIT_USERNAME".to_string(),
-                                    value: Some(auth_user.to_string()),
-                                    ..Default::default()
-                                },
-                                EnvVar {
-                                    name: "GIT_PASSWORD".to_string(),
-                                    value: Some(token.to_string()),
-                                    ..Default::default()
-                                },
-                            ])
-                        },
+                        name: "crane".to_string(),
+                        image: Some(
+                            "gcr.io/go-containerregistry/crane:latest".to_string(),
+                        ),
+                        args: Some(crane_args),
                         ..Default::default()
                     }],
                     ..Default::default()
@@ -503,29 +734,172 @@ async fn trigger_build(
     };
 
     let jobs_api = state.jobs_api(ns)?;
+    create_job_with_cleanup(&jobs_api, &job).await?;
 
-    // Clean up any existing job with the same name. Use background
-    // propagation and retry the create if the old object is still
-    // finalizing (409 AlreadyExists).
+    tracing::info!(
+        deployment = %dep_name,
+        job = %manifest_job_name,
+        "created manifest assembly job"
+    );
+
+    Ok(manifest_job_name)
+}
+
+/// Status of a multi-arch build group's constituent jobs.
+#[derive(Debug)]
+enum BuildGroupStatus {
+    /// At least one arch-build is still running.
+    InProgress,
+    /// All arch-builds succeeded; manifest job has not been created yet.
+    ArchesComplete,
+    /// The manifest-assembly job is still running.
+    ManifestInProgress,
+    /// The manifest-assembly job succeeded — the build is done.
+    ManifestComplete,
+    /// At least one job (arch-build or manifest) has failed.
+    Failed(String),
+}
+
+/// Examine all Jobs in `ns` that belong to the given `build_group` label
+/// and determine the aggregate status.
+async fn check_build_group_status(
+    jobs_api: &Api<Job>,
+    build_group: &str,
+) -> anyhow::Result<BuildGroupStatus> {
+    let lp =
+        ListParams::default().labels(&format!("deckwatch.io/build-group={build_group}"));
+    let jobs = jobs_api.list(&lp).await?;
+
+    let mut arch_total = 0;
+    let mut arch_succeeded = 0;
+    let mut arch_failed = 0;
+    let mut manifest_exists = false;
+    let mut manifest_succeeded = false;
+    let mut manifest_failed = false;
+
+    for job in jobs.iter() {
+        let labels = job.metadata.labels.as_ref();
+        let is_manifest = labels
+            .and_then(|l| l.get("deckwatch.io/build-phase"))
+            .map(|v| v == "manifest")
+            .unwrap_or(false);
+
+        let status = job.status.as_ref();
+        let succeeded = status.and_then(|s| s.succeeded).unwrap_or(0);
+        let failed = status.and_then(|s| s.failed).unwrap_or(0);
+
+        if is_manifest {
+            manifest_exists = true;
+            if succeeded > 0 {
+                manifest_succeeded = true;
+            } else if failed > 0 {
+                manifest_failed = true;
+            }
+        } else {
+            arch_total += 1;
+            if succeeded > 0 {
+                arch_succeeded += 1;
+            } else if failed > 0 {
+                arch_failed += 1;
+            }
+        }
+    }
+
+    // Any failure is terminal.
+    if arch_failed > 0 {
+        return Ok(BuildGroupStatus::Failed(
+            "one or more architecture build jobs failed".to_string(),
+        ));
+    }
+    if manifest_failed {
+        return Ok(BuildGroupStatus::Failed(
+            "manifest assembly job failed".to_string(),
+        ));
+    }
+
+    // Manifest completed — build is done.
+    if manifest_succeeded {
+        return Ok(BuildGroupStatus::ManifestComplete);
+    }
+
+    // Manifest exists but hasn't finished yet.
+    if manifest_exists {
+        return Ok(BuildGroupStatus::ManifestInProgress);
+    }
+
+    // All architectures done — time to create manifest job.
+    if arch_total > 0 && arch_succeeded == arch_total {
+        return Ok(BuildGroupStatus::ArchesComplete);
+    }
+
+    // Still waiting for arch builds.
+    Ok(BuildGroupStatus::InProgress)
+}
+
+/// Collect build logs from all arch-build and manifest jobs in a group.
+/// Returns a combined log string with per-job headers.
+async fn capture_build_group_logs(
+    state: &AppState,
+    ns: &str,
+    build_group: &str,
+) -> Option<String> {
+    let jobs_api: Api<Job> = Api::namespaced(state.kube_client.clone(), ns);
+    let lp =
+        ListParams::default().labels(&format!("deckwatch.io/build-group={build_group}"));
+    let jobs = match jobs_api.list(&lp).await {
+        Ok(j) => j,
+        Err(_) => return None,
+    };
+
+    let mut combined = String::new();
+    for job in jobs.iter() {
+        let jn = job
+            .metadata
+            .name
+            .as_deref()
+            .unwrap_or("unknown");
+        if let Some(log) = capture_build_log(state, ns, jn).await {
+            if !combined.is_empty() {
+                combined.push_str("\n\n");
+            }
+            combined.push_str(&format!("=== Job: {jn} ===\n"));
+            combined.push_str(&log);
+        }
+    }
+
+    if combined.is_empty() {
+        None
+    } else {
+        // Truncate to MAX_BUILD_LOG_BYTES to keep DB rows reasonable.
+        if combined.len() > MAX_BUILD_LOG_BYTES {
+            let tail = &combined[combined.len() - MAX_BUILD_LOG_BYTES..];
+            let start = tail.find('\n').map(|i| i + 1).unwrap_or(0);
+            Some(format!(
+                "[truncated -- showing last ~{}KB]\n{}",
+                MAX_BUILD_LOG_BYTES / 1024,
+                &tail[start..]
+            ))
+        } else {
+            Some(combined)
+        }
+    }
+}
+
+/// Clean up all Jobs belonging to a build group.
+async fn cleanup_build_group_jobs(jobs_api: &Api<Job>, build_group: &str) {
+    let lp =
+        ListParams::default().labels(&format!("deckwatch.io/build-group={build_group}"));
     let dp = kube::api::DeleteParams {
         propagation_policy: Some(kube::api::PropagationPolicy::Background),
         ..Default::default()
     };
-    let _ = jobs_api.delete(&job_name, &dp).await;
-
-    let mut attempts = 0;
-    loop {
-        match jobs_api.create(&PostParams::default(), &job).await {
-            Ok(_) => break,
-            Err(kube::Error::Api(e)) if e.code == 409 && attempts < 5 => {
-                attempts += 1;
-                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    if let Ok(jobs) = jobs_api.list(&lp).await {
+        for job in jobs.iter() {
+            if let Some(name) = job.metadata.name.as_deref() {
+                let _ = jobs_api.delete(name, &dp).await;
             }
-            Err(e) => return Err(e.into()),
         }
     }
-
-    Ok(job_name)
 }
 
 async fn monitor_builds(state: &AppState) -> anyhow::Result<()> {
@@ -545,110 +919,156 @@ async fn monitor_builds(state: &AppState) -> anyhow::Result<()> {
             continue;
         }
 
-        let job_name = match config.last_build_job.as_deref() {
+        let build_group = match config.last_build_job.as_deref() {
             Some(j) if !j.is_empty() => j,
             _ => continue,
         };
 
-        // Check the Job status in Kubernetes.
         let jobs_api: Api<Job> = Api::namespaced(state.kube_client.clone(), ns);
-        let job = match jobs_api.get(job_name).await {
-            Ok(j) => j,
-            Err(_) => continue,
+
+        let group_status = match check_build_group_status(&jobs_api, build_group).await {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!(
+                    build_group = %build_group,
+                    error = %e,
+                    "failed to check build group status"
+                );
+                continue;
+            }
         };
 
-        let status = job.status.as_ref();
-        let succeeded = status.and_then(|s| s.succeeded).unwrap_or(0);
-        let failed = status.and_then(|s| s.failed).unwrap_or(0);
-
-        if succeeded == 0 && failed == 0 {
-            continue;
-        }
-
         let now = now_utc();
+        let commit_sha = config.last_commit_sha.as_deref().unwrap_or("");
+        let short_sha = &commit_sha[..7.min(commit_sha.len())];
 
-        // Capture the build pod's logs BEFORE deleting the job. The pod
-        // will be garbage-collected along with the Job, so this is our
-        // only window to persist them.
-        let build_log = capture_build_log(state, ns, job_name).await;
+        match group_status {
+            BuildGroupStatus::InProgress | BuildGroupStatus::ManifestInProgress => {
+                // Still waiting -- nothing to do.
+                continue;
+            }
+            BuildGroupStatus::ArchesComplete => {
+                // All arch builds succeeded. Create the manifest assembly
+                // job to combine arch-specific images into a manifest list.
+                tracing::info!(
+                    deployment = %dep_name,
+                    build_group = %build_group,
+                    "all arch builds complete, creating manifest assembly job"
+                );
+                if let Err(e) =
+                    create_manifest_job(state, ns, dep_name, build_group, short_sha).await
+                {
+                    tracing::error!(
+                        deployment = %dep_name,
+                        error = %e,
+                        "failed to create manifest assembly job"
+                    );
+                    // Mark the build as failed so we don't retry forever.
+                    update_gitops_config_field(&state.db, &config.application_id, |active| {
+                        active.last_build_status = Set(Some("failed".to_string()));
+                        active.last_build_error = Set(Some(format!(
+                            "failed to create manifest assembly job: {e}"
+                        )));
+                        active.last_build_time = Set(Some(now));
+                        active.updated_at = Set(now);
+                    })
+                    .await?;
+                    metrics::record_gitops_build(ns, "failure");
 
-        if succeeded > 0 {
-            let oci_repo = &config.oci_repository;
-            let commit_sha = config.last_commit_sha.as_deref().unwrap_or("");
-            let short_sha = &commit_sha[..7.min(commit_sha.len())];
-            let new_image = format!("{oci_repo}:{short_sha}");
+                    let build_log =
+                        capture_build_group_logs(state, ns, build_group).await;
+                    update_build_status(
+                        &state.db,
+                        build_group,
+                        "failed",
+                        Some("failed to create manifest assembly job"),
+                        build_log,
+                    )
+                    .await;
 
-            tracing::info!(
-                deployment = %dep_name,
-                image = %new_image,
-                "build succeeded, updating deployment image"
-            );
+                    cleanup_build_group_jobs(&jobs_api, build_group).await;
+                }
+                // The manifest job was created; the next poll cycle will
+                // pick it up as ManifestInProgress -> ManifestComplete.
+            }
+            BuildGroupStatus::ManifestComplete => {
+                // The full multi-arch build is done. Update the deployment.
+                let oci_repo = &config.oci_repository;
+                let new_image = format!("{oci_repo}:{short_sha}");
 
-            // Update the Deployment's image in K8s (this stays in K8s).
-            let dep_api = state.deployments_api(ns)?;
-            let image_patch = serde_json::json!({
-                "spec": {
-                    "template": {
-                        "spec": {
-                            "containers": [{
-                                "name": dep_name,
-                                "image": new_image,
-                            }]
+                tracing::info!(
+                    deployment = %dep_name,
+                    image = %new_image,
+                    "multi-arch build succeeded, updating deployment image"
+                );
+
+                let dep_api = state.deployments_api(ns)?;
+                let image_patch = serde_json::json!({
+                    "spec": {
+                        "template": {
+                            "spec": {
+                                "containers": [{
+                                    "name": dep_name,
+                                    "image": new_image,
+                                }]
+                            }
                         }
                     }
-                }
-            });
-            let _ = dep_api
-                .patch(
-                    dep_name,
-                    &PatchParams::default(),
-                    &Patch::Strategic(image_patch),
+                });
+                let _ = dep_api
+                    .patch(
+                        dep_name,
+                        &PatchParams::default(),
+                        &Patch::Strategic(image_patch),
+                    )
+                    .await;
+
+                update_gitops_config_field(&state.db, &config.application_id, |active| {
+                    active.last_build_status = Set(Some("success".to_string()));
+                    active.last_build_time = Set(Some(now));
+                    active.last_build_error = Set(None);
+                    active.updated_at = Set(now);
+                })
+                .await?;
+                metrics::record_gitops_build(ns, "success");
+
+                let build_log =
+                    capture_build_group_logs(state, ns, build_group).await;
+                update_build_status(&state.db, build_group, "succeeded", None, build_log)
+                    .await;
+
+                cleanup_build_group_jobs(&jobs_api, build_group).await;
+            }
+            BuildGroupStatus::Failed(reason) => {
+                tracing::warn!(
+                    deployment = %dep_name,
+                    reason = %reason,
+                    "multi-arch build failed"
+                );
+
+                update_gitops_config_field(&state.db, &config.application_id, |active| {
+                    active.last_build_status = Set(Some("failed".to_string()));
+                    active.last_build_error = Set(Some(reason.clone()));
+                    active.last_build_time = Set(Some(now));
+                    active.updated_at = Set(now);
+                })
+                .await?;
+                metrics::record_gitops_build(ns, "failure");
+
+                let build_log =
+                    capture_build_group_logs(state, ns, build_group).await;
+                update_build_status(
+                    &state.db,
+                    build_group,
+                    "failed",
+                    Some(&reason),
+                    build_log,
                 )
                 .await;
 
-            // Update the gitops_configs row.
-            update_gitops_config_field(&state.db, &config.application_id, |active| {
-                active.last_build_status = Set(Some("success".to_string()));
-                active.last_build_time = Set(Some(now));
-                active.last_build_error = Set(None);
-                active.updated_at = Set(now);
-            })
-            .await?;
-            metrics::record_gitops_build(ns, "success");
-
-            // Update the builds DB row.
-            update_build_status(&state.db, job_name, "succeeded", None, build_log).await;
-        } else {
-            tracing::warn!(deployment = %dep_name, "build failed");
-
-            // Update the gitops_configs row.
-            update_gitops_config_field(&state.db, &config.application_id, |active| {
-                active.last_build_status = Set(Some("failed".to_string()));
-                active.last_build_error = Set(Some("Kaniko build job failed".to_string()));
-                active.last_build_time = Set(Some(now));
-                active.updated_at = Set(now);
-            })
-            .await?;
-            metrics::record_gitops_build(ns, "failure");
-
-            // Update the builds DB row.
-            update_build_status(
-                &state.db,
-                job_name,
-                "failed",
-                Some("Kaniko build job failed"),
-                build_log,
-            )
-            .await;
+                cleanup_build_group_jobs(&jobs_api, build_group).await;
+            }
         }
-
-        // Clean up the completed Job so re-triggers don't race against
-        // a finalizing deletion.
-        let dp = kube::api::DeleteParams {
-            propagation_policy: Some(kube::api::PropagationPolicy::Background),
-            ..Default::default()
-        };
-        let _ = jobs_api.delete(job_name, &dp).await;
     }
 
     Ok(())
