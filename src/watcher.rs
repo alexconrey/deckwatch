@@ -384,11 +384,31 @@ pub async fn trigger_build_public(
     trigger_build(state, ns, dep, commit_sha, token, &auth_user).await
 }
 
-/// The set of architectures to build for multi-arch images. Each entry
-/// corresponds to a Kaniko `--customPlatform` value and a Kubernetes
-/// `kubernetes.io/arch` node-selector term so the build pod lands on a
-/// node of the correct architecture.
-const BUILD_ARCHES: &[(&str, &str)] = &[("linux/amd64", "amd64"), ("linux/arm64", "arm64")];
+/// Compiled-in fallback used when no `build_architectures` are configured
+/// in settings or when all entries are disabled.
+const DEFAULT_BUILD_ARCHES: &[(&str, &str)] = &[("linux/amd64", "amd64"), ("linux/arm64", "arm64")];
+
+/// Resolve the list of (platform, arch) pairs to build from settings.
+/// Falls back to `DEFAULT_BUILD_ARCHES` when the list is empty or fully disabled.
+fn resolve_build_arches(
+    settings: &crate::handlers::settings::DeckwatchSettings,
+) -> Vec<(String, String)> {
+    let enabled: Vec<(String, String)> = settings
+        .build_architectures
+        .iter()
+        .filter(|a| a.enabled)
+        .map(|a| (a.platform.clone(), a.arch.clone()))
+        .collect();
+    if enabled.is_empty() {
+        tracing::warn!("no build architectures enabled in settings; using compiled-in defaults");
+        DEFAULT_BUILD_ARCHES
+            .iter()
+            .map(|&(p, a)| (p.to_string(), a.to_string()))
+            .collect()
+    } else {
+        enabled
+    }
+}
 
 /// Build a `NodeAffinity` that forces a pod onto a node with the given
 /// architecture (e.g. `amd64` or `arm64`).
@@ -542,10 +562,19 @@ async fn trigger_build(
 
     let jobs_api = state.jobs_api(ns)?;
 
+    // Load settings to determine which architectures to build.
+    let settings = crate::handlers::settings::load_settings_from_db(state).await;
+    let build_arches = resolve_build_arches(&settings);
+    let single_arch = build_arches.len() == 1;
+
     // Create one Kaniko Job per target architecture.
-    for &(platform, arch) in BUILD_ARCHES {
+    for (platform, arch) in &build_arches {
         let arch_job_name = format!("{job_name}-{arch}");
-        let arch_tag = format!("{short_sha}-{arch}");
+        let arch_tag = if single_arch {
+            short_sha.to_string()
+        } else {
+            format!("{short_sha}-{arch}")
+        };
 
         let mut args = vec![
             format!("--dockerfile={dockerfile}"),
@@ -655,9 +684,11 @@ async fn create_manifest_job(
     let manifest_job_name = format!("{build_group}-manifest");
 
     // Build the list of arch-specific image refs to combine.
-    let arch_refs: Vec<String> = BUILD_ARCHES
+    let settings = crate::handlers::settings::load_settings_from_db(state).await;
+    let build_arches = resolve_build_arches(&settings);
+    let arch_refs: Vec<String> = build_arches
         .iter()
-        .map(|&(_, arch)| format!("{kaniko_destination}:{short_sha}-{arch}"))
+        .map(|(_, arch)| format!("{kaniko_destination}:{short_sha}-{arch}"))
         .collect();
 
     let manifest_tag = format!("{kaniko_destination}:{short_sha}");
@@ -926,46 +957,100 @@ async fn monitor_builds(state: &AppState) -> anyhow::Result<()> {
                 continue;
             }
             BuildGroupStatus::ArchesComplete => {
-                // All arch builds succeeded. Create the manifest assembly
-                // job to combine arch-specific images into a manifest list.
-                tracing::info!(
-                    deployment = %dep_name,
-                    build_group = %build_group,
-                    "all arch builds complete, creating manifest assembly job"
-                );
-                if let Err(e) =
-                    create_manifest_job(state, ns, dep_name, build_group, short_sha).await
-                {
-                    tracing::error!(
+                let settings = crate::handlers::settings::load_settings_from_db(state).await;
+                let build_arches = resolve_build_arches(&settings);
+
+                if build_arches.len() == 1 {
+                    // Single architecture -- no manifest assembly needed.
+                    // The image was pushed directly to the canonical tag.
+                    let oci_repo = &config.oci_repository;
+                    let new_image = format!("{oci_repo}:{short_sha}");
+
+                    tracing::info!(
                         deployment = %dep_name,
-                        error = %e,
-                        "failed to create manifest assembly job"
+                        image = %new_image,
+                        "single-arch build succeeded, updating deployment image"
                     );
-                    // Mark the build as failed so we don't retry forever.
+
+                    let dep_api = state.deployments_api(ns)?;
+                    let image_patch = serde_json::json!({
+                        "spec": {
+                            "template": {
+                                "spec": {
+                                    "containers": [{
+                                        "name": dep_name,
+                                        "image": new_image,
+                                    }]
+                                }
+                            }
+                        }
+                    });
+                    let _ = dep_api
+                        .patch(
+                            dep_name,
+                            &PatchParams::default(),
+                            &Patch::Strategic(image_patch),
+                        )
+                        .await;
+
                     update_gitops_config_field(&state.db, &config.application_id, |active| {
-                        active.last_build_status = Set(Some("failed".to_string()));
-                        active.last_build_error =
-                            Set(Some(format!("failed to create manifest assembly job: {e}")));
+                        active.last_build_status = Set(Some("success".to_string()));
                         active.last_build_time = Set(Some(now));
+                        active.last_build_error = Set(None);
                         active.updated_at = Set(now);
                     })
                     .await?;
-                    metrics::record_gitops_build(ns, "failure");
+                    metrics::record_gitops_build(ns, "success");
 
                     let build_log = capture_build_group_logs(state, ns, build_group).await;
-                    update_build_status(
-                        &state.db,
-                        build_group,
-                        "failed",
-                        Some("failed to create manifest assembly job"),
-                        build_log,
-                    )
-                    .await;
+                    update_build_status(&state.db, build_group, "succeeded", None, build_log)
+                        .await;
 
                     cleanup_build_group_jobs(&jobs_api, build_group).await;
+                } else {
+                    // Multi-arch: create the manifest assembly job.
+                    tracing::info!(
+                        deployment = %dep_name,
+                        build_group = %build_group,
+                        "all arch builds complete, creating manifest assembly job"
+                    );
+                    if let Err(e) =
+                        create_manifest_job(state, ns, dep_name, build_group, short_sha).await
+                    {
+                        tracing::error!(
+                            deployment = %dep_name,
+                            error = %e,
+                            "failed to create manifest assembly job"
+                        );
+                        update_gitops_config_field(
+                            &state.db,
+                            &config.application_id,
+                            |active| {
+                                active.last_build_status = Set(Some("failed".to_string()));
+                                active.last_build_error = Set(Some(format!(
+                                    "failed to create manifest assembly job: {e}"
+                                )));
+                                active.last_build_time = Set(Some(now));
+                                active.updated_at = Set(now);
+                            },
+                        )
+                        .await?;
+                        metrics::record_gitops_build(ns, "failure");
+
+                        let build_log =
+                            capture_build_group_logs(state, ns, build_group).await;
+                        update_build_status(
+                            &state.db,
+                            build_group,
+                            "failed",
+                            Some("failed to create manifest assembly job"),
+                            build_log,
+                        )
+                        .await;
+
+                        cleanup_build_group_jobs(&jobs_api, build_group).await;
+                    }
                 }
-                // The manifest job was created; the next poll cycle will
-                // pick it up as ManifestInProgress -> ManifestComplete.
             }
             BuildGroupStatus::ManifestComplete => {
                 // The full multi-arch build is done. Update the deployment.
