@@ -7,6 +7,9 @@ import { useAuth } from "@/composables/useAuth";
 import { useFeatures } from "@/composables/useFeatures";
 import CreateNamespaceDialog from "@/components/common/CreateNamespaceDialog.vue";
 
+declare const __APP_VERSION__: string;
+const appVersion = __APP_VERSION__;
+
 const router = useRouter();
 const ns = useNamespaceStore();
 const auth = useAuth();
@@ -179,7 +182,7 @@ const onNsCreated = (name: string) => {
   </v-main>
 
   <v-footer class="text-caption text-secondary d-flex align-center justify-center ga-2" style="min-height: 20px; max-height: 20px; padding: 0 8px; font-size: 11px;">
-    <span>Deckwatch v0.4.3</span>
+    <span>Deckwatch v{{ appVersion }}</span>
     <span>·</span>
     <a href="/docs/book/" target="_blank" class="text-secondary" style="text-decoration: none;">Help</a>
     <span>·</span>
