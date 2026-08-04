@@ -6,7 +6,9 @@ import { useNamespaceStore } from "@/stores/namespace";
 import { useAuth } from "@/composables/useAuth";
 import { useFeatures } from "@/composables/useFeatures";
 import CreateNamespaceDialog from "@/components/common/CreateNamespaceDialog.vue";
-import { version as appVersion } from "../../../package.json";
+
+declare const __APP_VERSION__: string;
+const appVersion = __APP_VERSION__;
 
 const router = useRouter();
 const ns = useNamespaceStore();
