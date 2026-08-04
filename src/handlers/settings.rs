@@ -91,6 +91,8 @@ pub struct DeckwatchSettings {
     /// once (e.g. ALB annotations for EKS) and users pick one in the dialog.
     #[serde(default)]
     pub ingress_templates: Vec<IngressTemplate>,
+    #[serde(default = "default_build_architectures")]
+    pub build_architectures: Vec<BuildArchitecture>,
 }
 
 /// Encrypted credential storage. Each field holds an AES-256-GCM ciphertext
@@ -281,6 +283,29 @@ pub struct IngressTemplate {
     pub annotations: BTreeMap<String, String>,
     #[serde(default)]
     pub is_default: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BuildArchitecture {
+    pub platform: String,
+    pub arch: String,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+}
+
+pub fn default_build_architectures() -> Vec<BuildArchitecture> {
+    vec![
+        BuildArchitecture {
+            platform: "linux/amd64".into(),
+            arch: "amd64".into(),
+            enabled: true,
+        },
+        BuildArchitecture {
+            platform: "linux/arm64".into(),
+            arch: "arm64".into(),
+            enabled: true,
+        },
+    ]
 }
 
 pub async fn get_settings(
@@ -497,6 +522,7 @@ fn default_settings(state: &AppState) -> DeckwatchSettings {
         ai_provider: AiProviderConfig::default(),
         credentials: None,
         ingress_templates: Vec::new(),
+        build_architectures: default_build_architectures(),
     }
 }
 

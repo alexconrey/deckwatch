@@ -126,14 +126,20 @@ fn git_auth_user_unknown_host_defaults_to_oauth2() {
 
 #[test]
 fn build_arches_contains_both_platforms() {
-    let arches: Vec<&str> = BUILD_ARCHES.iter().map(|&(_, arch)| arch).collect();
-    assert!(arches.contains(&"amd64"), "BUILD_ARCHES must include amd64");
-    assert!(arches.contains(&"arm64"), "BUILD_ARCHES must include arm64");
+    let arches: Vec<&str> = DEFAULT_BUILD_ARCHES.iter().map(|&(_, arch)| arch).collect();
+    assert!(
+        arches.contains(&"amd64"),
+        "DEFAULT_BUILD_ARCHES must include amd64"
+    );
+    assert!(
+        arches.contains(&"arm64"),
+        "DEFAULT_BUILD_ARCHES must include arm64"
+    );
 }
 
 #[test]
 fn build_arches_platform_strings_are_valid_kaniko_format() {
-    for &(platform, arch) in BUILD_ARCHES {
+    for &(platform, arch) in DEFAULT_BUILD_ARCHES {
         assert!(
             platform.starts_with("linux/"),
             "platform {platform} must start with linux/"
@@ -276,7 +282,7 @@ fn build_job_naming_conventions() {
     let short_sha = "abc1234";
     let job_name = format!("{dep_name}-build-{short_sha}");
 
-    for &(_, arch) in BUILD_ARCHES {
+    for &(_, arch) in DEFAULT_BUILD_ARCHES {
         let arch_job = format!("{job_name}-{arch}");
         assert!(arch_job.ends_with(arch));
         assert!(arch_job.contains(&job_name));
@@ -290,10 +296,192 @@ fn build_job_naming_conventions() {
 #[test]
 fn arch_tag_format() {
     let short_sha = "abc1234";
-    for &(_, arch) in BUILD_ARCHES {
+    for &(_, arch) in DEFAULT_BUILD_ARCHES {
         let tag = format!("{short_sha}-{arch}");
         assert!(tag.starts_with(short_sha));
         assert!(tag.ends_with(arch));
         assert!(tag.contains('-'));
+    }
+}
+
+// ---- configurable build architectures ----
+
+#[test]
+fn resolve_build_arches_uses_enabled_entries() {
+    use crate::handlers::settings::{BuildArchitecture, DeckwatchSettings};
+    let settings = DeckwatchSettings {
+        build_architectures: vec![
+            BuildArchitecture {
+                platform: "linux/amd64".into(),
+                arch: "amd64".into(),
+                enabled: true,
+            },
+            BuildArchitecture {
+                platform: "linux/arm64".into(),
+                arch: "arm64".into(),
+                enabled: false,
+            },
+        ],
+        ..Default::default()
+    };
+    let arches = resolve_build_arches(&settings);
+    assert_eq!(arches.len(), 1);
+    assert_eq!(arches[0], ("linux/amd64".to_string(), "amd64".to_string()));
+}
+
+#[test]
+fn resolve_build_arches_falls_back_when_all_disabled() {
+    use crate::handlers::settings::{BuildArchitecture, DeckwatchSettings};
+    let settings = DeckwatchSettings {
+        build_architectures: vec![BuildArchitecture {
+            platform: "linux/amd64".into(),
+            arch: "amd64".into(),
+            enabled: false,
+        }],
+        ..Default::default()
+    };
+    let arches = resolve_build_arches(&settings);
+    assert_eq!(arches.len(), DEFAULT_BUILD_ARCHES.len());
+}
+
+#[test]
+fn resolve_build_arches_falls_back_when_empty() {
+    use crate::handlers::settings::DeckwatchSettings;
+    let settings = DeckwatchSettings {
+        build_architectures: vec![],
+        ..Default::default()
+    };
+    let arches = resolve_build_arches(&settings);
+    assert_eq!(arches.len(), DEFAULT_BUILD_ARCHES.len());
+}
+
+#[test]
+fn single_arch_build_uses_canonical_tag() {
+    let short_sha = "abc1234";
+    let build_arches = vec![("linux/amd64".to_string(), "amd64".to_string())];
+    let single_arch = build_arches.len() == 1;
+    let tag = if single_arch {
+        short_sha.to_string()
+    } else {
+        format!("{short_sha}-{}", build_arches[0].1)
+    };
+    assert_eq!(tag, "abc1234");
+}
+
+#[test]
+fn multi_arch_build_uses_arch_suffixed_tag() {
+    let short_sha = "abc1234";
+    let build_arches = vec![
+        ("linux/amd64".to_string(), "amd64".to_string()),
+        ("linux/arm64".to_string(), "arm64".to_string()),
+    ];
+    let single_arch = build_arches.len() == 1;
+    for (_, arch) in &build_arches {
+        let tag = if single_arch {
+            short_sha.to_string()
+        } else {
+            format!("{short_sha}-{arch}")
+        };
+        assert!(tag.contains('-'));
+        assert!(tag.starts_with(short_sha));
+    }
+}
+
+#[test]
+fn resolve_build_arches_all_enabled() {
+    use crate::handlers::settings::{BuildArchitecture, DeckwatchSettings};
+    let settings = DeckwatchSettings {
+        build_architectures: vec![
+            BuildArchitecture {
+                platform: "linux/amd64".into(),
+                arch: "amd64".into(),
+                enabled: true,
+            },
+            BuildArchitecture {
+                platform: "linux/arm64".into(),
+                arch: "arm64".into(),
+                enabled: true,
+            },
+        ],
+        ..Default::default()
+    };
+    let arches = resolve_build_arches(&settings);
+    assert_eq!(arches.len(), 2);
+    assert_eq!(arches[0].1, "amd64");
+    assert_eq!(arches[1].1, "arm64");
+}
+
+#[test]
+fn resolve_build_arches_preserves_order() {
+    use crate::handlers::settings::{BuildArchitecture, DeckwatchSettings};
+    let settings = DeckwatchSettings {
+        build_architectures: vec![
+            BuildArchitecture {
+                platform: "linux/arm64".into(),
+                arch: "arm64".into(),
+                enabled: true,
+            },
+            BuildArchitecture {
+                platform: "linux/amd64".into(),
+                arch: "amd64".into(),
+                enabled: true,
+            },
+        ],
+        ..Default::default()
+    };
+    let arches = resolve_build_arches(&settings);
+    assert_eq!(arches[0].1, "arm64");
+    assert_eq!(arches[1].1, "amd64");
+}
+
+#[test]
+fn resolve_build_arches_with_custom_arch() {
+    use crate::handlers::settings::{BuildArchitecture, DeckwatchSettings};
+    let settings = DeckwatchSettings {
+        build_architectures: vec![
+            BuildArchitecture {
+                platform: "linux/amd64".into(),
+                arch: "amd64".into(),
+                enabled: true,
+            },
+            BuildArchitecture {
+                platform: "linux/riscv64".into(),
+                arch: "riscv64".into(),
+                enabled: true,
+            },
+        ],
+        ..Default::default()
+    };
+    let arches = resolve_build_arches(&settings);
+    assert_eq!(arches.len(), 2);
+    assert_eq!(
+        arches[1],
+        ("linux/riscv64".to_string(), "riscv64".to_string())
+    );
+}
+
+#[test]
+fn resolve_build_arches_fallback_matches_default_constant() {
+    use crate::handlers::settings::DeckwatchSettings;
+    let settings = DeckwatchSettings {
+        build_architectures: vec![],
+        ..Default::default()
+    };
+    let arches = resolve_build_arches(&settings);
+    for (i, &(platform, arch)) in DEFAULT_BUILD_ARCHES.iter().enumerate() {
+        assert_eq!(arches[i].0, platform);
+        assert_eq!(arches[i].1, arch);
+    }
+}
+
+#[test]
+fn default_build_architectures_matches_default_constant() {
+    use crate::handlers::settings::default_build_architectures;
+    let defaults = default_build_architectures();
+    assert_eq!(defaults.len(), DEFAULT_BUILD_ARCHES.len());
+    for (i, &(platform, arch)) in DEFAULT_BUILD_ARCHES.iter().enumerate() {
+        assert_eq!(defaults[i].platform, platform);
+        assert_eq!(defaults[i].arch, arch);
+        assert!(defaults[i].enabled);
     }
 }
