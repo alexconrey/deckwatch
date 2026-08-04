@@ -363,9 +363,15 @@ pub async fn set_config(
             let mut active: gitops_configs::ActiveModel = row.into();
             active.repo_url = sea_orm::ActiveValue::Set(req.repo_url);
             active.branch = sea_orm::ActiveValue::Set(branch);
-            active.token_secret = sea_orm::ActiveValue::Set(token_secret);
+            active.token_secret = sea_orm::ActiveValue::Set(token_secret.clone());
             if let Some(ref et) = encrypted_token {
+                // A new per-app token was provided — store it.
                 active.encrypted_token = sea_orm::ActiveValue::Set(Some(et.clone()));
+            } else if !token_secret.is_empty() {
+                // Switching to a shared token_secret — clear any stale
+                // per-app encrypted token so the token_secret path is
+                // used at build time.
+                active.encrypted_token = sea_orm::ActiveValue::Set(None);
             }
             active.git_auth_user = sea_orm::ActiveValue::Set(git_auth_user.clone());
             active.dockerfile_path = sea_orm::ActiveValue::Set(dockerfile_path);
@@ -586,10 +592,11 @@ pub async fn trigger_build(
     t.finish(dep.is_ok());
     let dep = dep?;
 
-    let token = if let Some(encrypted) = config_row.encrypted_token.as_deref() {
-        crate::crypto::decrypt(&state.encryption_key, encrypted)
-            .map_err(|e| AppError::BadRequest(format!("token decrypt failed: {e}")))?
-    } else if !config_row.token_secret.is_empty() {
+    // Resolve the git token. When a shared token_secret is configured it
+    // takes priority over any per-app encrypted_token so that switching
+    // from per-app to shared tokens works even if a stale encrypted_token
+    // row remains in the database.
+    let token = if !config_row.token_secret.is_empty() {
         let settings = crate::handlers::settings::load_settings_from_db(&state).await;
         let token_entry = settings.git_token_secrets.iter().find(|t| {
             t.name == config_row.token_secret || t.secret_name == config_row.token_secret
@@ -599,6 +606,9 @@ pub async fn trigger_build(
                 .map_err(|e| AppError::BadRequest(format!("token decrypt failed: {e}")))?,
             None => String::new(),
         }
+    } else if let Some(encrypted) = config_row.encrypted_token.as_deref() {
+        crate::crypto::decrypt(&state.encryption_key, encrypted)
+            .map_err(|e| AppError::BadRequest(format!("token decrypt failed: {e}")))?
     } else {
         String::new()
     };

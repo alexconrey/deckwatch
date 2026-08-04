@@ -125,10 +125,10 @@ async fn check_and_build(
 ) -> anyhow::Result<()> {
     let repo_url = &config.repo_url;
     let branch = &config.branch;
-    let token = if let Some(encrypted) = config.encrypted_token.as_deref() {
-        // Per-app encrypted token (stored on the gitops config itself)
-        crate::crypto::decrypt(&state.encryption_key, encrypted).unwrap_or_default()
-    } else if !config.token_secret.is_empty() {
+    // Resolve the git token. Shared token_secret takes priority over any
+    // per-app encrypted_token so that switching from per-app to shared
+    // tokens works even if a stale encrypted_token row remains.
+    let token = if !config.token_secret.is_empty() {
         // Shared token from settings (looked up by name)
         let settings = crate::handlers::settings::load_settings_from_db(state).await;
         let token_entry = settings
@@ -141,6 +141,9 @@ async fn check_and_build(
             }
             None => String::new(),
         }
+    } else if let Some(encrypted) = config.encrypted_token.as_deref() {
+        // Per-app encrypted token (stored on the gitops config itself)
+        crate::crypto::decrypt(&state.encryption_key, encrypted).unwrap_or_default()
     } else {
         String::new()
     };
