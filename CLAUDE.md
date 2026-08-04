@@ -9,7 +9,7 @@ health probe configuration, GitOps pipelines, an embedded OCI container
 registry, AI diagnostics, and an MCP server for Claude Code integration.
 
 **Repository:** https://github.com/alexconrey/deckwatch
-**Current version:** v0.4.5
+**Current version:** v0.4.6
 
 ## Architecture
 
@@ -199,12 +199,13 @@ version. Never tag a release without updating the Helm chart — a mismatched
 `appVersion` in `Chart.yaml` causes the deployed UI to show the wrong version
 and breaks ArgoCD drift detection.
 
-When bumping the version, update **all five files in the same commit**:
+When bumping the version, update **all four files in the same commit**:
 1. `Cargo.toml` → `version`
 2. `Cargo.lock` → run `cargo check` to regenerate
 3. `helm/deckwatch/Chart.yaml` → `version` AND `appVersion`
-4. `frontend/package.json` → `version`
-5. `CLAUDE.md` → `Current version`
+4. `frontend/package.json` → `version` (the UI footer reads this automatically)
+
+Also update `CLAUDE.md` → `Current version` in the same commit.
 
 **Do not split these across separate PRs.** A release commit must touch all five
 so the tag, the binary, the chart, the frontend, and the docs all agree.
