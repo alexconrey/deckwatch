@@ -9,6 +9,7 @@ import type {
   GitOpsStatus,
   GitOpsConfigRequest,
   BuildSummary,
+  JobPodSummary,
   DiagAgent,
   DiagStatus,
   DiagnosticStatusResponse,
@@ -33,8 +34,8 @@ const showDisableDialog = ref(false);
 const showBuilds = ref(false);
 const showLogsDialog = ref(false);
 const logsJobName = ref<string | null>(null);
-const logsPodName = ref<string | null>(null);
-const logsPodPhase = ref<string | null>(null);
+const logsPods = ref<JobPodSummary[]>([]);
+const logsActiveTab = ref<number>(0);
 const logsError = ref<string | null>(null);
 const logsLoading = ref(false);
 
@@ -60,32 +61,43 @@ let fixSseGotEvent = false;
 
 const viewBuildLogs = async (jobName: string) => {
   logsJobName.value = jobName;
-  logsPodName.value = null;
-  logsPodPhase.value = null;
+  logsPods.value = [];
+  logsActiveTab.value = 0;
   logsError.value = null;
   logsLoading.value = true;
   showLogsDialog.value = true;
   try {
     const res = await gitopsApi.listJobPods(props.namespace, jobName);
-    const pod = res.pods[0];
-    if (!pod) {
-      logsError.value = "No pod found for this build job (it may have been cleaned up).";
+    if (res.pods.length === 0) {
+      logsError.value = "No pods found for this build (they may have been cleaned up).";
       return;
     }
-    logsPodName.value = pod.name;
-    logsPodPhase.value = pod.phase;
+    // Sort pods so architecture jobs come first in a predictable order
+    // (amd64, arm64, then manifest), with any unlabeled pods at the end.
+    const archOrder: Record<string, number> = { amd64: 0, arm64: 1, manifest: 2 };
+    logsPods.value = res.pods.sort((a, b) => {
+      const ao = archOrder[a.arch ?? ""] ?? 99;
+      const bo = archOrder[b.arch ?? ""] ?? 99;
+      return ao - bo;
+    });
   } catch (e) {
-    logsError.value = e instanceof Error ? e.message : "Failed to load build pod";
+    logsError.value = e instanceof Error ? e.message : "Failed to load build pods";
   } finally {
     logsLoading.value = false;
   }
 };
 
+/** Label for a build pod tab. Shows arch when available, otherwise pod name. */
+const podTabLabel = (pod: JobPodSummary): string => {
+  if (pod.arch) return pod.arch;
+  return pod.name;
+};
+
 const closeLogsDialog = () => {
   showLogsDialog.value = false;
   logsJobName.value = null;
-  logsPodName.value = null;
-  logsPodPhase.value = null;
+  logsPods.value = [];
+  logsActiveTab.value = 0;
   logsError.value = null;
 };
 
@@ -219,31 +231,41 @@ async function onFixBuild(
 
   try {
     const podRes = await gitopsApi.listJobPods(props.namespace, jobName);
-    const pod = podRes.pods[0];
-    if (!pod) {
+    if (podRes.pods.length === 0) {
       throw new Error(
-        "Build pod is no longer available - cannot fetch logs for AI fix.",
+        "Build pods are no longer available - cannot fetch logs for AI fix.",
       );
     }
 
-    let logsText = "";
-    try {
-      const logsRes = await gitopsApi.getPodLogsHistory(
-        props.namespace,
-        pod.name,
-        { tailLines: 2000 },
-      );
-      logsText = logsRes.lines.join("\n");
-    } catch (e) {
-      logsText = `(failed to fetch logs: ${
-        e instanceof Error ? e.message : String(e)
-      })`;
+    // Gather logs from all arch pods so the AI agent gets full context.
+    const logSections: string[] = [];
+    for (const pod of podRes.pods) {
+      const header = pod.arch
+        ? `--- [${pod.arch}] ${pod.name} (${pod.phase}) ---`
+        : `--- ${pod.name} (${pod.phase}) ---`;
+      try {
+        const logsRes = await gitopsApi.getPodLogsHistory(
+          props.namespace,
+          pod.name,
+          { tailLines: 1000 },
+        );
+        logSections.push(`${header}\n${logsRes.lines.join("\n")}`);
+      } catch (e) {
+        logSections.push(
+          `${header}\n(failed to fetch logs: ${
+            e instanceof Error ? e.message : String(e)
+          })`,
+        );
+      }
     }
+    const logsText = logSections.join("\n\n");
 
     const context = buildDiagnosticContext(jobName, commitSha, logsText);
 
+    // Use the first available pod as the diagnostic target.
+    const targetPod = podRes.pods[0];
     const resp = await diagnosticsApi.create(props.namespace, {
-      pod_name: pod.name,
+      pod_name: targetPod.name,
       logs: context,
       agent,
     });
@@ -752,7 +774,7 @@ const isFailedBuildStatus = (s: string | null | undefined): boolean =>
       @confirm="handleDisable"
     />
 
-    <v-dialog v-model="showLogsDialog" max-width="1200" scrollable @update:model-value="(v) => !v && closeLogsDialog()">
+    <v-dialog v-model="showLogsDialog" max-width="1200" scrollable @update:model-value="(v: boolean) => !v && closeLogsDialog()">
       <v-card>
         <v-card-title class="d-flex align-center">
           <v-icon icon="mdi-console" class="mr-2" size="small" />
@@ -769,14 +791,48 @@ const isFailedBuildStatus = (s: string | null | undefined): boolean =>
             {{ logsError }}
           </v-alert>
           <div v-if="logsLoading" class="text-center py-4 text-secondary">
-            Finding build pod...
+            Finding build pods...
           </div>
+
+          <!-- Single pod (legacy single-arch builds) -->
           <LogViewer
-            v-else-if="logsPodName"
+            v-else-if="logsPods.length === 1"
             :namespace="namespace"
-            :pod-name="logsPodName"
-            :pod-phase="logsPodPhase ?? undefined"
+            :pod-name="logsPods[0].name"
+            :pod-phase="logsPods[0].phase"
           />
+
+          <!-- Multiple pods (multi-arch builds) — tabbed view -->
+          <template v-else-if="logsPods.length > 1">
+            <v-tabs v-model="logsActiveTab" density="compact" class="mb-2">
+              <v-tab
+                v-for="(pod, idx) in logsPods"
+                :key="pod.name"
+                :value="idx"
+              >
+                <v-icon
+                  :icon="pod.phase === 'Succeeded' ? 'mdi-check-circle' : pod.phase === 'Failed' ? 'mdi-close-circle' : 'mdi-progress-clock'"
+                  :color="pod.phase === 'Succeeded' ? 'success' : pod.phase === 'Failed' ? 'error' : 'info'"
+                  size="small"
+                  class="mr-1"
+                />
+                {{ podTabLabel(pod) }}
+              </v-tab>
+            </v-tabs>
+            <v-window v-model="logsActiveTab">
+              <v-window-item
+                v-for="(pod, idx) in logsPods"
+                :key="pod.name"
+                :value="idx"
+              >
+                <LogViewer
+                  :namespace="namespace"
+                  :pod-name="pod.name"
+                  :pod-phase="pod.phase"
+                />
+              </v-window-item>
+            </v-window>
+          </template>
         </v-card-text>
       </v-card>
     </v-dialog>

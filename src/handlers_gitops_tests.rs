@@ -305,10 +305,30 @@ fn job_pod_summary_serializes() {
     let summary = JobPodSummary {
         name: "build-abc-xyz".to_string(),
         phase: "Running".to_string(),
+        job_name: Some("build-abc-amd64".to_string()),
+        arch: Some("amd64".to_string()),
     };
     let value = serde_json::to_value(&summary).expect("serialize");
     assert_eq!(value["name"], "build-abc-xyz");
     assert_eq!(value["phase"], "Running");
+    assert_eq!(value["job_name"], "build-abc-amd64");
+    assert_eq!(value["arch"], "amd64");
+}
+
+#[test]
+fn job_pod_summary_omits_none_fields() {
+    let summary = JobPodSummary {
+        name: "build-abc-xyz".to_string(),
+        phase: "Succeeded".to_string(),
+        job_name: None,
+        arch: None,
+    };
+    let value = serde_json::to_value(&summary).expect("serialize");
+    assert_eq!(value["name"], "build-abc-xyz");
+    assert_eq!(value["phase"], "Succeeded");
+    // None fields should be omitted from JSON.
+    assert!(value.get("job_name").is_none());
+    assert!(value.get("arch").is_none());
 }
 
 #[test]
