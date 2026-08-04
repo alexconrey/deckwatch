@@ -127,8 +127,14 @@ fn git_auth_user_unknown_host_defaults_to_oauth2() {
 #[test]
 fn build_arches_contains_both_platforms() {
     let arches: Vec<&str> = DEFAULT_BUILD_ARCHES.iter().map(|&(_, arch)| arch).collect();
-    assert!(arches.contains(&"amd64"), "DEFAULT_BUILD_ARCHES must include amd64");
-    assert!(arches.contains(&"arm64"), "DEFAULT_BUILD_ARCHES must include arm64");
+    assert!(
+        arches.contains(&"amd64"),
+        "DEFAULT_BUILD_ARCHES must include amd64"
+    );
+    assert!(
+        arches.contains(&"arm64"),
+        "DEFAULT_BUILD_ARCHES must include arm64"
+    );
 }
 
 #[test]
@@ -448,7 +454,10 @@ fn resolve_build_arches_with_custom_arch() {
     };
     let arches = resolve_build_arches(&settings);
     assert_eq!(arches.len(), 2);
-    assert_eq!(arches[1], ("linux/riscv64".to_string(), "riscv64".to_string()));
+    assert_eq!(
+        arches[1],
+        ("linux/riscv64".to_string(), "riscv64".to_string())
+    );
 }
 
 #[test]

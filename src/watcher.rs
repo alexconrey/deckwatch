@@ -1003,8 +1003,7 @@ async fn monitor_builds(state: &AppState) -> anyhow::Result<()> {
                     metrics::record_gitops_build(ns, "success");
 
                     let build_log = capture_build_group_logs(state, ns, build_group).await;
-                    update_build_status(&state.db, build_group, "succeeded", None, build_log)
-                        .await;
+                    update_build_status(&state.db, build_group, "succeeded", None, build_log).await;
 
                     cleanup_build_group_jobs(&jobs_api, build_group).await;
                 } else {
@@ -1022,23 +1021,17 @@ async fn monitor_builds(state: &AppState) -> anyhow::Result<()> {
                             error = %e,
                             "failed to create manifest assembly job"
                         );
-                        update_gitops_config_field(
-                            &state.db,
-                            &config.application_id,
-                            |active| {
-                                active.last_build_status = Set(Some("failed".to_string()));
-                                active.last_build_error = Set(Some(format!(
-                                    "failed to create manifest assembly job: {e}"
-                                )));
-                                active.last_build_time = Set(Some(now));
-                                active.updated_at = Set(now);
-                            },
-                        )
+                        update_gitops_config_field(&state.db, &config.application_id, |active| {
+                            active.last_build_status = Set(Some("failed".to_string()));
+                            active.last_build_error =
+                                Set(Some(format!("failed to create manifest assembly job: {e}")));
+                            active.last_build_time = Set(Some(now));
+                            active.updated_at = Set(now);
+                        })
                         .await?;
                         metrics::record_gitops_build(ns, "failure");
 
-                        let build_log =
-                            capture_build_group_logs(state, ns, build_group).await;
+                        let build_log = capture_build_group_logs(state, ns, build_group).await;
                         update_build_status(
                             &state.db,
                             build_group,
