@@ -462,11 +462,7 @@ fn check_internal_registry(
 /// Create a Kubernetes Job and wait for any prior Job with the same name to
 /// be cleaned up (retries up to 5 times on 409 AlreadyExists).
 async fn create_job_with_cleanup(jobs_api: &Api<Job>, job: &Job) -> anyhow::Result<()> {
-    let job_name = job
-        .metadata
-        .name
-        .as_deref()
-        .unwrap_or("unknown");
+    let job_name = job.metadata.name.as_deref().unwrap_or("unknown");
 
     // Clean up any existing job with the same name. Use background
     // propagation and retry the create if the old object is still
@@ -571,10 +567,7 @@ async fn trigger_build(
         let mut labels = BTreeMap::new();
         labels.insert("deckwatch.io/build".to_string(), "true".to_string());
         labels.insert("deckwatch.io/deployment".to_string(), dep_name.clone());
-        labels.insert(
-            "deckwatch.io/build-group".to_string(),
-            job_name.clone(),
-        );
+        labels.insert("deckwatch.io/build-group".to_string(), job_name.clone());
         labels.insert("deckwatch.io/build-arch".to_string(), arch.to_string());
 
         let job = Job {
@@ -593,9 +586,7 @@ async fn trigger_build(
                         affinity: Some(arch_node_affinity(arch)),
                         containers: vec![Container {
                             name: "kaniko".to_string(),
-                            image: Some(
-                                "gcr.io/kaniko-project/executor:latest".to_string(),
-                            ),
+                            image: Some("gcr.io/kaniko-project/executor:latest".to_string()),
                             args: Some(args),
                             env: if token.is_empty() {
                                 None
@@ -718,9 +709,7 @@ async fn create_manifest_job(
                     restart_policy: Some("Never".to_string()),
                     containers: vec![Container {
                         name: "crane".to_string(),
-                        image: Some(
-                            "gcr.io/go-containerregistry/crane:latest".to_string(),
-                        ),
+                        image: Some("gcr.io/go-containerregistry/crane:latest".to_string()),
                         args: Some(crane_args),
                         ..Default::default()
                     }],
@@ -766,8 +755,7 @@ async fn check_build_group_status(
     jobs_api: &Api<Job>,
     build_group: &str,
 ) -> anyhow::Result<BuildGroupStatus> {
-    let lp =
-        ListParams::default().labels(&format!("deckwatch.io/build-group={build_group}"));
+    let lp = ListParams::default().labels(&format!("deckwatch.io/build-group={build_group}"));
     let jobs = jobs_api.list(&lp).await?;
 
     let mut arch_total = 0;
@@ -838,14 +826,9 @@ async fn check_build_group_status(
 
 /// Collect build logs from all arch-build and manifest jobs in a group.
 /// Returns a combined log string with per-job headers.
-async fn capture_build_group_logs(
-    state: &AppState,
-    ns: &str,
-    build_group: &str,
-) -> Option<String> {
+async fn capture_build_group_logs(state: &AppState, ns: &str, build_group: &str) -> Option<String> {
     let jobs_api: Api<Job> = Api::namespaced(state.kube_client.clone(), ns);
-    let lp =
-        ListParams::default().labels(&format!("deckwatch.io/build-group={build_group}"));
+    let lp = ListParams::default().labels(&format!("deckwatch.io/build-group={build_group}"));
     let jobs = match jobs_api.list(&lp).await {
         Ok(j) => j,
         Err(_) => return None,
@@ -853,11 +836,7 @@ async fn capture_build_group_logs(
 
     let mut combined = String::new();
     for job in jobs.iter() {
-        let jn = job
-            .metadata
-            .name
-            .as_deref()
-            .unwrap_or("unknown");
+        let jn = job.metadata.name.as_deref().unwrap_or("unknown");
         if let Some(log) = capture_build_log(state, ns, jn).await {
             if !combined.is_empty() {
                 combined.push_str("\n\n");
@@ -887,8 +866,7 @@ async fn capture_build_group_logs(
 
 /// Clean up all Jobs belonging to a build group.
 async fn cleanup_build_group_jobs(jobs_api: &Api<Job>, build_group: &str) {
-    let lp =
-        ListParams::default().labels(&format!("deckwatch.io/build-group={build_group}"));
+    let lp = ListParams::default().labels(&format!("deckwatch.io/build-group={build_group}"));
     let dp = kube::api::DeleteParams {
         propagation_policy: Some(kube::api::PropagationPolicy::Background),
         ..Default::default()
@@ -966,17 +944,15 @@ async fn monitor_builds(state: &AppState) -> anyhow::Result<()> {
                     // Mark the build as failed so we don't retry forever.
                     update_gitops_config_field(&state.db, &config.application_id, |active| {
                         active.last_build_status = Set(Some("failed".to_string()));
-                        active.last_build_error = Set(Some(format!(
-                            "failed to create manifest assembly job: {e}"
-                        )));
+                        active.last_build_error =
+                            Set(Some(format!("failed to create manifest assembly job: {e}")));
                         active.last_build_time = Set(Some(now));
                         active.updated_at = Set(now);
                     })
                     .await?;
                     metrics::record_gitops_build(ns, "failure");
 
-                    let build_log =
-                        capture_build_group_logs(state, ns, build_group).await;
+                    let build_log = capture_build_group_logs(state, ns, build_group).await;
                     update_build_status(
                         &state.db,
                         build_group,
@@ -1032,10 +1008,8 @@ async fn monitor_builds(state: &AppState) -> anyhow::Result<()> {
                 .await?;
                 metrics::record_gitops_build(ns, "success");
 
-                let build_log =
-                    capture_build_group_logs(state, ns, build_group).await;
-                update_build_status(&state.db, build_group, "succeeded", None, build_log)
-                    .await;
+                let build_log = capture_build_group_logs(state, ns, build_group).await;
+                update_build_status(&state.db, build_group, "succeeded", None, build_log).await;
 
                 cleanup_build_group_jobs(&jobs_api, build_group).await;
             }
@@ -1055,16 +1029,9 @@ async fn monitor_builds(state: &AppState) -> anyhow::Result<()> {
                 .await?;
                 metrics::record_gitops_build(ns, "failure");
 
-                let build_log =
-                    capture_build_group_logs(state, ns, build_group).await;
-                update_build_status(
-                    &state.db,
-                    build_group,
-                    "failed",
-                    Some(&reason),
-                    build_log,
-                )
-                .await;
+                let build_log = capture_build_group_logs(state, ns, build_group).await;
+                update_build_status(&state.db, build_group, "failed", Some(&reason), build_log)
+                    .await;
 
                 cleanup_build_group_jobs(&jobs_api, build_group).await;
             }

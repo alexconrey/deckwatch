@@ -261,7 +261,11 @@ fn check_internal_registry_false_for_external() {
 
 #[test]
 fn check_internal_registry_false_when_both_none() {
-    assert!(!check_internal_registry(None, None, "ghcr.io/org/myapp:latest"));
+    assert!(!check_internal_registry(
+        None,
+        None,
+        "ghcr.io/org/myapp:latest"
+    ));
 }
 
 // ---- job naming conventions ----

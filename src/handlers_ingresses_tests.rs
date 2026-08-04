@@ -168,7 +168,9 @@ fn ingress_class_summary_serializes_non_default() {
 
 #[test]
 fn ingress_class_list_response_serializes_empty() {
-    let resp = IngressClassListResponse { ingress_classes: vec![] };
+    let resp = IngressClassListResponse {
+        ingress_classes: vec![],
+    };
     let value = serde_json::to_value(&resp).expect("serialize");
     assert_eq!(value["ingress_classes"], serde_json::json!([]));
 }
@@ -192,7 +194,9 @@ fn ingress_class_list_response_serializes_multiple() {
         ],
     };
     let value = serde_json::to_value(&resp).expect("serialize");
-    let classes = value["ingress_classes"].as_array().expect("ingress_classes array");
+    let classes = value["ingress_classes"]
+        .as_array()
+        .expect("ingress_classes array");
     assert_eq!(classes.len(), 2);
     assert_eq!(classes[0]["name"], "alb");
     assert_eq!(classes[0]["is_default"], true);
