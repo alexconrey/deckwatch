@@ -93,6 +93,8 @@ pub struct DeckwatchSettings {
     pub ingress_templates: Vec<IngressTemplate>,
     #[serde(default = "default_build_architectures")]
     pub build_architectures: Vec<BuildArchitecture>,
+    #[serde(default = "default_build_settings")]
+    pub build_settings: BuildSettings,
 }
 
 /// Encrypted credential storage. Each field holds an AES-256-GCM ciphertext
@@ -291,6 +293,69 @@ pub struct BuildArchitecture {
     pub arch: String,
     #[serde(default = "default_true")]
     pub enabled: bool,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct BuildSettings {
+    #[serde(default = "default_kaniko_image")]
+    pub kaniko_image: String,
+    #[serde(default = "default_crane_image")]
+    pub crane_image: String,
+    #[serde(default = "default_platform_flag")]
+    pub platform_flag: String,
+    #[serde(default)]
+    pub extra_kaniko_args: Vec<String>,
+    #[serde(default = "default_true")]
+    pub cache_enabled: bool,
+    #[serde(default = "default_snapshot_mode")]
+    pub snapshot_mode: String,
+    #[serde(default = "default_true")]
+    pub docker_media_types: bool,
+    #[serde(default = "default_job_ttl")]
+    pub job_ttl_seconds: i32,
+    #[serde(default)]
+    pub kaniko_backoff_limit: i32,
+    #[serde(default = "default_crane_backoff")]
+    pub crane_backoff_limit: i32,
+}
+
+fn default_kaniko_image() -> String {
+    "gcr.io/kaniko-project/executor:v1.24.0".to_string()
+}
+
+fn default_crane_image() -> String {
+    "gcr.io/go-containerregistry/crane:latest".to_string()
+}
+
+fn default_platform_flag() -> String {
+    "--custom-platform".to_string()
+}
+
+fn default_snapshot_mode() -> String {
+    "redo".to_string()
+}
+
+fn default_job_ttl() -> i32 {
+    3600
+}
+
+fn default_crane_backoff() -> i32 {
+    1
+}
+
+pub fn default_build_settings() -> BuildSettings {
+    BuildSettings {
+        kaniko_image: default_kaniko_image(),
+        crane_image: default_crane_image(),
+        platform_flag: default_platform_flag(),
+        extra_kaniko_args: Vec::new(),
+        cache_enabled: true,
+        snapshot_mode: default_snapshot_mode(),
+        docker_media_types: true,
+        job_ttl_seconds: default_job_ttl(),
+        kaniko_backoff_limit: 0,
+        crane_backoff_limit: default_crane_backoff(),
+    }
 }
 
 pub fn default_build_architectures() -> Vec<BuildArchitecture> {
@@ -523,6 +588,7 @@ fn default_settings(state: &AppState) -> DeckwatchSettings {
         credentials: None,
         ingress_templates: Vec::new(),
         build_architectures: default_build_architectures(),
+        build_settings: default_build_settings(),
     }
 }
 

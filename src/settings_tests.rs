@@ -143,3 +143,80 @@ fn test_build_architectures_custom_arch_roundtrip() {
     assert_eq!(arches.len(), 3);
     assert_eq!(arches[2]["enabled"], false);
 }
+
+#[test]
+fn test_build_settings_defaults_from_empty_json() {
+    let settings: DeckwatchSettings = serde_json::from_str("{}").unwrap();
+    assert_eq!(
+        settings.build_settings.kaniko_image,
+        "gcr.io/kaniko-project/executor:v1.24.0"
+    );
+    assert_eq!(
+        settings.build_settings.crane_image,
+        "gcr.io/go-containerregistry/crane:latest"
+    );
+    assert_eq!(settings.build_settings.platform_flag, "--custom-platform");
+    assert!(settings.build_settings.cache_enabled);
+    assert_eq!(settings.build_settings.snapshot_mode, "redo");
+    assert!(settings.build_settings.docker_media_types);
+    assert_eq!(settings.build_settings.job_ttl_seconds, 3600);
+    assert_eq!(settings.build_settings.kaniko_backoff_limit, 0);
+    assert_eq!(settings.build_settings.crane_backoff_limit, 1);
+    assert!(settings.build_settings.extra_kaniko_args.is_empty());
+}
+
+#[test]
+fn test_build_settings_roundtrip() {
+    let json = serde_json::json!({
+        "build_settings": {
+            "kaniko_image": "gcr.io/kaniko-project/executor:v1.23.0",
+            "cache_enabled": false,
+            "docker_media_types": false,
+            "extra_kaniko_args": ["--verbosity=debug"]
+        }
+    });
+    let settings: DeckwatchSettings = serde_json::from_value(json).unwrap();
+    assert_eq!(
+        settings.build_settings.kaniko_image,
+        "gcr.io/kaniko-project/executor:v1.23.0"
+    );
+    assert!(!settings.build_settings.cache_enabled);
+    assert!(!settings.build_settings.docker_media_types);
+    assert_eq!(
+        settings.build_settings.extra_kaniko_args,
+        vec!["--verbosity=debug"]
+    );
+    // Unspecified fields should get defaults
+    assert_eq!(settings.build_settings.platform_flag, "--custom-platform");
+    assert_eq!(settings.build_settings.crane_backoff_limit, 1);
+}
+
+#[test]
+fn test_build_settings_backwards_compat() {
+    // Existing settings JSON without build_settings field should get defaults
+    let json = serde_json::json!({
+        "allowed_namespaces": ["prod"],
+        "build_architectures": [
+            {"platform": "linux/amd64", "arch": "amd64", "enabled": true}
+        ]
+    });
+    let settings: DeckwatchSettings = serde_json::from_value(json).unwrap();
+    assert_eq!(
+        settings.build_settings.kaniko_image,
+        "gcr.io/kaniko-project/executor:v1.24.0"
+    );
+    assert!(settings.build_settings.docker_media_types);
+}
+
+#[test]
+fn test_build_settings_custom_kaniko_image_roundtrip() {
+    let mut settings = DeckwatchSettings::default();
+    settings.build_settings = default_build_settings();
+    settings.build_settings.kaniko_image = "custom-registry.io/kaniko:v1.20.0".into();
+    let json = serde_json::to_string(&settings).unwrap();
+    let deserialized: DeckwatchSettings = serde_json::from_str(&json).unwrap();
+    assert_eq!(
+        deserialized.build_settings.kaniko_image,
+        "custom-registry.io/kaniko:v1.20.0"
+    );
+}
