@@ -718,10 +718,6 @@ async fn create_manifest_job(
         crane_args.push("--insecure".to_string());
     }
 
-    if bs.docker_media_types {
-        crane_args.push("--docker-media-types".to_string());
-    }
-
     let mut labels = BTreeMap::new();
     labels.insert("deckwatch.io/build".to_string(), "true".to_string());
     labels.insert("deckwatch.io/deployment".to_string(), dep_name.to_string());
@@ -1002,6 +998,23 @@ async fn monitor_builds(state: &AppState) -> anyhow::Result<()> {
                         )
                         .await;
 
+                    // Ensure the deckwatch application label is present on the
+                    // deployment metadata (it can get stripped by other controllers).
+                    let label_patch = serde_json::json!({
+                        "metadata": {
+                            "labels": {
+                                "deckwatch.io/application": dep_name
+                            }
+                        }
+                    });
+                    let _ = dep_api
+                        .patch(
+                            dep_name,
+                            &PatchParams::default(),
+                            &Patch::Strategic(label_patch),
+                        )
+                        .await;
+
                     update_gitops_config_field(&state.db, &config.application_id, |active| {
                         active.last_build_status = Set(Some("success".to_string()));
                         active.last_build_time = Set(Some(now));
@@ -1083,6 +1096,23 @@ async fn monitor_builds(state: &AppState) -> anyhow::Result<()> {
                         dep_name,
                         &PatchParams::default(),
                         &Patch::Strategic(image_patch),
+                    )
+                    .await;
+
+                // Ensure the deckwatch application label is present on the
+                // deployment metadata (it can get stripped by other controllers).
+                let label_patch = serde_json::json!({
+                    "metadata": {
+                        "labels": {
+                            "deckwatch.io/application": dep_name
+                        }
+                    }
+                });
+                let _ = dep_api
+                    .patch(
+                        dep_name,
+                        &PatchParams::default(),
+                        &Patch::Strategic(label_patch),
                     )
                     .await;
 

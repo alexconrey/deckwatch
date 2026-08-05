@@ -541,31 +541,23 @@ fn build_settings_cache_enabled_adds_flag() {
 }
 
 #[test]
-fn build_settings_docker_media_types_adds_crane_flag() {
+fn build_settings_docker_media_types_flag_never_added() {
+    // The --docker-media-types flag was removed from crane; the field is kept
+    // for backward compat but is now a no-op that always defaults to false.
     use crate::handlers::settings::{default_build_settings, BuildSettings};
-    let bs = BuildSettings {
+
+    // Even when explicitly set to true, the flag must not appear in crane args.
+    let _bs = BuildSettings {
         docker_media_types: true,
         ..default_build_settings()
     };
-    let mut crane_args = vec!["index".to_string(), "append".to_string()];
-    if bs.docker_media_types {
-        crane_args.push("--docker-media-types".to_string());
-    }
-    assert!(crane_args.iter().any(|a| a == "--docker-media-types"));
-}
-
-#[test]
-fn build_settings_docker_media_types_disabled_no_flag() {
-    use crate::handlers::settings::{default_build_settings, BuildSettings};
-    let bs = BuildSettings {
-        docker_media_types: false,
-        ..default_build_settings()
-    };
-    let mut crane_args = vec!["index".to_string(), "append".to_string()];
-    if bs.docker_media_types {
-        crane_args.push("--docker-media-types".to_string());
-    }
+    let crane_args = vec!["index".to_string(), "append".to_string()];
+    // Flag block was removed from the watcher, so nothing adds it.
     assert!(!crane_args.iter().any(|a| a == "--docker-media-types"));
+
+    // Default should now be false.
+    let bs_default = default_build_settings();
+    assert!(!bs_default.docker_media_types);
 }
 
 #[test]

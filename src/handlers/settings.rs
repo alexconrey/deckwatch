@@ -309,7 +309,7 @@ pub struct BuildSettings {
     pub cache_enabled: bool,
     #[serde(default = "default_snapshot_mode")]
     pub snapshot_mode: String,
-    #[serde(default = "default_true")]
+    #[serde(default)]
     pub docker_media_types: bool,
     #[serde(default = "default_job_ttl")]
     pub job_ttl_seconds: i32,
@@ -351,7 +351,7 @@ pub fn default_build_settings() -> BuildSettings {
         extra_kaniko_args: Vec::new(),
         cache_enabled: true,
         snapshot_mode: default_snapshot_mode(),
-        docker_media_types: true,
+        docker_media_types: false,
         job_ttl_seconds: default_job_ttl(),
         kaniko_backoff_limit: 0,
         crane_backoff_limit: default_crane_backoff(),
