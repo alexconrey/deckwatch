@@ -562,9 +562,10 @@ async fn trigger_build(
 
     let jobs_api = state.jobs_api(ns)?;
 
-    // Load settings to determine which architectures to build.
+    // Load settings to determine which architectures and build config to use.
     let settings = crate::handlers::settings::load_settings_from_db(state).await;
     let build_arches = resolve_build_arches(&settings);
+    let bs = &settings.build_settings;
     let single_arch = build_arches.len() == 1;
 
     // Create one Kaniko Job per target architecture.
@@ -580,10 +581,13 @@ async fn trigger_build(
             format!("--dockerfile={dockerfile}"),
             format!("--context={kaniko_context}"),
             format!("--destination={kaniko_destination}:{arch_tag}"),
-            format!("--customPlatform={platform}"),
-            "--cache=true".to_string(),
-            "--snapshot-mode=redo".to_string(),
+            format!("{}={platform}", bs.platform_flag),
+            format!("--snapshot-mode={}", bs.snapshot_mode),
         ];
+
+        if bs.cache_enabled {
+            args.push("--cache=true".to_string());
+        }
 
         if internal_registry && !registry_host.is_empty() {
             args.push(format!("--insecure-registry={registry_host}"));
@@ -591,6 +595,10 @@ async fn trigger_build(
 
         if context != "." {
             args.push(format!("--context-sub-path={context}"));
+        }
+
+        for extra in &bs.extra_kaniko_args {
+            args.push(extra.clone());
         }
 
         let mut labels = BTreeMap::new();
@@ -607,15 +615,15 @@ async fn trigger_build(
                 ..Default::default()
             },
             spec: Some(JobSpec {
-                ttl_seconds_after_finished: Some(3600),
-                backoff_limit: Some(0),
+                ttl_seconds_after_finished: Some(bs.job_ttl_seconds),
+                backoff_limit: Some(bs.kaniko_backoff_limit),
                 template: PodTemplateSpec {
                     spec: Some(PodSpec {
                         restart_policy: Some("Never".to_string()),
                         affinity: Some(arch_node_affinity(arch)),
                         containers: vec![Container {
                             name: "kaniko".to_string(),
-                            image: Some("gcr.io/kaniko-project/executor:latest".to_string()),
+                            image: Some(bs.kaniko_image.clone()),
                             args: Some(args),
                             env: if token.is_empty() {
                                 None
@@ -686,6 +694,7 @@ async fn create_manifest_job(
     // Build the list of arch-specific image refs to combine.
     let settings = crate::handlers::settings::load_settings_from_db(state).await;
     let build_arches = resolve_build_arches(&settings);
+    let bs = &settings.build_settings;
     let arch_refs: Vec<String> = build_arches
         .iter()
         .map(|(_, arch)| format!("{kaniko_destination}:{short_sha}-{arch}"))
@@ -693,14 +702,6 @@ async fn create_manifest_job(
 
     let manifest_tag = format!("{kaniko_destination}:{short_sha}");
 
-    // `crane mutate --manifest` isn't available; use `crane index append`
-    // which creates a manifest list from existing images.
-    //
-    // crane index append \
-    //   --manifest <img1> --manifest <img2> \
-    //   --tag <destination>:<tag>
-    //
-    // For insecure registries we pass --insecure.
     let mut crane_args: Vec<String> = vec!["index".to_string(), "append".to_string()];
     for img_ref in &arch_refs {
         crane_args.push("--manifest".to_string());
@@ -711,6 +712,10 @@ async fn create_manifest_job(
 
     if internal_registry {
         crane_args.push("--insecure".to_string());
+    }
+
+    if bs.docker_media_types {
+        crane_args.push("--docker-media-types".to_string());
     }
 
     let mut labels = BTreeMap::new();
@@ -733,14 +738,14 @@ async fn create_manifest_job(
             ..Default::default()
         },
         spec: Some(JobSpec {
-            ttl_seconds_after_finished: Some(3600),
-            backoff_limit: Some(1),
+            ttl_seconds_after_finished: Some(bs.job_ttl_seconds),
+            backoff_limit: Some(bs.crane_backoff_limit),
             template: PodTemplateSpec {
                 spec: Some(PodSpec {
                     restart_policy: Some("Never".to_string()),
                     containers: vec![Container {
                         name: "crane".to_string(),
-                        image: Some("gcr.io/go-containerregistry/crane:latest".to_string()),
+                        image: Some(bs.crane_image.clone()),
                         args: Some(crane_args),
                         ..Default::default()
                     }],

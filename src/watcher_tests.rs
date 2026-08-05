@@ -485,3 +485,131 @@ fn default_build_architectures_matches_default_constant() {
         assert!(defaults[i].enabled);
     }
 }
+
+// ---- build settings ----
+
+#[test]
+fn build_settings_platform_flag_used_in_args() {
+    use crate::handlers::settings::{default_build_settings, BuildSettings};
+    let bs = BuildSettings {
+        platform_flag: "--custom-platform".into(),
+        ..default_build_settings()
+    };
+    let platform = "linux/amd64";
+    let arg = format!("{}={platform}", bs.platform_flag);
+    assert_eq!(arg, "--custom-platform=linux/amd64");
+}
+
+#[test]
+fn build_settings_deprecated_flag_still_works() {
+    use crate::handlers::settings::{default_build_settings, BuildSettings};
+    let bs = BuildSettings {
+        platform_flag: "--customPlatform".into(),
+        ..default_build_settings()
+    };
+    let platform = "linux/arm64";
+    let arg = format!("{}={platform}", bs.platform_flag);
+    assert_eq!(arg, "--customPlatform=linux/arm64");
+}
+
+#[test]
+fn build_settings_cache_disabled_omits_flag() {
+    use crate::handlers::settings::{default_build_settings, BuildSettings};
+    let bs = BuildSettings {
+        cache_enabled: false,
+        ..default_build_settings()
+    };
+    let mut args = vec!["--dockerfile=Dockerfile".to_string()];
+    if bs.cache_enabled {
+        args.push("--cache=true".to_string());
+    }
+    assert!(!args.iter().any(|a| a.contains("cache")));
+}
+
+#[test]
+fn build_settings_cache_enabled_adds_flag() {
+    use crate::handlers::settings::{default_build_settings, BuildSettings};
+    let bs = BuildSettings {
+        cache_enabled: true,
+        ..default_build_settings()
+    };
+    let mut args = vec!["--dockerfile=Dockerfile".to_string()];
+    if bs.cache_enabled {
+        args.push("--cache=true".to_string());
+    }
+    assert!(args.iter().any(|a| a == "--cache=true"));
+}
+
+#[test]
+fn build_settings_docker_media_types_adds_crane_flag() {
+    use crate::handlers::settings::{default_build_settings, BuildSettings};
+    let bs = BuildSettings {
+        docker_media_types: true,
+        ..default_build_settings()
+    };
+    let mut crane_args = vec!["index".to_string(), "append".to_string()];
+    if bs.docker_media_types {
+        crane_args.push("--docker-media-types".to_string());
+    }
+    assert!(crane_args.iter().any(|a| a == "--docker-media-types"));
+}
+
+#[test]
+fn build_settings_docker_media_types_disabled_no_flag() {
+    use crate::handlers::settings::{default_build_settings, BuildSettings};
+    let bs = BuildSettings {
+        docker_media_types: false,
+        ..default_build_settings()
+    };
+    let mut crane_args = vec!["index".to_string(), "append".to_string()];
+    if bs.docker_media_types {
+        crane_args.push("--docker-media-types".to_string());
+    }
+    assert!(!crane_args.iter().any(|a| a == "--docker-media-types"));
+}
+
+#[test]
+fn build_settings_extra_kaniko_args_appended() {
+    use crate::handlers::settings::{default_build_settings, BuildSettings};
+    let bs = BuildSettings {
+        extra_kaniko_args: vec!["--verbosity=debug".into(), "--reproducible".into()],
+        ..default_build_settings()
+    };
+    let mut args = vec!["--dockerfile=Dockerfile".to_string()];
+    for extra in &bs.extra_kaniko_args {
+        args.push(extra.clone());
+    }
+    assert_eq!(args.len(), 3);
+    assert!(args.contains(&"--verbosity=debug".to_string()));
+    assert!(args.contains(&"--reproducible".to_string()));
+}
+
+#[test]
+fn build_settings_snapshot_mode_configurable() {
+    use crate::handlers::settings::{default_build_settings, BuildSettings};
+    let bs = BuildSettings {
+        snapshot_mode: "full".into(),
+        ..default_build_settings()
+    };
+    let arg = format!("--snapshot-mode={}", bs.snapshot_mode);
+    assert_eq!(arg, "--snapshot-mode=full");
+}
+
+#[test]
+fn build_settings_default_kaniko_image_is_pinned() {
+    use crate::handlers::settings::default_build_settings;
+    let bs = default_build_settings();
+    assert!(
+        !bs.kaniko_image.ends_with(":latest"),
+        "default kaniko image should be pinned, not :latest"
+    );
+    assert!(bs.kaniko_image.contains(":v"));
+}
+
+#[test]
+fn build_settings_default_platform_flag_is_non_deprecated() {
+    use crate::handlers::settings::default_build_settings;
+    let bs = default_build_settings();
+    assert_eq!(bs.platform_flag, "--custom-platform");
+    assert_ne!(bs.platform_flag, "--customPlatform");
+}
