@@ -761,7 +761,8 @@ function autoGenerateSecretName() {
 
 async function saveTokenSecret() {
   autoGenerateSecretName();
-  if (!tokenForm.value.name || !tokenForm.value.secret_name || !tokenForm.value.token) return;
+  const needsSecretName = tokenDialogMode.value === "create";
+  if (!tokenForm.value.name || (needsSecretName && !tokenForm.value.secret_name) || !tokenForm.value.token) return;
   tokenDialogSaving.value = true;
   try {
     const result = await gitTokensApi.upsert(tokenForm.value);

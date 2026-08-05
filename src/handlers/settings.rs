@@ -751,16 +751,19 @@ pub async fn put_git_token_secret(
         .map_err(|e| AppError::BadRequest(format!("encryption failed: {e}")))?;
 
     let mut settings = load_settings_from_db(&state).await;
+    let secret_name;
     if let Some(existing) = settings
         .git_token_secrets
         .iter_mut()
         .find(|e| e.name == req.name)
     {
         existing.encrypted_token = Some(encrypted);
+        secret_name = existing.secret_name.clone();
     } else {
+        secret_name = req.secret_name.unwrap_or_default();
         settings.git_token_secrets.push(GitTokenSecret {
             name: req.name.clone(),
-            secret_name: req.secret_name.unwrap_or_default(),
+            secret_name: secret_name.clone(),
             namespace: String::new(),
             encrypted_token: Some(encrypted),
         });
@@ -784,7 +787,7 @@ pub async fn put_git_token_secret(
 
     Ok(Json(GitTokenSecretResponse {
         name: req.name,
-        secret_name: String::new(),
+        secret_name,
         namespace: String::new(),
     }))
 }
