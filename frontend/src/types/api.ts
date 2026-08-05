@@ -809,6 +809,10 @@ export interface CreateConfigMapRequest {
 export interface JobPodSummary {
   name: string;
   phase: string;
+  /** The Kubernetes Job that owns this pod. */
+  job_name?: string;
+  /** Build architecture (e.g. "amd64", "arm64", "manifest"). */
+  arch?: string;
 }
 
 export interface JobPodListResponse {

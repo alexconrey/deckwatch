@@ -711,6 +711,12 @@ pub async fn list_builds(
 pub struct JobPodSummary {
     pub name: String,
     pub phase: String,
+    /// The Kubernetes Job that owns this pod.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub job_name: Option<String>,
+    /// Build architecture label (e.g. `amd64`, `arm64`, `manifest`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub arch: Option<String>,
 }
 
 #[derive(serde::Serialize)]
@@ -718,25 +724,51 @@ pub struct JobPodListResponse {
     pub pods: Vec<JobPodSummary>,
 }
 
+/// List pods belonging to a build group or single job.
+///
+/// First queries by `deckwatch.io/build-group` label so multi-arch builds
+/// (where the stored `last_build_job` is a group prefix, not a real Job name)
+/// return pods from all constituent jobs (amd64, arm64, manifest).
+/// Falls back to the legacy `job-name` label for backwards compatibility
+/// with single-job builds that pre-date the multi-arch change.
 pub async fn list_job_pods(
     State(state): State<AppState>,
     Path((ns, job_name)): Path<(String, String)>,
 ) -> Result<Json<JobPodListResponse>, AppError> {
     let pods_api = state.pods_api(&ns)?;
-    let lp = kube::api::ListParams::default().labels(&format!("job-name={job_name}"));
+
+    // Try build-group label first (multi-arch builds).
+    let lp =
+        kube::api::ListParams::default().labels(&format!("deckwatch.io/build-group={job_name}"));
     let pods = pods_api.list(&lp).await?;
+
+    // Fall back to legacy job-name label if no build-group pods found.
+    let pods = if pods.items.is_empty() {
+        let lp = kube::api::ListParams::default().labels(&format!("job-name={job_name}"));
+        pods_api.list(&lp).await?
+    } else {
+        pods
+    };
+
     let summaries = pods
         .iter()
         .map(|p| {
             let meta = &p.metadata;
+            let labels = meta.labels.as_ref();
             let phase = p
                 .status
                 .as_ref()
                 .and_then(|s| s.phase.clone())
                 .unwrap_or_else(|| "Unknown".to_string());
+            let owning_job = labels.and_then(|l| l.get("job-name")).cloned();
+            let arch = labels
+                .and_then(|l| l.get("deckwatch.io/build-arch"))
+                .cloned();
             JobPodSummary {
                 name: meta.name.clone().unwrap_or_default(),
                 phase,
+                job_name: owning_job,
+                arch,
             }
         })
         .collect();
