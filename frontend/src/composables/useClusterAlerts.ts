@@ -1,7 +1,8 @@
-import { onMounted, onUnmounted, ref } from "vue";
+import { computed, onMounted, onUnmounted, ref } from "vue";
 import { eventsApi } from "@/api/events";
 import type { EventSummary } from "@/types/api";
 import { useClusterAlertSettings } from "./useClusterAlertSettings";
+import { useNamespaceStore } from "@/stores/namespace";
 
 // Ambient cluster-alert toast queue. Polls the cluster-wide events endpoint
 // (Warning only) on a 15s cadence and enqueues a toast for each *new* event
@@ -96,8 +97,22 @@ function enqueueToast(ev: EventSummary) {
   }
 }
 
+function eventMatchesNamespace(
+  ev: EventSummary,
+  activeNs: string,
+): boolean {
+  if (!activeNs) return true; // no namespace selected yet -- show all
+  const evNs = ev.involved_object_namespace ?? ev.namespace;
+  return evNs === activeNs;
+}
+
 async function poll() {
   try {
+    // Read the currently selected namespace so we only surface events that
+    // belong to the namespace the operator is looking at right now.
+    const nsStore = useNamespaceStore();
+    const activeNs = nsStore.selected;
+
     const resp = await eventsApi.listCluster({
       fieldSelector: "type=Warning",
     });
@@ -136,7 +151,13 @@ async function poll() {
         continue;
       }
       shownKeys.add(key);
-      enqueueToast(ev);
+
+      // Only surface the toast if the event belongs to the active
+      // namespace. The event is still recorded in `shownKeys` so it
+      // will not be re-shown if the operator switches namespaces.
+      if (eventMatchesNamespace(ev, activeNs)) {
+        enqueueToast(ev);
+      }
       if (ts > newWatermark) newWatermark = ts;
     }
     lastSeenMs = newWatermark;
@@ -186,6 +207,15 @@ function onVisibilityChange() {
 
 export function useClusterAlerts() {
   const { enabled } = useClusterAlertSettings();
+  const nsStore = useNamespaceStore();
+
+  // Reactively filter toasts to the currently selected namespace so that
+  // switching namespaces immediately hides alerts from the old namespace.
+  const namespacedToasts = computed(() => {
+    const ns = nsStore.selected;
+    if (!ns) return toasts.value; // no namespace selected -- show all
+    return toasts.value.filter((t) => t.namespace === ns);
+  });
 
   onMounted(() => {
     activeConsumers += 1;
@@ -213,7 +243,7 @@ export function useClusterAlerts() {
   });
 
   return {
-    toasts,
+    toasts: namespacedToasts,
     dismissToast,
     enabled,
   };
