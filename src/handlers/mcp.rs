@@ -317,6 +317,22 @@ fn deckwatch_tool_definitions() -> Vec<serde_json::Value> {
                 "additionalProperties": false
             }
         }),
+        serde_json::json!({
+            "name": "generate_local_build",
+            "description": "Generate a local docker run command that reproduces a deployment's Kaniko build locally. Useful for diagnosing build failures without pushing commits.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "namespace": { "type": "string" },
+                    "deployment_name": { "type": "string" },
+                    "platform": { "type": "string", "description": "Target platform (default: linux/amd64)" },
+                    "local_context": { "type": "string", "description": "Local path to the repo/build context (default: '.')" },
+                    "no_push": { "type": "boolean", "description": "Add --no-push flag (default: true)" }
+                },
+                "required": ["namespace", "deployment_name"],
+                "additionalProperties": false
+            }
+        }),
     ]
 }
 
@@ -346,6 +362,7 @@ async fn handle_tool_call(state: &AppState, request: &JsonRpcRequest) -> JsonRpc
         "delete_ingress_template" => Some(tool_delete_ingress_template(state, args).await),
         "list_builds" => Some(tool_list_builds(state, args).await),
         "get_build_log" => Some(tool_get_build_log(state, args).await),
+        "generate_local_build" => Some(tool_generate_local_build(state, args).await),
         _ => None,
     };
 
@@ -870,6 +887,98 @@ async fn tool_get_build_log(state: &AppState, args: &serde_json::Value) -> Resul
             "no build found for job '{job_name}' in {ns}/{name}"
         )),
     }
+}
+
+async fn tool_generate_local_build(
+    state: &AppState,
+    args: &serde_json::Value,
+) -> Result<String, String> {
+    let ns = args["namespace"].as_str().ok_or("namespace is required")?;
+    let name = args["deployment_name"]
+        .as_str()
+        .ok_or("deployment_name is required")?;
+    let platform = args["platform"].as_str().unwrap_or("linux/amd64");
+    let local_context = args["local_context"].as_str().unwrap_or(".");
+    let no_push = args["no_push"].as_bool().unwrap_or(true);
+
+    let _ = state.deployments_api(ns).map_err(|e| e.to_string())?;
+
+    let app_id = format!("{ns}/{name}");
+    let config = gitops_configs::Entity::find()
+        .filter(gitops_configs::Column::ApplicationId.eq(&app_id))
+        .one(&state.db)
+        .await
+        .map_err(|e| format!("db error: {e}"))?
+        .ok_or_else(|| format!("no gitops config found for {ns}/{name}"))?;
+
+    let settings_data = settings::load_settings_from_db(state).await;
+    let bs = &settings_data.build_settings;
+
+    let dockerfile = &config.dockerfile_path;
+    let context = &config.docker_context;
+
+    let local_build_context = if context != "." {
+        format!("{local_context}/{context}")
+    } else {
+        local_context.to_string()
+    };
+
+    let dockerfile_basename = dockerfile.split('/').next_back().unwrap_or(dockerfile);
+
+    let mut kaniko_args = vec![
+        format!("--dockerfile=/workspace/{dockerfile_basename}"),
+        "--context=dir:///workspace".to_string(),
+        format!("{}={platform}", bs.platform_flag),
+        format!("--snapshot-mode={}", bs.snapshot_mode),
+    ];
+
+    if bs.cache_enabled {
+        kaniko_args.push("--cache=true".to_string());
+    }
+
+    if no_push {
+        kaniko_args.push("--no-push".to_string());
+    } else {
+        let oci_repo = &config.oci_repository;
+        kaniko_args.push(format!("--destination={oci_repo}:local-test"));
+    }
+
+    for extra in &bs.extra_kaniko_args {
+        kaniko_args.push(extra.clone());
+    }
+
+    let kaniko_args_str = kaniko_args
+        .iter()
+        .map(|a| format!("  {a}"))
+        .collect::<Vec<_>>()
+        .join(" \\\n");
+
+    let docker_cmd = format!(
+        "docker run --rm \\\n\
+         --platform {platform} \\\n\
+         -v {local_build_context}:/workspace \\\n\
+         {kaniko_image} \\\n\
+         {kaniko_args_str}",
+        kaniko_image = bs.kaniko_image,
+    );
+
+    let result = serde_json::json!({
+        "command": docker_cmd,
+        "kaniko_image": bs.kaniko_image,
+        "platform": platform,
+        "dockerfile": dockerfile,
+        "docker_context": context,
+        "local_context": local_context,
+        "no_push": no_push,
+        "notes": [
+            "Run this command from your local repo root to reproduce the Kaniko build locally.",
+            "The --no-push flag prevents pushing to the registry (safe for local testing).",
+            format!("To test arm64: change --platform to linux/arm64"),
+            format!("Kaniko image: {} (from deckwatch build settings)", bs.kaniko_image),
+        ]
+    });
+
+    serde_json::to_string_pretty(&result).map_err(|e| e.to_string())
 }
 
 // ---------------------------------------------------------------------------
