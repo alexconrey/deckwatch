@@ -9,10 +9,10 @@ use axum::extract::State;
 use axum::http::{header, StatusCode};
 use axum::response::IntoResponse;
 use axum::Json;
-use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder, QuerySelect};
 use serde::{Deserialize, Serialize};
 
-use crate::entities::gitops_configs;
+use crate::entities::{builds, gitops_configs};
 use crate::handlers::applications;
 use crate::handlers::{addons, gitops, ingresses, settings, templates};
 use crate::state::AppState;
@@ -290,6 +290,33 @@ fn deckwatch_tool_definitions() -> Vec<serde_json::Value> {
                 "additionalProperties": false
             }
         }),
+        serde_json::json!({
+            "name": "list_builds",
+            "description": "List recent GitOps builds for a deployment with status and logs. Returns the last 20 builds from the database, including captured build logs that persist after Job cleanup.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "namespace": { "type": "string" },
+                    "deployment_name": { "type": "string" }
+                },
+                "required": ["namespace", "deployment_name"],
+                "additionalProperties": false
+            }
+        }),
+        serde_json::json!({
+            "name": "get_build_log",
+            "description": "Fetch a single build's log by job name from the database. Useful for diagnosing a specific failed build after its Kubernetes Job has been cleaned up.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "namespace": { "type": "string" },
+                    "deployment_name": { "type": "string" },
+                    "job_name": { "type": "string", "description": "Build group job name (e.g. myapp-build-abc1234)" }
+                },
+                "required": ["namespace", "deployment_name", "job_name"],
+                "additionalProperties": false
+            }
+        }),
     ]
 }
 
@@ -317,6 +344,8 @@ async fn handle_tool_call(state: &AppState, request: &JsonRpcRequest) -> JsonRpc
         "create_ingress_template" => Some(tool_create_ingress_template(state, args).await),
         "update_ingress_template" => Some(tool_update_ingress_template(state, args).await),
         "delete_ingress_template" => Some(tool_delete_ingress_template(state, args).await),
+        "list_builds" => Some(tool_list_builds(state, args).await),
+        "get_build_log" => Some(tool_get_build_log(state, args).await),
         _ => None,
     };
 
@@ -371,6 +400,18 @@ async fn tool_get_gitops_status(
 
     match row {
         Some(r) => {
+            let last_build_log = if let Some(ref job) = r.last_build_job {
+                builds::Entity::find()
+                    .filter(builds::Column::JobName.eq(job))
+                    .one(&state.db)
+                    .await
+                    .ok()
+                    .flatten()
+                    .and_then(|b| b.build_log)
+            } else {
+                None
+            };
+
             let result = serde_json::json!({
                 "enabled": true,
                 "repo_url": r.repo_url,
@@ -385,6 +426,7 @@ async fn tool_get_gitops_status(
                 "last_build_job": r.last_build_job,
                 "last_build_time": r.last_build_time.map(|t| t.to_string()),
                 "last_build_error": r.last_build_error,
+                "last_build_log": last_build_log,
             });
             serde_json::to_string_pretty(&result).map_err(|e| e.to_string())
         }
@@ -757,6 +799,77 @@ async fn tool_delete_ingress_template(
         .map_err(|e| format!("{e}"))?;
 
     Ok(format!("deleted ingress template '{name}'"))
+}
+
+async fn tool_list_builds(state: &AppState, args: &serde_json::Value) -> Result<String, String> {
+    let ns = args["namespace"].as_str().ok_or("namespace is required")?;
+    let name = args["deployment_name"]
+        .as_str()
+        .ok_or("deployment_name is required")?;
+
+    let _ = state.deployments_api(ns).map_err(|e| e.to_string())?;
+
+    let app_id = format!("{ns}/{name}");
+    let rows = builds::Entity::find()
+        .filter(builds::Column::ApplicationId.eq(&app_id))
+        .order_by_desc(builds::Column::CreatedAt)
+        .limit(20)
+        .all(&state.db)
+        .await
+        .map_err(|e| format!("db error: {e}"))?;
+
+    let build_list: Vec<serde_json::Value> = rows
+        .into_iter()
+        .map(|row| {
+            serde_json::json!({
+                "job_name": row.job_name,
+                "commit_sha": row.commit_sha,
+                "image_tag": row.image_tag,
+                "status": row.status,
+                "started_at": row.started_at.map(|t| t.to_string()),
+                "completed_at": row.completed_at.map(|t| t.to_string()),
+                "error_message": row.error_message,
+                "build_log": row.build_log,
+            })
+        })
+        .collect();
+
+    serde_json::to_string_pretty(&serde_json::json!({ "builds": build_list }))
+        .map_err(|e| e.to_string())
+}
+
+async fn tool_get_build_log(state: &AppState, args: &serde_json::Value) -> Result<String, String> {
+    let ns = args["namespace"].as_str().ok_or("namespace is required")?;
+    let name = args["deployment_name"]
+        .as_str()
+        .ok_or("deployment_name is required")?;
+    let job_name = args["job_name"].as_str().ok_or("job_name is required")?;
+
+    let _ = state.deployments_api(ns).map_err(|e| e.to_string())?;
+
+    let app_id = format!("{ns}/{name}");
+    let row = builds::Entity::find()
+        .filter(builds::Column::ApplicationId.eq(&app_id))
+        .filter(builds::Column::JobName.eq(job_name))
+        .one(&state.db)
+        .await
+        .map_err(|e| format!("db error: {e}"))?;
+
+    match row {
+        Some(b) => {
+            let result = serde_json::json!({
+                "job_name": b.job_name,
+                "commit_sha": b.commit_sha,
+                "status": b.status,
+                "error_message": b.error_message,
+                "build_log": b.build_log,
+            });
+            serde_json::to_string_pretty(&result).map_err(|e| e.to_string())
+        }
+        None => Err(format!(
+            "no build found for job '{job_name}' in {ns}/{name}"
+        )),
+    }
 }
 
 // ---------------------------------------------------------------------------
