@@ -302,15 +302,21 @@ pub async fn check_remote_head(
 
     let resp = request.send().await?.error_for_status()?.text().await?;
 
+    parse_ref_sha(&resp, branch)
+}
+
+fn parse_ref_sha(resp: &str, branch: &str) -> anyhow::Result<String> {
     let target_ref = format!("refs/heads/{branch}");
-    for line in resp.lines() {
-        if line.contains(&target_ref) {
-            let sha = line
-                .split_whitespace()
-                .next()
-                .unwrap_or("")
-                .trim_start_matches(|c: char| !c.is_ascii_hexdigit());
-            if sha.len() >= 40 {
+    // The response may contain pkt-line length prefixes (4-char hex) and flush
+    // packets (`0000`) concatenated without newlines. Instead of trying to parse
+    // the pkt-line framing, find the target ref and extract the 40-char hex SHA
+    // that immediately precedes it (separated by a space or NUL).
+    if let Some(ref_pos) = resp.find(&target_ref) {
+        let before = &resp[..ref_pos];
+        let before = before.trim_end_matches(|c: char| c == ' ' || c == '\0');
+        if before.len() >= 40 {
+            let sha = &before[before.len() - 40..];
+            if sha.chars().all(|c| c.is_ascii_hexdigit()) {
                 return Ok(sha.to_string());
             }
         }

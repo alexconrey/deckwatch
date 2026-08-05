@@ -613,3 +613,56 @@ fn build_settings_default_platform_flag_is_non_deprecated() {
     assert_eq!(bs.platform_flag, "--custom-platform");
     assert_ne!(bs.platform_flag, "--customPlatform");
 }
+
+// ---- pkt-line SHA parsing ----
+
+#[test]
+fn parse_ref_sha_strips_pktline_prefix() {
+    let resp = "003f9b52e759fdc98199592093b531cd6dd4dfa02d06 refs/heads/main\n";
+    let sha = parse_ref_sha(resp, "main").unwrap();
+    assert_eq!(sha, "9b52e759fdc98199592093b531cd6dd4dfa02d06");
+}
+
+#[test]
+fn parse_ref_sha_with_flush_packet_concatenated() {
+    // The actual bug: 0000 flush + next pkt-line length + SHA all run together.
+    // This produced short_sha "0000014" instead of the real commit hash.
+    let resp = "001e# service=git-upload-pack\n\
+                000001469b52e759fdc98199592093b531cd6dd4dfa02d06 refs/heads/main\n";
+    let sha = parse_ref_sha(resp, "main").unwrap();
+    assert_eq!(sha, "9b52e759fdc98199592093b531cd6dd4dfa02d06");
+    assert!(
+        !sha.starts_with("0000"),
+        "SHA must not start with flush packet bytes"
+    );
+}
+
+#[test]
+fn parse_ref_sha_with_nul_separator() {
+    let resp = "00a09b52e759fdc98199592093b531cd6dd4dfa02d06 refs/heads/main\0 multi_ack\n";
+    let sha = parse_ref_sha(resp, "main").unwrap();
+    assert_eq!(sha, "9b52e759fdc98199592093b531cd6dd4dfa02d06");
+}
+
+#[test]
+fn parse_ref_sha_finds_correct_branch() {
+    let resp = "003faaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa refs/heads/develop\n\
+                003fbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb refs/heads/main\n";
+    let sha = parse_ref_sha(resp, "main").unwrap();
+    assert_eq!(sha, "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
+}
+
+#[test]
+fn parse_ref_sha_branch_not_found() {
+    let resp = "003faaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa refs/heads/main\n";
+    let result = parse_ref_sha(resp, "nonexistent");
+    assert!(result.is_err());
+}
+
+#[test]
+fn parse_ref_sha_plain_format_no_prefix() {
+    let resp = "abcdef1234567890abcdef1234567890abcdef12 refs/heads/main\n";
+    let sha = parse_ref_sha(resp, "main").unwrap();
+    assert_eq!(sha.len(), 40);
+    assert_eq!(sha, "abcdef1234567890abcdef1234567890abcdef12");
+}
