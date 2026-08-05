@@ -653,7 +653,6 @@ async fn trigger_build(
                         }],
                         ..Default::default()
                     }),
-                    ..Default::default()
                 },
                 ..Default::default()
             }),
@@ -759,7 +758,6 @@ async fn create_manifest_job(
                     }],
                     ..Default::default()
                 }),
-                ..Default::default()
             },
             ..Default::default()
         }),
