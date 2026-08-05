@@ -659,3 +659,13 @@ fn parse_ref_sha_plain_format() {
     let sha = parse_ref_sha(resp, "main").unwrap();
     assert_eq!(sha, "abcdef1234567890abcdef1234567890abcdef12");
 }
+
+#[test]
+fn parse_ref_sha_skips_capabilities_symref() {
+    // HEAD line has refs/heads/main in capabilities (symref=HEAD:refs/heads/main)
+    // but no SHA before it. The actual ref line comes later.
+    let resp = "00a0aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa HEAD\0 multi_ack symref=HEAD:refs/heads/main agent=git/2.40\n\
+                003f9b52e759fdc98199592093b531cd6dd4dfa02d06 refs/heads/main\n";
+    let sha = parse_ref_sha(resp, "main").unwrap();
+    assert_eq!(sha, "9b52e759fdc98199592093b531cd6dd4dfa02d06");
+}

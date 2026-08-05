@@ -835,7 +835,7 @@ checksum = "d7a1e2f27636f116493b8b860f5546edb47c8d8f8ea73e1d2a20be88e28d1fea"
 
 [[package]]
 name = "deckwatch"
-version = "0.4.11"
+version = "0.4.12"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -2111,7 +2111,7 @@ checksum = "47e1ffaa40ddd1f3ed91f717a33c8c0ee23fff369e3aa8772b9605cc1d22f4c3"
 [[package]]
 name = "mcp-k8s"
 version = "0.1.0"
-source = "git+https://github.com/alexconrey/mcp-k8s.git#945dc243d6d136ea2b50639b288d6043ce44794c"
+source = "git+https://github.com/alexconrey/mcp-k8s.git#cfed2e24d867be7730fd777021bef74d5a988ffa"
 dependencies = [
  "axum",
  "axum-server",
@@ -4834,7 +4834,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.48.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
