@@ -307,7 +307,9 @@ pub async fn check_remote_head(
 
 fn parse_ref_sha(resp: &str, branch: &str) -> anyhow::Result<String> {
     let target_ref = format!("refs/heads/{branch}");
-    if let Some(ref_pos) = resp.find(&target_ref) {
+    let mut search_from = 0;
+    while let Some(pos) = resp[search_from..].find(&target_ref) {
+        let ref_pos = search_from + pos;
         let before = &resp[..ref_pos];
         let before = before.trim_end_matches([' ', '\0']);
         if before.len() >= 40 {
@@ -316,6 +318,7 @@ fn parse_ref_sha(resp: &str, branch: &str) -> anyhow::Result<String> {
                 return Ok(sha.to_string());
             }
         }
+        search_from = ref_pos + target_ref.len();
     }
     anyhow::bail!("branch '{branch}' not found in remote refs")
 }
