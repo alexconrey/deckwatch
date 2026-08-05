@@ -615,13 +615,17 @@ async fn trigger_build(
             metadata: ObjectMeta {
                 name: Some(arch_job_name.clone()),
                 namespace: Some(ns.to_string()),
-                labels: Some(labels),
+                labels: Some(labels.clone()),
                 ..Default::default()
             },
             spec: Some(JobSpec {
                 ttl_seconds_after_finished: Some(bs.job_ttl_seconds),
                 backoff_limit: Some(bs.kaniko_backoff_limit),
                 template: PodTemplateSpec {
+                    metadata: Some(ObjectMeta {
+                        labels: Some(labels),
+                        ..Default::default()
+                    }),
                     spec: Some(PodSpec {
                         restart_policy: Some("Never".to_string()),
                         affinity: Some(arch_node_affinity(arch)),
@@ -649,7 +653,6 @@ async fn trigger_build(
                         }],
                         ..Default::default()
                     }),
-                    ..Default::default()
                 },
                 ..Default::default()
             }),
@@ -734,13 +737,17 @@ async fn create_manifest_job(
         metadata: ObjectMeta {
             name: Some(manifest_job_name.clone()),
             namespace: Some(ns.to_string()),
-            labels: Some(labels),
+            labels: Some(labels.clone()),
             ..Default::default()
         },
         spec: Some(JobSpec {
             ttl_seconds_after_finished: Some(bs.job_ttl_seconds),
             backoff_limit: Some(bs.crane_backoff_limit),
             template: PodTemplateSpec {
+                metadata: Some(ObjectMeta {
+                    labels: Some(labels),
+                    ..Default::default()
+                }),
                 spec: Some(PodSpec {
                     restart_policy: Some("Never".to_string()),
                     containers: vec![Container {
@@ -751,7 +758,6 @@ async fn create_manifest_job(
                     }],
                     ..Default::default()
                 }),
-                ..Default::default()
             },
             ..Default::default()
         }),
