@@ -65,7 +65,7 @@ spec:
             - name: DECKWATCH_ENCRYPTION_KEY
               valueFrom:
                 secretKeyRef:
-                  name: {{ include "deckwatch.fullname" . }}-encryption-key
+                  name: {{ .Values.encryptionKey.existingSecret | default (printf "%s-encryption-key" (include "deckwatch.fullname" .)) }}
                   key: encryption-key
             {{- if .Values.registry.enabled }}
             - name: DECKWATCH_REGISTRY_ENABLED

@@ -141,6 +141,15 @@ prometheus:
 tracing:
   enabled: false
 
+encryptionKey:
+  # Use an existing Secret for the encryption key instead of generating one.
+  # Set to the Secret name; it must contain a key named "encryption-key".
+  existingSecret: ""
+  # Provide a stable encryption key value directly. Takes precedence over
+  # random generation. Required when deploying via ArgoCD (lookup is
+  # unavailable in server-side rendering, causing key regeneration on sync).
+  value: ""
+
 database:
   # Database URL. SQLite for dev, Postgres/MySQL for production.
   # Examples:
