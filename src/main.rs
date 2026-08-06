@@ -15,6 +15,7 @@ mod log_sanitize;
 mod metrics;
 mod migrations;
 mod notifications;
+mod plugins;
 mod rate_limit;
 mod routes;
 mod state;
@@ -111,9 +112,21 @@ async fn main() {
         ai_rate_limiter,
         db,
         encryption_key: config.encryption_key.clone(),
+        plugins: std::sync::Arc::new(tokio::sync::RwLock::new(Vec::new())),
     };
 
     migrate_configmap_apps_to_db(&state).await;
+
+    // Fetch plugins declared in persisted settings. Failures per-plugin are
+    // logged and skipped so a bad plugin URL never blocks startup.
+    {
+        let settings = handlers::settings::load_settings_from_db(&state).await;
+        if !settings.plugins.is_empty() {
+            tracing::info!(count = settings.plugins.len(), "fetching plugins");
+            let loaded = plugins::fetch_plugins(&settings, &state).await;
+            *state.plugins.write().await = loaded;
+        }
+    }
 
     let watcher_state = state.clone();
     tokio::spawn(async move {

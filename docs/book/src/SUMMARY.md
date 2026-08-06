@@ -31,6 +31,7 @@
 
 - [MCP Integration](../../MCP.md)
 - [AI Diagnostics](../../AI_DIAGNOSTICS.md)
+- [Plugin System](../../PLUGINS.md)
 
 # Observability
 

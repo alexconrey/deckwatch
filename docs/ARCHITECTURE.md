@@ -302,11 +302,37 @@ The **postgres** addon additionally provisions a PersistentVolumeClaim (`{deploy
 
 Currently: none in the repo. Both backend and frontend are untested. `TODO.md` lists this as backlog. `CLAUDE.md` notes "Testing (to be established)" with target frameworks Rust `#[tokio::test]`, Vitest, Playwright.
 
+## Plugin system
+
+External WASM plugins extend deckwatch without modifying its source. See `docs/PLUGINS.md` for the operator and developer guide.
+
+```
+Git repo (org-controlled)
+  └─ plugin.wasm  ← compiled by org CI, fetched by deckwatch at startup
+
+deckwatch startup / settings PUT
+  └─ src/plugins.rs::fetch_plugins()
+       └─ HTTPS GET → wasm bytes → Vec<LoadedPlugin> in AppState.plugins
+
+deployment create/update (src/handlers/deployments.rs)
+  └─ src/plugins.rs::apply_plugins()
+       ├─ extism::Plugin::new(wasm_bytes)
+       ├─ plugin.call("apply", PluginContext JSON)
+       ├─ merge EnvVarSpec → primary container env
+       └─ merge SidecarSpec → pod containers[]
+```
+
+Key files:
+- `src/plugins.rs` — fetch, cache, execute, and merge plugin results
+- `src/handlers/settings.rs` — `PluginConfig` / `PluginSource` types; background re-fetch on PUT
+- `src/state.rs` — `AppState.plugins: Arc<RwLock<Vec<LoadedPlugin>>>`
+
 ## Extension points
 
 For future contributors:
 - **New K8s resource type:** add a factory in `state.rs`, a summary/detail in `kube_ext.rs`, a handler file in `handlers/`, a route in `routes.rs`, an api client in `frontend/src/api/`, a types stanza in `frontend/src/types/api.ts`.
-- **New addon:** append to the `catalog()` vec in `src/handlers/addons.rs:48`.
+- **New addon (built-in sidecar):** append to the `catalog()` vec in `src/handlers/addons.rs`. For org-specific sidecars, prefer writing an external plugin instead.
+- **New external plugin:** write a Rust crate targeting `wasm32-unknown-unknown` using `deckwatch-plugin-sdk` and `extism-pdk`. See `docs/PLUGINS.md`.
 - **New polled page:** call `usePolling(refreshFn, intervalMs)` in `<script setup>`.
 - **New app-template (once P0 lands):** likely a YAML/JSON in a ConfigMap loaded on startup, mapped to a form defaults preset in `DeploymentForm.vue`.
 

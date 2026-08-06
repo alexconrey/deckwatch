@@ -1,3 +1,6 @@
+use std::sync::Arc;
+use tokio::sync::RwLock;
+
 use k8s_openapi::api::apps::v1::Deployment;
 use k8s_openapi::api::autoscaling::v2::HorizontalPodAutoscaler;
 use k8s_openapi::api::batch::v1::{CronJob, Job};
@@ -40,6 +43,11 @@ pub struct AppState {
     /// stored in the database. Empty string means credential encryption is
     /// disabled (the `set_credentials` endpoint will reject requests).
     pub encryption_key: String,
+    /// Plugins fetched from external Git repos. Populated at startup and
+    /// refreshed in the background whenever settings are updated. Handlers
+    /// acquire a read lock; the settings PUT handler acquires a write lock
+    /// after re-fetching.
+    pub plugins: Arc<RwLock<Vec<crate::plugins::LoadedPlugin>>>,
 }
 
 impl AppState {
