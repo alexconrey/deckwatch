@@ -10,14 +10,14 @@ RUN pnpm exec vite build
 # self-contained static site under docs/book/book/. We use --copy mode so
 # the resulting layout is portable — no symlinks pointing outside the
 # build context.
-FROM rust:1.89-bookworm AS docs-builder
+FROM rust:1.91-bookworm AS docs-builder
 RUN cargo install mdbook --version ^0.4 --locked
 WORKDIR /app
 COPY docs/ docs/
 COPY scripts/ scripts/
 RUN bash scripts/build-docs.sh --copy
 
-FROM rust:1.89-bookworm AS backend-builder
+FROM rust:1.91-bookworm AS backend-builder
 RUN apt-get update && apt-get install -y --no-install-recommends \
     pkg-config libssl-dev && \
     rm -rf /var/lib/apt/lists/*
