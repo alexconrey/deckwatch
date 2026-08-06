@@ -61,6 +61,8 @@ pub async fn handle_mcp(
         "ping" => success_response(&request, serde_json::json!({})),
         "tools/list" => handle_tools_list(&request),
         "tools/call" => handle_tool_call(&state, &request).await,
+        "prompts/list" => handle_prompts_list(&request),
+        "prompts/get" => handle_prompts_get(&request),
         _ => method_not_found(&request),
     };
 
@@ -76,7 +78,7 @@ fn handle_initialize(request: &JsonRpcRequest) -> JsonRpcResponse {
         request,
         serde_json::json!({
             "protocolVersion": "2025-11-25",
-            "capabilities": { "tools": {} },
+            "capabilities": { "tools": {}, "prompts": {} },
             "serverInfo": { "name": "deckwatch", "version": "0.3.2" }
         }),
     )
@@ -979,6 +981,79 @@ async fn tool_generate_local_build(
     });
 
     serde_json::to_string_pretty(&result).map_err(|e| e.to_string())
+}
+
+// ---------------------------------------------------------------------------
+// Response helpers
+// ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// prompts/list + prompts/get
+// ---------------------------------------------------------------------------
+
+fn handle_prompts_list(request: &JsonRpcRequest) -> JsonRpcResponse {
+    success_response(
+        request,
+        serde_json::json!({
+            "prompts": [{
+                "name": "deployment-readiness-check",
+                "description": "Check if an application is ready to be deployed and managed by deckwatch",
+                "arguments": [
+                    {"name": "namespace", "description": "Kubernetes namespace", "required": true},
+                    {"name": "deployment_name", "description": "Deployment name", "required": true}
+                ]
+            }]
+        }),
+    )
+}
+
+fn handle_prompts_get(request: &JsonRpcRequest) -> JsonRpcResponse {
+    let params = &request.params;
+
+    let name = match params["name"].as_str() {
+        Some(n) => n,
+        None => return error_response(request, -32602, "Missing 'name' parameter"),
+    };
+
+    match name {
+        "deployment-readiness-check" => {
+            let args = &params["arguments"];
+            let ns = args["namespace"].as_str().unwrap_or("default");
+            let dep = args["deployment_name"].as_str().unwrap_or("my-app");
+
+            let prompt_text = format!(
+                r#"You are evaluating whether the application "{dep}" in namespace "{ns}" is ready for production deployment on deckwatch. Run the following checks using the available MCP tools and report a checklist with pass/fail for each item:
+
+1. **Deployment exists**: Call `get_deployment` for namespace "{ns}", name "{dep}"
+2. **Container image**: Check the image field — flag if it uses `:latest` tag or no tag
+3. **GitOps configured**: Call `get_gitops_status` — check repo_url, branch, dockerfile_path are set
+4. **Database**: Check DATABASE_URL env var — flag if pointing to localhost, sqlite, or missing
+5. **Resource limits**: Check resource_limits and resource_requests are set
+6. **Readiness probe**: Check readiness_probe is configured
+7. **Ingress**: Call `list_ingresses` in namespace "{ns}" — check an ingress exists for this service
+8. **Application label**: Check deckwatch.io/application label exists on the deployment
+9. **Pod health**: Call `list_pods` in namespace "{ns}" — check all pods are Running/Ready with zero restarts
+10. **Image pull**: Verify no ImagePullBackOff or ErrImagePull on any pod
+
+Format the output as a checklist with a checkmark or X for each item, with details on what needs to be fixed for any failing checks."#,
+            );
+
+            success_response(
+                request,
+                serde_json::json!({
+                    "description": "Check if an application is ready to be deployed and managed by deckwatch",
+                    "messages": [{
+                        "role": "user",
+                        "content": {
+                            "type": "text",
+                            "text": prompt_text
+                        }
+                    }]
+                }),
+            )
+        }
+        _ => error_response(request, -32602, &format!("Unknown prompt: {name}")),
+    }
 }
 
 // ---------------------------------------------------------------------------

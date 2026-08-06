@@ -586,3 +586,67 @@ users:
         encryption_key: String::new(),
     }
 }
+
+// ---------------------------------------------------------------------------
+// prompts/list + prompts/get
+// ---------------------------------------------------------------------------
+
+#[test]
+fn prompts_list_returns_deployment_readiness_check() {
+    let req = JsonRpcRequest {
+        jsonrpc: "2.0".to_string(),
+        id: Some(json!(1)),
+        method: "prompts/list".to_string(),
+        params: json!({}),
+    };
+
+    let resp = handle_prompts_list(&req);
+    assert!(resp.error.is_none());
+    let result = resp.result.unwrap();
+    let prompts = result["prompts"].as_array().unwrap();
+    assert!(!prompts.is_empty());
+    assert_eq!(prompts[0]["name"], "deployment-readiness-check");
+    assert!(prompts[0]["arguments"].as_array().unwrap().len() >= 2);
+}
+
+#[test]
+fn prompts_get_returns_messages_with_arguments() {
+    let req = JsonRpcRequest {
+        jsonrpc: "2.0".to_string(),
+        id: Some(json!(2)),
+        method: "prompts/get".to_string(),
+        params: json!({
+            "name": "deployment-readiness-check",
+            "arguments": {
+                "namespace": "test-ns",
+                "deployment_name": "my-app"
+            }
+        }),
+    };
+
+    let resp = handle_prompts_get(&req);
+    assert!(resp.error.is_none());
+    let result = resp.result.unwrap();
+    let messages = result["messages"].as_array().unwrap();
+    assert_eq!(messages.len(), 1);
+    assert_eq!(messages[0]["role"], "user");
+    let text = messages[0]["content"]["text"].as_str().unwrap();
+    assert!(text.contains("test-ns"));
+    assert!(text.contains("my-app"));
+    assert!(text.contains("get_deployment"));
+    assert!(text.contains("get_gitops_status"));
+}
+
+#[test]
+fn prompts_get_unknown_returns_error() {
+    let req = JsonRpcRequest {
+        jsonrpc: "2.0".to_string(),
+        id: Some(json!(3)),
+        method: "prompts/get".to_string(),
+        params: json!({"name": "nonexistent"}),
+    };
+
+    let resp = handle_prompts_get(&req);
+    assert!(resp.error.is_some());
+    assert!(resp.error.unwrap().message.contains("Unknown prompt"));
+}
