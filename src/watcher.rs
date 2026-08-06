@@ -67,7 +67,7 @@ pub async fn run_poller(state: AppState) {
             tracing::error!(error = %e, "watcher poll cycle failed");
         }
 
-        if let Err(e) = monitor_builds(&state).await {
+        if let Err(e) = monitor_builds(&state, &http_client).await {
             tracing::error!(error = %e, "watcher build monitor failed");
         }
 
@@ -931,7 +931,104 @@ async fn cleanup_build_group_jobs(jobs_api: &Api<Job>, build_group: &str) {
     }
 }
 
-async fn monitor_builds(state: &AppState) -> anyhow::Result<()> {
+/// Verify that a newly built image is actually pullable from the registry
+/// before patching the deployment. This prevents `ImagePullBackOff` errors
+/// when the registry hasn't fully processed the manifest yet.
+///
+/// The check is only performed for images hosted on the deckwatch-managed
+/// registry (internal or public URL). External registries (GHCR, ECR, etc.)
+/// are trusted to be available immediately after a successful push.
+///
+/// Returns `true` if the image is confirmed available or if the check is not
+/// applicable (external registry). Returns `false` if the registry returned
+/// a non-200 status, indicating the image is not yet ready.
+async fn verify_image_available(http: &reqwest::Client, state: &AppState, image_ref: &str) -> bool {
+    // Parse the image reference into registry host and name:tag.
+    // Expected format: "registry-host/repo/path:tag"
+    let (registry_host, repo_and_tag) = match image_ref.split_once('/') {
+        Some((host, rest)) if host.contains('.') || host.contains(':') => (host, rest),
+        _ => {
+            // No recognizable registry host (e.g. library images) -- skip check.
+            return true;
+        }
+    };
+
+    // Only check images on the deckwatch-managed registry.
+    let is_managed = [
+        state.registry_internal_url.as_deref(),
+        state.registry_public_url.as_deref(),
+    ]
+    .iter()
+    .flatten()
+    .any(|url| {
+        let normalized = url
+            .trim_end_matches('/')
+            .strip_prefix("https://")
+            .or_else(|| url.strip_prefix("http://"))
+            .unwrap_or(url);
+        normalized.trim_end_matches('/') == registry_host
+    });
+
+    if !is_managed {
+        // External registry -- trust the push succeeded.
+        return true;
+    }
+
+    // Split repo_and_tag into name and tag.
+    let (name, tag) = match repo_and_tag.rsplit_once(':') {
+        Some((n, t)) => (n, t),
+        None => {
+            // No tag -- unusual, skip check.
+            return true;
+        }
+    };
+
+    // Prefer the internal URL for the check (avoids hairpin NAT), fall back
+    // to the public URL.
+    let base_url = state
+        .registry_internal_url
+        .as_deref()
+        .or(state.registry_public_url.as_deref());
+
+    let base_url = match base_url {
+        Some(u) => u.trim_end_matches('/'),
+        None => return true,
+    };
+
+    // Ensure the base URL has a scheme so reqwest can parse it.
+    let base_url = if base_url.starts_with("http://") || base_url.starts_with("https://") {
+        base_url.to_string()
+    } else {
+        format!("http://{base_url}")
+    };
+
+    let url = format!("{base_url}/v2/{name}/manifests/{tag}");
+
+    match http.head(&url).send().await {
+        Ok(resp) if resp.status().is_success() => {
+            tracing::debug!(image = %image_ref, "image verified available in registry");
+            true
+        }
+        Ok(resp) => {
+            tracing::warn!(
+                image = %image_ref,
+                status = %resp.status(),
+                "image not yet available in registry, deferring deployment update"
+            );
+            false
+        }
+        Err(e) => {
+            tracing::warn!(
+                image = %image_ref,
+                error = %e,
+                "failed to verify image availability, deferring deployment update"
+            );
+            false
+        }
+    }
+}
+
+async fn monitor_builds(state: &AppState, http: &reqwest::Client) -> anyhow::Result<()> {
     // Find all gitops configs that have an active build ("building" status).
     let building_configs = gitops_configs::Entity::find()
         .filter(gitops_configs::Column::LastBuildStatus.eq("building"))
@@ -985,6 +1082,17 @@ async fn monitor_builds(state: &AppState) -> anyhow::Result<()> {
                     // The image was pushed directly to the canonical tag.
                     let oci_repo = &config.oci_repository;
                     let new_image = format!("{oci_repo}:{short_sha}");
+
+                    // Verify the image is pullable before patching the deployment
+                    // to avoid ImagePullBackOff errors.
+                    if !verify_image_available(http, state, &new_image).await {
+                        tracing::info!(
+                            deployment = %dep_name,
+                            image = %new_image,
+                            "deferring deployment update until image is available"
+                        );
+                        continue;
+                    }
 
                     tracing::info!(
                         deployment = %dep_name,
@@ -1086,6 +1194,17 @@ async fn monitor_builds(state: &AppState) -> anyhow::Result<()> {
                 // The full multi-arch build is done. Update the deployment.
                 let oci_repo = &config.oci_repository;
                 let new_image = format!("{oci_repo}:{short_sha}");
+
+                // Verify the image is pullable before patching the deployment
+                // to avoid ImagePullBackOff errors.
+                if !verify_image_available(http, state, &new_image).await {
+                    tracing::info!(
+                        deployment = %dep_name,
+                        image = %new_image,
+                        "deferring deployment update until image is available"
+                    );
+                    continue;
+                }
 
                 tracing::info!(
                     deployment = %dep_name,
