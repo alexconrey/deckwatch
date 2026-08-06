@@ -56,6 +56,9 @@ rules:
   - apiGroups: ["apiextensions.k8s.io"]
     resources: ["customresourcedefinitions"]
     verbs: ["get", "list", "watch"]
+  - apiGroups: ["external-secrets.io"]
+    resources: ["externalsecrets"]
+    verbs: ["get", "list", "create", "update", "patch", "delete"]
   # Prometheus operator CRDs -- deckwatch creates PodMonitors alongside the
   # Deployments it manages so prometheus-operator can scrape them. Verbs are
   # scoped tightly: no access to prometheuses/alertmanagers/prometheusrules
