@@ -604,9 +604,14 @@ fn prompts_list_returns_deployment_readiness_check() {
     assert!(resp.error.is_none());
     let result = resp.result.unwrap();
     let prompts = result["prompts"].as_array().unwrap();
-    assert!(!prompts.is_empty());
-    assert_eq!(prompts[0]["name"], "deployment-readiness-check");
-    assert!(prompts[0]["arguments"].as_array().unwrap().len() >= 2);
+    assert!(prompts.len() >= 2);
+    let names: Vec<&str> = prompts.iter().filter_map(|p| p["name"].as_str()).collect();
+    assert!(names.contains(&"deployment-readiness-check"));
+    let readiness = prompts
+        .iter()
+        .find(|p| p["name"] == "deployment-readiness-check")
+        .unwrap();
+    assert!(readiness["arguments"].as_array().unwrap().len() >= 2);
 }
 
 #[test]
@@ -635,6 +640,45 @@ fn prompts_get_returns_messages_with_arguments() {
     assert!(text.contains("my-app"));
     assert!(text.contains("get_deployment"));
     assert!(text.contains("get_gitops_status"));
+}
+
+#[test]
+fn prompts_list_includes_pre_deployment_check() {
+    let req = JsonRpcRequest {
+        jsonrpc: "2.0".to_string(),
+        id: Some(json!(1)),
+        method: "prompts/list".to_string(),
+        params: json!({}),
+    };
+
+    let resp = handle_prompts_list(&req);
+    let result = resp.result.unwrap();
+    let prompts = result["prompts"].as_array().unwrap();
+    let names: Vec<&str> = prompts.iter().filter_map(|p| p["name"].as_str()).collect();
+    assert!(names.contains(&"pre-deployment-check"));
+    assert!(names.contains(&"deployment-readiness-check"));
+}
+
+#[test]
+fn prompts_get_pre_deployment_check_returns_codebase_analysis() {
+    let req = JsonRpcRequest {
+        jsonrpc: "2.0".to_string(),
+        id: Some(json!(4)),
+        method: "prompts/get".to_string(),
+        params: json!({"name": "pre-deployment-check"}),
+    };
+
+    let resp = handle_prompts_get(&req);
+    assert!(resp.error.is_none());
+    let result = resp.result.unwrap();
+    let messages = result["messages"].as_array().unwrap();
+    assert_eq!(messages.len(), 1);
+    let text = messages[0]["content"]["text"].as_str().unwrap();
+    assert!(text.contains("Dockerfile"));
+    assert!(text.contains("git"));
+    assert!(text.contains("Health endpoint"));
+    assert!(text.contains("Database"));
+    assert!(text.contains("secrets"));
 }
 
 #[test]

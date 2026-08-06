@@ -995,14 +995,21 @@ fn handle_prompts_list(request: &JsonRpcRequest) -> JsonRpcResponse {
     success_response(
         request,
         serde_json::json!({
-            "prompts": [{
-                "name": "deployment-readiness-check",
-                "description": "Check if an application is ready to be deployed and managed by deckwatch",
-                "arguments": [
-                    {"name": "namespace", "description": "Kubernetes namespace", "required": true},
-                    {"name": "deployment_name", "description": "Deployment name", "required": true}
-                ]
-            }]
+            "prompts": [
+                {
+                    "name": "pre-deployment-check",
+                    "description": "Review the current project directory to check if the application is ready to be onboarded to deckwatch",
+                    "arguments": []
+                },
+                {
+                    "name": "deployment-readiness-check",
+                    "description": "Check if a deployed application on the cluster is healthy and properly configured in deckwatch",
+                    "arguments": [
+                        {"name": "namespace", "description": "Kubernetes namespace", "required": true},
+                        {"name": "deployment_name", "description": "Deployment name", "required": true}
+                    ]
+                }
+            ]
         }),
     )
 }
@@ -1016,6 +1023,36 @@ fn handle_prompts_get(request: &JsonRpcRequest) -> JsonRpcResponse {
     };
 
     match name {
+        "pre-deployment-check" => {
+            let prompt_text = r#"You are reviewing the current project directory to determine if this application is ready to be onboarded to deckwatch for Kubernetes deployment. Analyze the codebase and report a checklist with pass/fail for each item:
+
+1. **Dockerfile exists**: Look for a Dockerfile (or Dockerfile.*) in the project root. Check that it builds a runnable container — verify it has a CMD or ENTRYPOINT.
+2. **Git repository**: Check if this is a git repo with a remote origin configured (`git remote -v`). Deckwatch GitOps requires a reachable git URL.
+3. **Container port exposed**: Check the Dockerfile for an EXPOSE directive. The deployment needs to know which port the app listens on.
+4. **Health endpoint**: Search the codebase for a health check endpoint (e.g. `/health`, `/healthz`, `/readyz`, `/api/healthz`). Deckwatch configures readiness probes against these.
+5. **Database configuration**: Check for database connection strings in config files, env vars, or code. Flag if using SQLite or localhost — production deployments should use an external database (RDS, etc.).
+6. **Dependencies pinned**: Check if dependency versions are pinned (requirements.txt with ==, Cargo.lock, package-lock.json, go.sum). Unpinned dependencies cause non-reproducible builds.
+7. **Environment variables**: Look for .env files, environment variable references in the code, or config files. Document which env vars the app needs — these will need to be set on the deckwatch deployment.
+8. **No secrets in code**: Scan for hardcoded passwords, API keys, tokens, or credentials in the source code. These should be in Kubernetes Secrets, not baked into the image.
+9. **Startup time**: Check if the app has a long startup sequence (database migrations, cache warming, etc.). If so, recommend configuring a startup probe in addition to the readiness probe.
+10. **.dockerignore exists**: Check for a .dockerignore file to avoid bloating the container image with unnecessary files (node_modules, .git, test fixtures, etc.).
+
+Format the output as a checklist with a checkmark or X for each item, with specific details on what needs to be fixed for any failing checks. End with a summary of whether the app is ready for deckwatch onboarding."#;
+
+            success_response(
+                request,
+                serde_json::json!({
+                    "description": "Review the current project directory to check if the application is ready to be onboarded to deckwatch",
+                    "messages": [{
+                        "role": "user",
+                        "content": {
+                            "type": "text",
+                            "text": prompt_text
+                        }
+                    }]
+                }),
+            )
+        }
         "deployment-readiness-check" => {
             let args = &params["arguments"];
             let ns = args["namespace"].as_str().unwrap_or("default");
