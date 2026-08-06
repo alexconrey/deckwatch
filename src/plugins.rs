@@ -104,6 +104,73 @@ pub struct LoadedPlugin {
     pub wasm_bytes: Vec<u8>,
 }
 
+// ── Validation ────────────────────────────────────────────────────────────────
+
+/// Result of a plugin dry-run validation. Returned by [`fetch_and_validate`].
+pub struct ValidationResult {
+    /// Size of the fetched WASM binary in bytes.
+    pub wasm_size_bytes: usize,
+    /// Whether the `apply` function was found and callable.
+    pub apply_export_found: bool,
+    /// The test context that was passed to `apply`.
+    pub test_context: PluginContext,
+    /// The result returned by `apply`, if it succeeded.
+    pub result: Option<PluginResult>,
+    /// Error message if fetch or execution failed.
+    pub error: Option<String>,
+}
+
+/// Fetch a plugin from its configured source, validate that it loads as a
+/// WASM module with an `apply` export, and dry-run it against `test_ctx`.
+///
+/// Used by the `validate_plugin` MCP tool. Does not modify any state.
+pub async fn fetch_and_validate(
+    cfg: &PluginConfig,
+    test_ctx: PluginContext,
+    state: &AppState,
+) -> ValidationResult {
+    let settings = crate::handlers::settings::load_settings_from_db(state).await;
+    let http = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .unwrap_or_default();
+
+    let bytes = match fetch_bytes(cfg, &http, &settings, state).await {
+        Ok(b) => b,
+        Err(e) => {
+            return ValidationResult {
+                wasm_size_bytes: 0,
+                apply_export_found: false,
+                test_context: test_ctx,
+                result: None,
+                error: Some(format!("fetch failed: {e}")),
+            };
+        }
+    };
+
+    let size = bytes.len();
+    let plugin = LoadedPlugin { name: "__validation__".to_string(), wasm_bytes: bytes };
+
+    match run_plugin(&plugin, &test_ctx) {
+        Ok(result) => ValidationResult {
+            wasm_size_bytes: size,
+            apply_export_found: true,
+            test_context: test_ctx,
+            result: Some(result),
+            error: None,
+        },
+        Err(e) => ValidationResult {
+            wasm_size_bytes: size,
+            // If we got past the fetch but extism failed, distinguish between
+            // "apply not found" and "apply threw an error".
+            apply_export_found: !e.to_string().contains("not found"),
+            test_context: test_ctx,
+            result: None,
+            error: Some(format!("apply() failed: {e}")),
+        },
+    }
+}
+
 // ── Fetching ─────────────────────────────────────────────────────────────────
 
 /// Fetch and load all enabled plugins from their configured sources.
