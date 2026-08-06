@@ -364,8 +364,8 @@ pub async fn put_manifest(
     let media_type = headers
         .get(header::CONTENT_TYPE)
         .and_then(|v| v.to_str().ok())
-        .unwrap_or("application/vnd.oci.image.manifest.v1+json")
-        .to_string();
+        .map(|ct| ct.to_string())
+        .unwrap_or_else(|| detect_manifest_media_type(&body));
 
     let digest = digest_bytes(&body);
 
@@ -1140,6 +1140,20 @@ async fn list_tags_in_fs(dir: &Path) -> Vec<String> {
     out
 }
 
+/// Detect the media type of a manifest from its JSON body. Falls back to
+/// single-manifest OCI type if the body can't be parsed.
+fn detect_manifest_media_type(body: &[u8]) -> String {
+    if let Ok(v) = serde_json::from_slice::<serde_json::Value>(body) {
+        if let Some(mt) = v.get("mediaType").and_then(|m| m.as_str()) {
+            return mt.to_string();
+        }
+        if v.get("manifests").is_some() {
+            return "application/vnd.oci.image.index.v1+json".to_string();
+        }
+    }
+    "application/vnd.oci.image.manifest.v1+json".to_string()
+}
+
 /// Read the sidecar (media type, digest, size) for a given manifest ref,
 /// returning None if either the manifest or its meta is missing. Used by
 /// the UI handler so it doesn't have to reparse the manifest itself.
@@ -1196,5 +1210,70 @@ pub(crate) async fn manifest_modified_at(
             Some(jiff_ts.to_string())
         }
         RegistryStore::S3(_) => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn detect_oci_index_from_body() {
+        let body = serde_json::json!({
+            "schemaVersion": 2,
+            "mediaType": "application/vnd.oci.image.index.v1+json",
+            "manifests": []
+        });
+        assert_eq!(
+            detect_manifest_media_type(body.to_string().as_bytes()),
+            "application/vnd.oci.image.index.v1+json"
+        );
+    }
+
+    #[test]
+    fn detect_docker_manifest_list_from_body() {
+        let body = serde_json::json!({
+            "schemaVersion": 2,
+            "mediaType": "application/vnd.docker.distribution.manifest.list.v2+json",
+            "manifests": []
+        });
+        assert_eq!(
+            detect_manifest_media_type(body.to_string().as_bytes()),
+            "application/vnd.docker.distribution.manifest.list.v2+json"
+        );
+    }
+
+    #[test]
+    fn detect_index_without_media_type_field() {
+        let body = serde_json::json!({
+            "schemaVersion": 2,
+            "manifests": [{"digest": "sha256:abc"}]
+        });
+        assert_eq!(
+            detect_manifest_media_type(body.to_string().as_bytes()),
+            "application/vnd.oci.image.index.v1+json"
+        );
+    }
+
+    #[test]
+    fn detect_single_manifest_from_body() {
+        let body = serde_json::json!({
+            "schemaVersion": 2,
+            "mediaType": "application/vnd.oci.image.manifest.v1+json",
+            "config": {},
+            "layers": []
+        });
+        assert_eq!(
+            detect_manifest_media_type(body.to_string().as_bytes()),
+            "application/vnd.oci.image.manifest.v1+json"
+        );
+    }
+
+    #[test]
+    fn detect_fallback_on_invalid_json() {
+        assert_eq!(
+            detect_manifest_media_type(b"not json"),
+            "application/vnd.oci.image.manifest.v1+json"
+        );
     }
 }
