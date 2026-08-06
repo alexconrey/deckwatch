@@ -28,6 +28,7 @@ The Settings page renders a sidebar tree with the following sections:
 | **Templates** | `templates` | Deployment templates (CRUD, per-category defaults) |
 | **Git Repositories** | `git_repositories` | Managed list of Git repos for GitOps dropdowns |
 | **Container Registries** | `container_registries` | Managed list of OCI registries for GitOps dropdowns |
+| **Plugins** | `plugins` | External WASM plugins loaded from Git repositories |
 | **Audit Log** | `audit` | Read-only view of the `audit_log` table |
 
 ## Schema
@@ -125,3 +126,4 @@ kubectl create namespace deckwatch
 kubectl create configmap deckwatch-config -n deckwatch \
   --from-literal=settings='{"allowed_namespaces":[]}'
 ```
+

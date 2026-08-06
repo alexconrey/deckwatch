@@ -285,7 +285,7 @@ pub async fn create(
         ..Default::default()
     };
 
-    let deployment = Deployment {
+    let mut deployment = Deployment {
         metadata: ObjectMeta {
             name: Some(req.name.clone()),
             namespace: Some(ns.clone()),
@@ -313,10 +313,60 @@ pub async fn create(
         ..Default::default()
     };
 
+    // Apply plugins: inject env vars and sidecars before the kube API call;
+    // collect kubernetes_resources to apply after the deployment is committed.
+    let plugin_k8s_resources: Vec<serde_json::Value> = {
+        let plugins = state.plugins.read().await;
+        if !plugins.is_empty() {
+            let ctx = crate::plugins::PluginContext {
+                namespace: ns.clone(),
+                deployment_name: req.name.clone(),
+                annotations: deployment
+                    .metadata
+                    .annotations
+                    .clone()
+                    .unwrap_or_default()
+                    .into_iter()
+                    .collect(),
+                labels: deployment
+                    .spec
+                    .as_ref()
+                    .and_then(|s| s.template.metadata.as_ref())
+                    .and_then(|m| m.labels.as_ref())
+                    .cloned()
+                    .unwrap_or_default()
+                    .into_iter()
+                    .collect(),
+            };
+            let dep_annotations = deployment.metadata.annotations.get_or_insert_with(BTreeMap::new);
+            if let Some(spec) = deployment.spec.as_mut() {
+                if let Some(pod_spec) = spec.template.spec.as_mut() {
+                    crate::plugins::apply_plugins(&plugins, &ctx, pod_spec, dep_annotations)
+                } else {
+                    vec![]
+                }
+            } else {
+                vec![]
+            }
+        } else {
+            vec![]
+        }
+    };
+
     let t = K8sTimer::new("deployments", "create");
     let created = api.create(&PostParams::default(), &deployment).await;
     t.finish(created.is_ok());
     let created = created?;
+
+    // Apply plugin-declared kubernetes resources (CRDs, ExternalSecrets, etc.)
+    // after the deployment is committed. Best-effort: failures are logged but
+    // do not roll back the deployment.
+    if !plugin_k8s_resources.is_empty() {
+        let kube_client = state.kube_client.clone();
+        tokio::spawn(async move {
+            crate::plugins::apply_kubernetes_resources(&plugin_k8s_resources, &kube_client).await;
+        });
+    }
     let detail = deployment_detail(&created);
 
     if let Err(e) = audit::log_action(
@@ -408,10 +458,58 @@ pub async fn update(
         }
     }
 
+    // Apply plugins after user edits; collect kubernetes_resources to apply
+    // after the deployment replace is committed.
+    let plugin_k8s_resources: Vec<serde_json::Value> = {
+        let plugins = state.plugins.read().await;
+        if !plugins.is_empty() {
+            let ctx = crate::plugins::PluginContext {
+                namespace: ns.clone(),
+                deployment_name: name.clone(),
+                annotations: dep
+                    .metadata
+                    .annotations
+                    .clone()
+                    .unwrap_or_default()
+                    .into_iter()
+                    .collect(),
+                labels: dep
+                    .spec
+                    .as_ref()
+                    .and_then(|s| s.template.metadata.as_ref())
+                    .and_then(|m| m.labels.as_ref())
+                    .cloned()
+                    .unwrap_or_default()
+                    .into_iter()
+                    .collect(),
+            };
+            let dep_annotations = dep.metadata.annotations.get_or_insert_with(BTreeMap::new);
+            if let Some(spec) = dep.spec.as_mut() {
+                if let Some(pod_spec) = spec.template.spec.as_mut() {
+                    crate::plugins::apply_plugins(&plugins, &ctx, pod_spec, dep_annotations)
+                } else {
+                    vec![]
+                }
+            } else {
+                vec![]
+            }
+        } else {
+            vec![]
+        }
+    };
+
     let t = K8sTimer::new("deployments", "replace");
     let updated = api.replace(&name, &PostParams::default(), &dep).await;
     t.finish(updated.is_ok());
     let updated = updated?;
+
+    if !plugin_k8s_resources.is_empty() {
+        let kube_client = state.kube_client.clone();
+        tokio::spawn(async move {
+            crate::plugins::apply_kubernetes_resources(&plugin_k8s_resources, &kube_client).await;
+        });
+    }
+
     let detail = deployment_detail(&updated);
     let pods = list_pods_for_deployment(&state, &ns, &updated).await?;
     let ingresses = list_ingresses_for_service(&state, &ns, &name).await?;

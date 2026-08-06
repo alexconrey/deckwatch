@@ -95,6 +95,10 @@ pub struct DeckwatchSettings {
     pub build_architectures: Vec<BuildArchitecture>,
     #[serde(default = "default_build_settings")]
     pub build_settings: BuildSettings,
+    /// External plugins to load at startup and on settings update. Each
+    /// plugin is a compiled WASM binary fetched from a Git repository.
+    #[serde(default)]
+    pub plugins: Vec<PluginConfig>,
 }
 
 /// Encrypted credential storage. Each field holds an AES-256-GCM ciphertext
@@ -373,6 +377,46 @@ pub fn default_build_architectures() -> Vec<BuildArchitecture> {
     ]
 }
 
+/// Where deckwatch fetches the compiled WASM binary for a plugin.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum PluginSource {
+    /// Fetch a file from a GitHub repository via raw.githubusercontent.com
+    /// (when `use_release` is false) or from a GitHub Release asset
+    /// (when `use_release` is true).
+    Github {
+        /// `"owner/repo"` — e.g. `"alexconrey/deckwatch-plugin-example"`.
+        repo: String,
+        /// Git ref: tag, branch, or full SHA.
+        #[serde(rename = "ref")]
+        git_ref: String,
+        /// Path to the `.wasm` file within the repo or release assets.
+        path: String,
+        /// When true, download from GitHub Releases instead of raw file.
+        #[serde(default)]
+        use_release: bool,
+    },
+    /// Arbitrary HTTPS URL — for self-hosted Gitea, Forgejo, S3, etc.
+    Url {
+        url: String,
+    },
+}
+
+/// Configuration for a single external plugin.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PluginConfig {
+    /// Unique name used in annotation keys (e.g. `deckwatch.plugin-env/<name>`).
+    /// Must be a valid Kubernetes annotation suffix: lowercase alphanumeric + `-`.
+    pub name: String,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    pub source: PluginSource,
+    /// Name of a `git_token_secrets` entry to use for authenticated fetches
+    /// (private repos). Leave unset for public repos.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_secret: Option<String>,
+}
+
 pub async fn get_settings(
     State(state): State<AppState>,
 ) -> Result<Json<DeckwatchSettings>, AppError> {
@@ -472,6 +516,21 @@ pub async fn put_settings(
     upsert_settings_to_db(&state.db, &settings)
         .await
         .map_err(|e| AppError::BadRequest(format!("failed to save settings: {e}")))?;
+
+    // Re-fetch plugins in the background so the response isn't delayed by
+    // network I/O. The new plugin set is live for subsequent deploys.
+    if !settings.plugins.is_empty() {
+        let state_clone = state.clone();
+        let plugins_snapshot = settings.plugins.clone();
+        tokio::spawn(async move {
+            let mut s = DeckwatchSettings::default();
+            s.git_token_secrets = load_settings_from_db(&state_clone).await.git_token_secrets;
+            s.plugins = plugins_snapshot;
+            let loaded = crate::plugins::fetch_plugins(&s, &state_clone).await;
+            tracing::info!(count = loaded.len(), "plugin refresh complete");
+            *state_clone.plugins.write().await = loaded;
+        });
+    }
 
     if let Err(e) = crate::audit::log_action(
         &state.db,
@@ -589,6 +648,7 @@ fn default_settings(state: &AppState) -> DeckwatchSettings {
         ingress_templates: Vec::new(),
         build_architectures: default_build_architectures(),
         build_settings: default_build_settings(),
+        plugins: Vec::new(),
     }
 }
 

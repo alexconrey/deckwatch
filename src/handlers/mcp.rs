@@ -157,7 +157,7 @@ fn deckwatch_tool_definitions() -> Vec<serde_json::Value> {
             "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false }
         }),
         serde_json::json!({
-            "name": "configure_gitops",
+            "name": "set_gitops",
             "description": "Enable GitOps for a deployment — poll a git repo, build with Kaniko, auto-deploy.",
             "inputSchema": {
                 "type": "object",
@@ -179,7 +179,7 @@ fn deckwatch_tool_definitions() -> Vec<serde_json::Value> {
             }
         }),
         serde_json::json!({
-            "name": "get_gitops_status",
+            "name": "get_gitops",
             "description": "Get GitOps configuration and last build status for a deployment (reads from deckwatch database).",
             "inputSchema": {
                 "type": "object",
@@ -192,7 +192,7 @@ fn deckwatch_tool_definitions() -> Vec<serde_json::Value> {
             }
         }),
         serde_json::json!({
-            "name": "trigger_gitops_build",
+            "name": "trigger_build",
             "description": "Trigger a GitOps build for a deployment. Clones the repo, builds a container image with Kaniko, and deploys it.",
             "inputSchema": {
                 "type": "object",
@@ -377,6 +377,86 @@ fn deckwatch_tool_definitions() -> Vec<serde_json::Value> {
                 "additionalProperties": false
             }
         }),
+        // ── Plugin management ──────────────────────────────────────────────
+        serde_json::json!({
+            "name": "list_plugins",
+            "description": "List all configured plugins — name, enabled state, source, and whether each is currently loaded in memory and ready to run.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {},
+                "additionalProperties": false
+            }
+        }),
+        serde_json::json!({
+            "name": "enable_plugin",
+            "description": "Enable a configured plugin by name. Updates settings immediately and triggers a background refetch of the WASM binary so subsequent deployments use it.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string", "description": "Plugin name as configured in settings" }
+                },
+                "required": ["name"],
+                "additionalProperties": false
+            }
+        }),
+        serde_json::json!({
+            "name": "disable_plugin",
+            "description": "Disable a configured plugin by name. The plugin is removed from the in-memory set immediately — subsequent deployments will not run it.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string", "description": "Plugin name as configured in settings" }
+                },
+                "required": ["name"],
+                "additionalProperties": false
+            }
+        }),
+        serde_json::json!({
+            "name": "validate_plugin",
+            "description": "Validate a plugin before adding it to settings. Fetches the WASM binary from the given source, confirms it loads and exports an `apply` function, then dry-runs it with a configurable test context and reports exactly what env vars, sidecars, and Kubernetes resources it would inject. Does not modify any state.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "source": {
+                        "type": "object",
+                        "description": "Plugin source — same schema as settings plugins[].source",
+                        "properties": {
+                            "type": { "type": "string", "enum": ["github", "url"] },
+                            "repo": { "type": "string", "description": "GitHub owner/repo (type=github)" },
+                            "ref":  { "type": "string", "description": "Git tag, branch, or SHA (type=github)" },
+                            "path": { "type": "string", "description": "Path to the .wasm file within the repo or release" },
+                            "use_release": { "type": "boolean", "description": "Fetch from GitHub Releases instead of raw file (type=github)" },
+                            "url": { "type": "string", "description": "Full HTTPS URL (type=url)" }
+                        },
+                        "required": ["type"]
+                    },
+                    "token_secret": {
+                        "type": "string",
+                        "description": "Name of a git_token_secrets entry for authenticated fetches (private repos)"
+                    },
+                    "test_namespace": {
+                        "type": "string",
+                        "description": "Namespace passed to the plugin's apply() function (default: default)"
+                    },
+                    "test_deployment": {
+                        "type": "string",
+                        "description": "Deployment name passed to apply() (default: test-deployment)"
+                    },
+                    "test_annotations": {
+                        "type": "object",
+                        "description": "Annotations passed to apply() — use these to trigger the plugin's opt-in checks",
+                        "additionalProperties": { "type": "string" }
+                    },
+                    "test_labels": {
+                        "type": "object",
+                        "description": "Pod template labels passed to apply()",
+                        "additionalProperties": { "type": "string" }
+                    }
+                },
+                "required": ["source"],
+                "additionalProperties": false
+            }
+        }),
     ]
 }
 
@@ -395,9 +475,9 @@ async fn handle_tool_call(state: &AppState, request: &JsonRpcRequest) -> JsonRpc
         "attach_addon" => Some(tool_attach_addon(state, args).await),
         "detach_addon" => Some(tool_detach_addon(state, args).await),
         "list_templates" => Some(tool_list_templates(state).await),
-        "configure_gitops" => Some(tool_configure_gitops(state, args).await),
-        "get_gitops_status" => Some(tool_get_gitops_status(state, args).await),
-        "trigger_gitops_build" => Some(tool_trigger_gitops_build(state, args).await),
+        "set_gitops" => Some(tool_configure_gitops(state, args).await),
+        "get_gitops" => Some(tool_get_gitops_status(state, args).await),
+        "trigger_build" => Some(tool_trigger_gitops_build(state, args).await),
         "create_ingress" => Some(tool_create_ingress(state, args).await),
         "update_ingress" => Some(tool_update_ingress(state, args).await),
         "list_ingress_templates" => Some(tool_list_ingress_templates(state).await),
@@ -410,6 +490,10 @@ async fn handle_tool_call(state: &AppState, request: &JsonRpcRequest) -> JsonRpc
         "get_monitoring" => Some(tool_get_monitoring(state, args).await),
         "enable_monitoring" => Some(tool_enable_monitoring(state, args).await),
         "disable_monitoring" => Some(tool_disable_monitoring(state, args).await),
+        "list_plugins" => Some(tool_list_plugins(state).await),
+        "enable_plugin" => Some(tool_enable_plugin(state, args).await),
+        "disable_plugin" => Some(tool_disable_plugin(state, args).await),
+        "validate_plugin" => Some(tool_validate_plugin(state, args).await),
         _ => None,
     };
 
@@ -1101,6 +1185,205 @@ async fn tool_disable_monitoring(
 }
 
 // ---------------------------------------------------------------------------
+// Plugin management tools
+// ---------------------------------------------------------------------------
+
+async fn tool_list_plugins(state: &AppState) -> Result<String, String> {
+    let s = settings::load_settings_from_db(state).await;
+    let loaded = state.plugins.read().await;
+    let loaded_names: std::collections::HashSet<&str> =
+        loaded.iter().map(|p| p.name.as_str()).collect();
+
+    let list: Vec<serde_json::Value> = s
+        .plugins
+        .iter()
+        .map(|cfg| {
+            let source_summary = match &cfg.source {
+                settings::PluginSource::Github { repo, git_ref, path, use_release } => {
+                    if *use_release {
+                        format!("github release: {repo}@{git_ref} → {path}")
+                    } else {
+                        format!("github raw: {repo}@{git_ref} → {path}")
+                    }
+                }
+                settings::PluginSource::Url { url } => format!("url: {url}"),
+            };
+            serde_json::json!({
+                "name": cfg.name,
+                "enabled": cfg.enabled,
+                "loaded": loaded_names.contains(cfg.name.as_str()),
+                "source": source_summary,
+                "token_secret": cfg.token_secret,
+            })
+        })
+        .collect();
+
+    let summary = serde_json::json!({
+        "configured": s.plugins.len(),
+        "loaded": loaded.len(),
+        "plugins": list,
+    });
+    serde_json::to_string_pretty(&summary).map_err(|e| e.to_string())
+}
+
+async fn tool_enable_plugin(state: &AppState, args: &serde_json::Value) -> Result<String, String> {
+    let name = args["name"].as_str().ok_or("name is required")?;
+
+    let mut s = settings::load_settings_from_db(state).await;
+    let cfg = s
+        .plugins
+        .iter_mut()
+        .find(|p| p.name == name)
+        .ok_or_else(|| format!("plugin '{name}' not found in settings"))?;
+
+    if cfg.enabled {
+        return Ok(format!("plugin '{name}' is already enabled"));
+    }
+    cfg.enabled = true;
+
+    settings::upsert_settings_to_db_pub(&state.db, &s)
+        .await
+        .map_err(|e| format!("failed to save settings: {e}"))?;
+
+    // Trigger background refetch so the plugin is live immediately.
+    let state_clone = state.clone();
+    let plugins_cfg = s.plugins.clone();
+    tokio::spawn(async move {
+        let mut snap = settings::DeckwatchSettings::default();
+        snap.plugins = plugins_cfg;
+        snap.git_token_secrets =
+            settings::load_settings_from_db(&state_clone).await.git_token_secrets;
+        let loaded = crate::plugins::fetch_plugins(&snap, &state_clone).await;
+        tracing::info!(count = loaded.len(), "plugins reloaded after enable");
+        *state_clone.plugins.write().await = loaded;
+    });
+
+    Ok(serde_json::json!({
+        "name": name,
+        "enabled": true,
+        "status": "enabled — WASM binary fetch triggered in background"
+    })
+    .to_string())
+}
+
+async fn tool_disable_plugin(
+    state: &AppState,
+    args: &serde_json::Value,
+) -> Result<String, String> {
+    let name = args["name"].as_str().ok_or("name is required")?;
+
+    let mut s = settings::load_settings_from_db(state).await;
+    let cfg = s
+        .plugins
+        .iter_mut()
+        .find(|p| p.name == name)
+        .ok_or_else(|| format!("plugin '{name}' not found in settings"))?;
+
+    if !cfg.enabled {
+        return Ok(format!("plugin '{name}' is already disabled"));
+    }
+    cfg.enabled = false;
+
+    settings::upsert_settings_to_db_pub(&state.db, &s)
+        .await
+        .map_err(|e| format!("failed to save settings: {e}"))?;
+
+    // Remove from the in-memory set immediately so the next deployment
+    // doesn't run this plugin even before the next startup.
+    {
+        let mut loaded = state.plugins.write().await;
+        loaded.retain(|p| p.name != name);
+    }
+
+    Ok(serde_json::json!({
+        "name": name,
+        "enabled": false,
+        "status": "disabled and unloaded from memory"
+    })
+    .to_string())
+}
+
+async fn tool_validate_plugin(
+    state: &AppState,
+    args: &serde_json::Value,
+) -> Result<String, String> {
+    // Parse the source from args — same JSON shape as DeckwatchSettings.plugins[].source.
+    let source: settings::PluginSource = serde_json::from_value(args["source"].clone())
+        .map_err(|e| format!("invalid source: {e}"))?;
+
+    let cfg = settings::PluginConfig {
+        name: "__validate__".to_string(),
+        enabled: true,
+        source,
+        token_secret: args["token_secret"].as_str().map(|s| s.to_string()),
+    };
+
+    let test_ctx = crate::plugins::PluginContext {
+        namespace: args["test_namespace"]
+            .as_str()
+            .unwrap_or("default")
+            .to_string(),
+        deployment_name: args["test_deployment"]
+            .as_str()
+            .unwrap_or("test-deployment")
+            .to_string(),
+        annotations: args
+            .get("test_annotations")
+            .and_then(|v| serde_json::from_value(v.clone()).ok())
+            .unwrap_or_default(),
+        labels: args
+            .get("test_labels")
+            .and_then(|v| serde_json::from_value(v.clone()).ok())
+            .unwrap_or_default(),
+    };
+
+    let vr = crate::plugins::fetch_and_validate(&cfg, test_ctx, state).await;
+
+    let result_summary = vr.result.as_ref().map(|r| {
+        serde_json::json!({
+            "env_vars": r.env_vars.iter().map(|e| {
+                if let Some(vf) = &e.value_from {
+                    if let Some(skr) = &vf.secret_key_ref {
+                        serde_json::json!({ "name": e.name, "from_secret": skr.name, "key": skr.key })
+                    } else if let Some(cmkr) = &vf.config_map_key_ref {
+                        serde_json::json!({ "name": e.name, "from_configmap": cmkr.name, "key": cmkr.key })
+                    } else {
+                        serde_json::json!({ "name": e.name, "value": "(unknown source)" })
+                    }
+                } else {
+                    serde_json::json!({ "name": e.name, "value": e.value })
+                }
+            }).collect::<Vec<_>>(),
+            "sidecars": r.sidecars.iter().map(|s| serde_json::json!({
+                "name": s.name,
+                "image": s.image,
+            })).collect::<Vec<_>>(),
+            "kubernetes_resources": r.kubernetes_resources.iter().map(|r| serde_json::json!({
+                "apiVersion": r["apiVersion"],
+                "kind": r["kind"],
+                "name": r["metadata"]["name"],
+                "namespace": r["metadata"]["namespace"],
+            })).collect::<Vec<_>>(),
+        })
+    });
+
+    let output = serde_json::json!({
+        "valid": vr.error.is_none(),
+        "wasm_size_bytes": vr.wasm_size_bytes,
+        "apply_export_found": vr.apply_export_found,
+        "test_context": {
+            "namespace": vr.test_context.namespace,
+            "deployment_name": vr.test_context.deployment_name,
+            "annotations": vr.test_context.annotations,
+        },
+        "result": result_summary,
+        "error": vr.error,
+    });
+
+    serde_json::to_string_pretty(&output).map_err(|e| e.to_string())
+}
+
+// ---------------------------------------------------------------------------
 // prompts/list + prompts/get
 // ---------------------------------------------------------------------------
 
@@ -1176,7 +1459,7 @@ Format the output as a checklist with a checkmark or X for each item, with speci
 
 1. **Deployment exists**: Call `get_deployment` for namespace "{ns}", name "{dep}"
 2. **Container image**: Check the image field — flag if it uses `:latest` tag or no tag
-3. **GitOps configured**: Call `get_gitops_status` — check repo_url, branch, dockerfile_path are set
+3. **GitOps configured**: Call `get_gitops` — check repo_url, branch, dockerfile_path are set
 4. **Database**: Check DATABASE_URL env var — flag if pointing to localhost, sqlite, or missing
 5. **Resource limits**: Check resource_limits and resource_requests are set
 6. **Readiness probe**: Check readiness_probe is configured
