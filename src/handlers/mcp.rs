@@ -157,7 +157,7 @@ fn deckwatch_tool_definitions() -> Vec<serde_json::Value> {
             "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false }
         }),
         serde_json::json!({
-            "name": "configure_gitops",
+            "name": "set_gitops",
             "description": "Enable GitOps for a deployment — poll a git repo, build with Kaniko, auto-deploy.",
             "inputSchema": {
                 "type": "object",
@@ -179,7 +179,7 @@ fn deckwatch_tool_definitions() -> Vec<serde_json::Value> {
             }
         }),
         serde_json::json!({
-            "name": "get_gitops_status",
+            "name": "get_gitops",
             "description": "Get GitOps configuration and last build status for a deployment (reads from deckwatch database).",
             "inputSchema": {
                 "type": "object",
@@ -192,7 +192,7 @@ fn deckwatch_tool_definitions() -> Vec<serde_json::Value> {
             }
         }),
         serde_json::json!({
-            "name": "trigger_gitops_build",
+            "name": "trigger_build",
             "description": "Trigger a GitOps build for a deployment. Clones the repo, builds a container image with Kaniko, and deploys it.",
             "inputSchema": {
                 "type": "object",
@@ -475,9 +475,9 @@ async fn handle_tool_call(state: &AppState, request: &JsonRpcRequest) -> JsonRpc
         "attach_addon" => Some(tool_attach_addon(state, args).await),
         "detach_addon" => Some(tool_detach_addon(state, args).await),
         "list_templates" => Some(tool_list_templates(state).await),
-        "configure_gitops" => Some(tool_configure_gitops(state, args).await),
-        "get_gitops_status" => Some(tool_get_gitops_status(state, args).await),
-        "trigger_gitops_build" => Some(tool_trigger_gitops_build(state, args).await),
+        "set_gitops" => Some(tool_configure_gitops(state, args).await),
+        "get_gitops" => Some(tool_get_gitops_status(state, args).await),
+        "trigger_build" => Some(tool_trigger_gitops_build(state, args).await),
         "create_ingress" => Some(tool_create_ingress(state, args).await),
         "update_ingress" => Some(tool_update_ingress(state, args).await),
         "list_ingress_templates" => Some(tool_list_ingress_templates(state).await),
@@ -1459,7 +1459,7 @@ Format the output as a checklist with a checkmark or X for each item, with speci
 
 1. **Deployment exists**: Call `get_deployment` for namespace "{ns}", name "{dep}"
 2. **Container image**: Check the image field — flag if it uses `:latest` tag or no tag
-3. **GitOps configured**: Call `get_gitops_status` — check repo_url, branch, dockerfile_path are set
+3. **GitOps configured**: Call `get_gitops` — check repo_url, branch, dockerfile_path are set
 4. **Database**: Check DATABASE_URL env var — flag if pointing to localhost, sqlite, or missing
 5. **Resource limits**: Check resource_limits and resource_requests are set
 6. **Readiness probe**: Check readiness_probe is configured
