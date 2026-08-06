@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::entities::{builds, gitops_configs};
 use crate::handlers::applications;
-use crate::handlers::{addons, gitops, ingresses, settings, templates};
+use crate::handlers::{addons, gitops, ingresses, monitoring, settings, templates};
 use crate::state::AppState;
 
 // ---------------------------------------------------------------------------
@@ -335,6 +335,48 @@ fn deckwatch_tool_definitions() -> Vec<serde_json::Value> {
                 "additionalProperties": false
             }
         }),
+        serde_json::json!({
+            "name": "get_monitoring",
+            "description": "Get Prometheus monitoring configuration for a deployment. Returns whether a PodMonitor is enabled, the scrape port, path, interval, and matching pod count.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "namespace": { "type": "string" },
+                    "deployment_name": { "type": "string" }
+                },
+                "required": ["namespace", "deployment_name"],
+                "additionalProperties": false
+            }
+        }),
+        serde_json::json!({
+            "name": "enable_monitoring",
+            "description": "Enable Prometheus metrics scraping for a deployment by creating a PodMonitor. Configures the scrape port, path, and interval.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "namespace": { "type": "string" },
+                    "deployment_name": { "type": "string" },
+                    "port": { "type": "string", "description": "Port name or number to scrape (default: auto-detected from deployment)" },
+                    "path": { "type": "string", "description": "Metrics endpoint path (default: /metrics)" },
+                    "interval": { "type": "string", "description": "Scrape interval (default: 30s)" }
+                },
+                "required": ["namespace", "deployment_name"],
+                "additionalProperties": false
+            }
+        }),
+        serde_json::json!({
+            "name": "disable_monitoring",
+            "description": "Disable Prometheus metrics scraping for a deployment by removing its PodMonitor.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "namespace": { "type": "string" },
+                    "deployment_name": { "type": "string" }
+                },
+                "required": ["namespace", "deployment_name"],
+                "additionalProperties": false
+            }
+        }),
     ]
 }
 
@@ -365,6 +407,9 @@ async fn handle_tool_call(state: &AppState, request: &JsonRpcRequest) -> JsonRpc
         "list_builds" => Some(tool_list_builds(state, args).await),
         "get_build_log" => Some(tool_get_build_log(state, args).await),
         "generate_local_build" => Some(tool_generate_local_build(state, args).await),
+        "get_monitoring" => Some(tool_get_monitoring(state, args).await),
+        "enable_monitoring" => Some(tool_enable_monitoring(state, args).await),
+        "disable_monitoring" => Some(tool_disable_monitoring(state, args).await),
         _ => None,
     };
 
@@ -984,8 +1029,76 @@ async fn tool_generate_local_build(
 }
 
 // ---------------------------------------------------------------------------
-// Response helpers
+// Prometheus monitoring tools
 // ---------------------------------------------------------------------------
+
+async fn tool_get_monitoring(state: &AppState, args: &serde_json::Value) -> Result<String, String> {
+    let ns = args["namespace"].as_str().ok_or("namespace is required")?;
+    let name = args["deployment_name"]
+        .as_str()
+        .ok_or("deployment_name is required")?;
+
+    let response = monitoring::get(
+        axum::extract::State(state.clone()),
+        axum::extract::Path((ns.to_string(), name.to_string())),
+    )
+    .await
+    .map_err(|e| format!("{e}"))?;
+
+    serde_json::to_string_pretty(&response.1 .0).map_err(|e| e.to_string())
+}
+
+async fn tool_enable_monitoring(
+    state: &AppState,
+    args: &serde_json::Value,
+) -> Result<String, String> {
+    let ns = args["namespace"].as_str().ok_or("namespace is required")?;
+    let name = args["deployment_name"]
+        .as_str()
+        .ok_or("deployment_name is required")?;
+
+    let req = monitoring::MonitorConfigRequest {
+        enabled: true,
+        port: args["port"].as_str().map(|s| s.to_string()),
+        path: args["path"].as_str().map(|s| s.to_string()),
+        interval: args["interval"].as_str().map(|s| s.to_string()),
+    };
+
+    let response = monitoring::upsert(
+        axum::extract::State(state.clone()),
+        axum::extract::Path((ns.to_string(), name.to_string())),
+        axum::Json(req),
+    )
+    .await
+    .map_err(|e| format!("{e}"))?;
+
+    serde_json::to_string_pretty(&response.1 .0).map_err(|e| e.to_string())
+}
+
+async fn tool_disable_monitoring(
+    state: &AppState,
+    args: &serde_json::Value,
+) -> Result<String, String> {
+    let ns = args["namespace"].as_str().ok_or("namespace is required")?;
+    let name = args["deployment_name"]
+        .as_str()
+        .ok_or("deployment_name is required")?;
+
+    monitoring::delete(
+        axum::extract::State(state.clone()),
+        axum::extract::Path((ns.to_string(), name.to_string())),
+    )
+    .await
+    .map_err(|e| format!("{e}"))?;
+
+    Ok(serde_json::json!({
+        "enabled": false,
+        "namespace": ns,
+        "deployment_name": name,
+        "status": "monitoring disabled"
+    })
+    .to_string())
+}
 
 // ---------------------------------------------------------------------------
 // prompts/list + prompts/get
