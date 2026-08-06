@@ -710,16 +710,42 @@ async fn create_manifest_job(
     let manifest_tag = format!("{kaniko_destination}:{short_sha}");
 
     let mut crane_args: Vec<String> = vec!["index".to_string(), "append".to_string()];
+
+    // Kaniko produces Docker V2 Schema 2 manifests by default (media type
+    // `application/vnd.docker.distribution.manifest.v2+json`).  Without
+    // `--docker-empty-base`, crane starts from an empty OCI image index
+    // whose children are expected to carry OCI media types.  Mixing an
+    // OCI index with Docker manifest children produces descriptors whose
+    // stated media-type doesn't match the actual content, which the
+    // kubelet rejects:
+    //   "children: invalid desc: expected manifest but found index"
+    // Using `--docker-empty-base` makes the manifest list a Docker
+    // manifest list (`application/vnd.docker.distribution.manifest.list.v2+json`),
+    // matching Kaniko's output format.
+    crane_args.push("--docker-empty-base".to_string());
+
+    // Flatten nested indexes: if an arch-specific tag somehow points to
+    // an index (e.g. from a stale partial build), extract its children
+    // instead of nesting the entire index.  This flag defaults to true
+    // in crane but we set it explicitly for defensive correctness.
+    crane_args.push("--flatten".to_string());
+
     for img_ref in &arch_refs {
         crane_args.push("--manifest".to_string());
         crane_args.push(img_ref.clone());
     }
     crane_args.push("--tag".to_string());
-    crane_args.push(manifest_tag);
+    crane_args.push(manifest_tag.clone());
 
     if internal_registry {
         crane_args.push("--insecure".to_string());
     }
+
+    tracing::debug!(
+        deployment = %dep_name,
+        crane_args = ?crane_args,
+        "crane manifest assembly command"
+    );
 
     let mut labels = BTreeMap::new();
     labels.insert("deckwatch.io/build".to_string(), "true".to_string());

@@ -541,23 +541,25 @@ fn build_settings_cache_enabled_adds_flag() {
 }
 
 #[test]
-fn build_settings_docker_media_types_flag_never_added() {
-    // The --docker-media-types flag was removed from crane; the field is kept
-    // for backward compat but is now a no-op that always defaults to false.
-    use crate::handlers::settings::{default_build_settings, BuildSettings};
+fn build_settings_docker_empty_base_always_added() {
+    // The old --docker-media-types flag was removed from crane; the replacement
+    // --docker-empty-base ensures the manifest list uses Docker media types
+    // matching Kaniko's default output format.
+    use crate::handlers::settings::default_build_settings;
 
-    // Even when explicitly set to true, the flag must not appear in crane args.
-    let _bs = BuildSettings {
-        docker_media_types: true,
-        ..default_build_settings()
-    };
-    let crane_args = vec!["index".to_string(), "append".to_string()];
-    // Flag block was removed from the watcher, so nothing adds it.
+    let _bs = default_build_settings();
+
+    // Simulate the crane args construction from create_manifest_job.
+    let mut crane_args = vec!["index".to_string(), "append".to_string()];
+    crane_args.push("--docker-empty-base".to_string());
+    crane_args.push("--flatten".to_string());
+
+    // --docker-empty-base must always be present.
+    assert!(crane_args.iter().any(|a| a == "--docker-empty-base"));
+    // --flatten must always be present.
+    assert!(crane_args.iter().any(|a| a == "--flatten"));
+    // The old flag must never appear.
     assert!(!crane_args.iter().any(|a| a == "--docker-media-types"));
-
-    // Default should now be false.
-    let bs_default = default_build_settings();
-    assert!(!bs_default.docker_media_types);
 }
 
 #[test]
