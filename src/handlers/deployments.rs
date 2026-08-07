@@ -518,15 +518,22 @@ pub async fn update(
         if let Some(spec) = dep.spec.as_mut() {
             let tmpl_meta = spec.template.metadata.get_or_insert_with(Default::default);
             if let Some(labels) = req.pod_labels {
-                tmpl_meta.labels = if labels.is_empty() { None } else { Some(labels) };
+                tmpl_meta.labels = if labels.is_empty() {
+                    None
+                } else {
+                    Some(labels)
+                };
             }
             if let Some(anns) = req.pod_annotations {
                 tmpl_meta.annotations = if anns.is_empty() { None } else { Some(anns) };
             }
             if let Some(pod_spec) = spec.template.spec.as_mut() {
                 if let Some(ns_map) = req.node_selector {
-                    pod_spec.node_selector =
-                        if ns_map.is_empty() { None } else { Some(ns_map) };
+                    pod_spec.node_selector = if ns_map.is_empty() {
+                        None
+                    } else {
+                        Some(ns_map)
+                    };
                 }
                 if let Some(na) = req.node_affinity {
                     pod_spec.affinity = build_node_affinity(na);
