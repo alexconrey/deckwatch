@@ -397,9 +397,7 @@ pub enum PluginSource {
         use_release: bool,
     },
     /// Arbitrary HTTPS URL — for self-hosted Gitea, Forgejo, S3, etc.
-    Url {
-        url: String,
-    },
+    Url { url: String },
 }
 
 /// Configuration for a single external plugin.

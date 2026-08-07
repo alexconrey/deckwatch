@@ -1199,7 +1199,12 @@ async fn tool_list_plugins(state: &AppState) -> Result<String, String> {
         .iter()
         .map(|cfg| {
             let source_summary = match &cfg.source {
-                settings::PluginSource::Github { repo, git_ref, path, use_release } => {
+                settings::PluginSource::Github {
+                    repo,
+                    git_ref,
+                    path,
+                    use_release,
+                } => {
                     if *use_release {
                         format!("github release: {repo}@{git_ref} → {path}")
                     } else {
@@ -1249,8 +1254,9 @@ async fn tool_enable_plugin(state: &AppState, args: &serde_json::Value) -> Resul
     let state_clone = state.clone();
     let plugins_cfg = s.plugins.clone();
     tokio::spawn(async move {
-        let git_token_secrets =
-            settings::load_settings_from_db(&state_clone).await.git_token_secrets;
+        let git_token_secrets = settings::load_settings_from_db(&state_clone)
+            .await
+            .git_token_secrets;
         let snap = settings::DeckwatchSettings {
             plugins: plugins_cfg,
             git_token_secrets,
@@ -1269,10 +1275,7 @@ async fn tool_enable_plugin(state: &AppState, args: &serde_json::Value) -> Resul
     .to_string())
 }
 
-async fn tool_disable_plugin(
-    state: &AppState,
-    args: &serde_json::Value,
-) -> Result<String, String> {
+async fn tool_disable_plugin(state: &AppState, args: &serde_json::Value) -> Result<String, String> {
     let name = args["name"].as_str().ok_or("name is required")?;
 
     let mut s = settings::load_settings_from_db(state).await;

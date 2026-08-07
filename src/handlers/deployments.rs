@@ -338,7 +338,10 @@ pub async fn create(
                     .into_iter()
                     .collect(),
             };
-            let dep_annotations = deployment.metadata.annotations.get_or_insert_with(BTreeMap::new);
+            let dep_annotations = deployment
+                .metadata
+                .annotations
+                .get_or_insert_with(BTreeMap::new);
             if let Some(spec) = deployment.spec.as_mut() {
                 if let Some(pod_spec) = spec.template.spec.as_mut() {
                     crate::plugins::apply_plugins(&plugins, &ctx, pod_spec, dep_annotations)
