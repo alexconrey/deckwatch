@@ -348,9 +348,7 @@ pub fn deployment_detail(dep: &Deployment) -> DeploymentDetail {
         startup_probe: container
             .and_then(|c| c.startup_probe.as_ref())
             .map(extract_probe),
-        pod_labels: tmpl_meta
-            .and_then(|m| m.labels.clone())
-            .unwrap_or_default(),
+        pod_labels: tmpl_meta.and_then(|m| m.labels.clone()).unwrap_or_default(),
         pod_annotations: tmpl_meta
             .and_then(|m| m.annotations.clone())
             .unwrap_or_default(),
@@ -422,7 +420,10 @@ fn extract_node_affinity(na: &NodeAffinity) -> Option<NodeAffinityOutput> {
     if required.is_empty() && preferred.is_empty() {
         None
     } else {
-        Some(NodeAffinityOutput { required, preferred })
+        Some(NodeAffinityOutput {
+            required,
+            preferred,
+        })
     }
 }
 
