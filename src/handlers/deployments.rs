@@ -1201,7 +1201,6 @@ fn build_node_affinity(input: NodeAffinityInput) -> Option<Affinity> {
         node_affinity: Some(NodeAffinity {
             required_during_scheduling_ignored_during_execution: required,
             preferred_during_scheduling_ignored_during_execution: preferred,
-            ..Default::default()
         }),
         ..Default::default()
     })
