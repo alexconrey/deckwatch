@@ -6,8 +6,9 @@ use axum::response::{IntoResponse, Response};
 use axum::Json;
 use k8s_openapi::api::apps::v1::{Deployment, DeploymentSpec};
 use k8s_openapi::api::core::v1::{
-    Container, ContainerPort, EnvVar, ExecAction, HTTPGetAction, Probe, ResourceRequirements,
-    TCPSocketAction,
+    Affinity, Container, ContainerPort, EnvVar, ExecAction, HTTPGetAction, NodeAffinity,
+    NodeSelector, NodeSelectorRequirement, NodeSelectorTerm, PreferredSchedulingTerm, Probe,
+    ResourceRequirements, TCPSocketAction,
 };
 use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::{LabelSelector, ObjectMeta};
@@ -76,6 +77,53 @@ pub struct UpdateDeploymentRequest {
     pub liveness_probe: Option<ProbeInput>,
     pub readiness_probe: Option<ProbeInput>,
     pub startup_probe: Option<ProbeInput>,
+    /// Pod template labels. `Some(map)` replaces the full label set;
+    /// `None` leaves existing labels untouched. Send `Some({})` to clear.
+    pub pod_labels: Option<BTreeMap<String, String>>,
+    /// Pod template annotations. Same semantics as `pod_labels`.
+    pub pod_annotations: Option<BTreeMap<String, String>>,
+    /// Simple key=value node selector. `Some(map)` replaces; `None` = no-op;
+    /// `Some({})` clears the node selector entirely.
+    pub node_selector: Option<BTreeMap<String, String>>,
+    /// Node affinity rules. `Some` replaces the entire node affinity block;
+    /// `None` leaves it untouched. To clear, send `Some` with empty vecs.
+    pub node_affinity: Option<NodeAffinityInput>,
+}
+
+/// A single label-selector requirement used in node affinity expressions.
+#[derive(Deserialize)]
+pub struct NodeSelectorRequirementInput {
+    pub key: String,
+    /// One of: `In`, `NotIn`, `Exists`, `DoesNotExist`.
+    pub operator: String,
+    #[serde(default)]
+    pub values: Vec<String>,
+}
+
+/// One term in a node selector — all requirements in the term must match.
+#[derive(Deserialize)]
+pub struct NodeSelectorTermInput {
+    pub match_expressions: Vec<NodeSelectorRequirementInput>,
+}
+
+/// A weighted preferred-scheduling term.
+#[derive(Deserialize)]
+pub struct PreferredNodeTermInput {
+    /// Scheduling preference weight, 1–100.
+    pub weight: i32,
+    pub match_expressions: Vec<NodeSelectorRequirementInput>,
+}
+
+/// Node affinity configuration. Both fields default to empty (no-op removal
+/// of the respective block when empty).
+#[derive(Deserialize, Default)]
+pub struct NodeAffinityInput {
+    /// `requiredDuringSchedulingIgnoredDuringExecution` terms.
+    #[serde(default)]
+    pub required: Vec<NodeSelectorTermInput>,
+    /// `preferredDuringSchedulingIgnoredDuringExecution` terms.
+    #[serde(default)]
+    pub preferred: Vec<PreferredNodeTermInput>,
 }
 
 #[derive(Deserialize)]
@@ -456,6 +504,32 @@ pub async fn update(
                 }
                 if let Some(probe) = req.startup_probe {
                     container.startup_probe = Some(build_probe(probe));
+                }
+            }
+        }
+    }
+
+    // Pod template labels, annotations, node selector, and node affinity.
+    if req.pod_labels.is_some()
+        || req.pod_annotations.is_some()
+        || req.node_selector.is_some()
+        || req.node_affinity.is_some()
+    {
+        if let Some(spec) = dep.spec.as_mut() {
+            let tmpl_meta = spec.template.metadata.get_or_insert_with(Default::default);
+            if let Some(labels) = req.pod_labels {
+                tmpl_meta.labels = if labels.is_empty() { None } else { Some(labels) };
+            }
+            if let Some(anns) = req.pod_annotations {
+                tmpl_meta.annotations = if anns.is_empty() { None } else { Some(anns) };
+            }
+            if let Some(pod_spec) = spec.template.spec.as_mut() {
+                if let Some(ns_map) = req.node_selector {
+                    pod_spec.node_selector =
+                        if ns_map.is_empty() { None } else { Some(ns_map) };
+                }
+                if let Some(na) = req.node_affinity {
+                    pod_spec.affinity = build_node_affinity(na);
                 }
             }
         }
@@ -1055,6 +1129,82 @@ pub async fn remove_container(
         pods,
         ingresses,
     }))
+}
+
+/// Build a k8s `Affinity` object from the request input. Returns `None` when
+/// both `required` and `preferred` are empty, which clears the affinity block.
+fn build_node_affinity(input: NodeAffinityInput) -> Option<Affinity> {
+    let required = if input.required.is_empty() {
+        None
+    } else {
+        Some(NodeSelector {
+            node_selector_terms: input
+                .required
+                .into_iter()
+                .map(|t| NodeSelectorTerm {
+                    match_expressions: Some(
+                        t.match_expressions
+                            .into_iter()
+                            .map(|e| NodeSelectorRequirement {
+                                key: e.key,
+                                operator: e.operator,
+                                values: if e.values.is_empty() {
+                                    None
+                                } else {
+                                    Some(e.values)
+                                },
+                            })
+                            .collect(),
+                    ),
+                    ..Default::default()
+                })
+                .collect(),
+        })
+    };
+
+    let preferred = if input.preferred.is_empty() {
+        None
+    } else {
+        Some(
+            input
+                .preferred
+                .into_iter()
+                .map(|t| PreferredSchedulingTerm {
+                    weight: t.weight,
+                    preference: NodeSelectorTerm {
+                        match_expressions: Some(
+                            t.match_expressions
+                                .into_iter()
+                                .map(|e| NodeSelectorRequirement {
+                                    key: e.key,
+                                    operator: e.operator,
+                                    values: if e.values.is_empty() {
+                                        None
+                                    } else {
+                                        Some(e.values)
+                                    },
+                                })
+                                .collect(),
+                        ),
+                        ..Default::default()
+                    },
+                })
+                .collect(),
+        )
+    };
+
+    if required.is_none() && preferred.is_none() {
+        return None;
+    }
+
+    Some(Affinity {
+        node_affinity: Some(NodeAffinity {
+            required_during_scheduling_ignored_during_execution: required,
+            preferred_during_scheduling_ignored_during_execution: preferred,
+            ..Default::default()
+        }),
+        ..Default::default()
+    })
 }
 
 #[cfg(test)]

@@ -8,7 +8,28 @@ export interface DeploymentSummary {
   labels: Record<string, string>;
 }
 
+export interface NodeSelectorRequirement {
+  key: string;
+  operator: "In" | "NotIn" | "Exists" | "DoesNotExist";
+  values: string[];
+}
+
+export interface NodeSelectorTerm {
+  match_expressions: NodeSelectorRequirement[];
+}
+
+export interface PreferredNodeTerm {
+  weight: number;
+  match_expressions: NodeSelectorRequirement[];
+}
+
+export interface NodeAffinityConfig {
+  required: NodeSelectorTerm[];
+  preferred: PreferredNodeTerm[];
+}
+
 export interface DeploymentDetail extends DeploymentSummary {
+  annotations: Record<string, string>;
   conditions: DeploymentCondition[];
   env: EnvVar[];
   command: string[];
@@ -18,6 +39,10 @@ export interface DeploymentDetail extends DeploymentSummary {
   liveness_probe: ProbeConfig | null;
   readiness_probe: ProbeConfig | null;
   startup_probe: ProbeConfig | null;
+  pod_labels: Record<string, string>;
+  pod_annotations: Record<string, string>;
+  node_selector: Record<string, string>;
+  node_affinity: NodeAffinityConfig | null;
 }
 
 export interface ProbeConfig {
@@ -146,6 +171,10 @@ export interface UpdateDeploymentRequest {
   liveness_probe?: ProbeInput;
   readiness_probe?: ProbeInput;
   startup_probe?: ProbeInput;
+  pod_labels?: Record<string, string>;
+  pod_annotations?: Record<string, string>;
+  node_selector?: Record<string, string>;
+  node_affinity?: NodeAffinityConfig;
 }
 
 export interface DeploymentListResponse {
