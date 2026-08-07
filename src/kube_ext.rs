@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 use k8s_openapi::api::apps::v1::Deployment;
 use k8s_openapi::api::batch::v1::CronJob;
-use k8s_openapi::api::core::v1::{ContainerStatus, Node, Pod, Probe};
+use k8s_openapi::api::core::v1::{ContainerStatus, Node, NodeAffinity, Pod, Probe};
 use k8s_openapi::api::networking::v1::Ingress;
 use serde::{Deserialize, Serialize};
 
@@ -68,6 +68,39 @@ pub struct DeploymentDetail {
     pub liveness_probe: Option<ProbeOutput>,
     pub readiness_probe: Option<ProbeOutput>,
     pub startup_probe: Option<ProbeOutput>,
+    /// Labels on the pod template (`spec.template.metadata.labels`).
+    pub pod_labels: BTreeMap<String, String>,
+    /// Annotations on the pod template (`spec.template.metadata.annotations`).
+    pub pod_annotations: BTreeMap<String, String>,
+    /// Simple node selector (`spec.template.spec.nodeSelector`).
+    pub node_selector: BTreeMap<String, String>,
+    /// Node affinity rules, if any.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub node_affinity: Option<NodeAffinityOutput>,
+}
+
+#[derive(Serialize, Debug)]
+pub struct NodeSelectorRequirementOutput {
+    pub key: String,
+    pub operator: String,
+    pub values: Vec<String>,
+}
+
+#[derive(Serialize, Debug)]
+pub struct NodeSelectorTermOutput {
+    pub match_expressions: Vec<NodeSelectorRequirementOutput>,
+}
+
+#[derive(Serialize, Debug)]
+pub struct PreferredNodeTermOutput {
+    pub weight: i32,
+    pub match_expressions: Vec<NodeSelectorRequirementOutput>,
+}
+
+#[derive(Serialize, Debug)]
+pub struct NodeAffinityOutput {
+    pub required: Vec<NodeSelectorTermOutput>,
+    pub preferred: Vec<PreferredNodeTermOutput>,
 }
 
 #[derive(Serialize, Debug)]
@@ -288,6 +321,9 @@ pub fn deployment_detail(dep: &Deployment) -> DeploymentDetail {
         })
         .unwrap_or_default();
 
+    let pod_spec = dep.spec.as_ref().and_then(|s| s.template.spec.as_ref());
+    let tmpl_meta = dep.spec.as_ref().and_then(|s| s.template.metadata.as_ref());
+
     DeploymentDetail {
         name: meta.name.clone().unwrap_or_default(),
         namespace: meta.namespace.clone().unwrap_or_default(),
@@ -312,6 +348,81 @@ pub fn deployment_detail(dep: &Deployment) -> DeploymentDetail {
         startup_probe: container
             .and_then(|c| c.startup_probe.as_ref())
             .map(extract_probe),
+        pod_labels: tmpl_meta
+            .and_then(|m| m.labels.clone())
+            .unwrap_or_default(),
+        pod_annotations: tmpl_meta
+            .and_then(|m| m.annotations.clone())
+            .unwrap_or_default(),
+        node_selector: pod_spec
+            .and_then(|s| s.node_selector.clone())
+            .unwrap_or_default(),
+        node_affinity: pod_spec
+            .and_then(|s| s.affinity.as_ref())
+            .and_then(|a| a.node_affinity.as_ref())
+            .and_then(extract_node_affinity),
+    }
+}
+
+fn extract_node_affinity(na: &NodeAffinity) -> Option<NodeAffinityOutput> {
+    let required = na
+        .required_during_scheduling_ignored_during_execution
+        .as_ref()
+        .map(|ns| {
+            ns.node_selector_terms
+                .iter()
+                .map(|t| NodeSelectorTermOutput {
+                    match_expressions: t
+                        .match_expressions
+                        .as_ref()
+                        .map(|exprs| {
+                            exprs
+                                .iter()
+                                .map(|e| NodeSelectorRequirementOutput {
+                                    key: e.key.clone(),
+                                    operator: e.operator.clone(),
+                                    values: e.values.clone().unwrap_or_default(),
+                                })
+                                .collect()
+                        })
+                        .unwrap_or_default(),
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
+    let preferred = na
+        .preferred_during_scheduling_ignored_during_execution
+        .as_ref()
+        .map(|terms| {
+            terms
+                .iter()
+                .map(|t| PreferredNodeTermOutput {
+                    weight: t.weight,
+                    match_expressions: t
+                        .preference
+                        .match_expressions
+                        .as_ref()
+                        .map(|exprs| {
+                            exprs
+                                .iter()
+                                .map(|e| NodeSelectorRequirementOutput {
+                                    key: e.key.clone(),
+                                    operator: e.operator.clone(),
+                                    values: e.values.clone().unwrap_or_default(),
+                                })
+                                .collect()
+                        })
+                        .unwrap_or_default(),
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
+    if required.is_empty() && preferred.is_empty() {
+        None
+    } else {
+        Some(NodeAffinityOutput { required, preferred })
     }
 }
 

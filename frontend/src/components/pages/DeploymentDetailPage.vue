@@ -37,6 +37,7 @@ import AddonsCard from "@/components/views/deployment/AddonsCard.vue";
 import SidecarManager from "@/components/views/deployment/SidecarManager.vue";
 import MetricsDetailCard from "@/components/views/deployment/MetricsDetailCard.vue";
 import HistoryCard from "@/components/views/deployment/HistoryCard.vue";
+import AffinityEditorDialog from "@/components/views/deployment/AffinityEditorDialog.vue";
 
 const props = defineProps<{
   namespace: string;
@@ -59,6 +60,12 @@ const showRestartDialog = ref(false);
 const showEditDialog = ref(false);
 const showMetricsDetail = ref(false);
 const showDiagDrawer = ref(false);
+const showAffinityDialog = ref(false);
+
+// Labels & Annotations inline editor state
+const showLabelsEdit = ref(false);
+const editingLabels = ref<{ key: string; value: string }[]>([]);
+const editingAnnotations = ref<{ key: string; value: string }[]>([]);
 
 // Autoscaling (HPA) state
 const hpa = ref<HpaResponse | null>(null);
@@ -451,6 +458,51 @@ const handleEdit = async (values: CreateDeploymentRequest) => {
   }
 };
 
+const openLabelsEdit = () => {
+  const d = detail.value;
+  if (!d) return;
+  editingLabels.value = Object.entries(d.pod_labels ?? {}).map(([key, value]) => ({ key, value }));
+  editingAnnotations.value = Object.entries(d.pod_annotations ?? {}).map(([key, value]) => ({ key, value }));
+  showLabelsEdit.value = true;
+};
+
+const handleLabelsAnnotationsSave = async () => {
+  const pod_labels: Record<string, string> = {};
+  for (const { key, value } of editingLabels.value) {
+    if (key.trim()) pod_labels[key.trim()] = value.trim();
+  }
+  const pod_annotations: Record<string, string> = {};
+  for (const { key, value } of editingAnnotations.value) {
+    if (key.trim()) pod_annotations[key.trim()] = value.trim();
+  }
+  actionLoading.value = true;
+  try {
+    await deploymentsApi.update(props.namespace, props.name, { pod_labels, pod_annotations });
+    showLabelsEdit.value = false;
+    await fetchDetail();
+  } catch (e) {
+    error.value = e instanceof Error ? e.message : "Failed to update labels";
+  } finally {
+    actionLoading.value = false;
+  }
+};
+
+const handleAffinitySave = async (payload: { node_selector: Record<string, string>; node_affinity: import("@/types/api").NodeAffinityConfig }) => {
+  actionLoading.value = true;
+  try {
+    await deploymentsApi.update(props.namespace, props.name, {
+      node_selector: payload.node_selector,
+      node_affinity: payload.node_affinity,
+    });
+    showAffinityDialog.value = false;
+    await fetchDetail();
+  } catch (e) {
+    error.value = e instanceof Error ? e.message : "Failed to update affinity";
+  } finally {
+    actionLoading.value = false;
+  }
+};
+
 const openYamlView = async () => {
   showYamlViewDialog.value = true;
   yamlViewContent.value = "";
@@ -706,6 +758,14 @@ const handleDeleteIngress = async () => {
         <v-btn
           variant="outlined"
           size="small"
+          prepend-icon="mdi-server-network"
+          @click="showAffinityDialog = true"
+        >
+          Affinity
+        </v-btn>
+        <v-btn
+          variant="outlined"
+          size="small"
           color="error"
           prepend-icon="mdi-delete"
           @click="showDeleteDialog = true"
@@ -798,6 +858,35 @@ const handleDeleteIngress = async () => {
           </v-chip>
         </div>
         <div
+          v-if="detail.node_selector && Object.keys(detail.node_selector).length > 0"
+          class="d-flex align-center ga-2 mt-3"
+        >
+          <span class="text-caption text-secondary mr-1">Node selector:</span>
+          <v-chip
+            v-for="(value, key) in detail.node_selector"
+            :key="key"
+            size="x-small"
+            variant="outlined"
+          >
+            <v-icon icon="mdi-server" start size="x-small" />
+            {{ key }}={{ value }}
+          </v-chip>
+        </div>
+        <div
+          v-if="detail.node_affinity"
+          class="d-flex align-center ga-2 mt-2"
+        >
+          <span class="text-caption text-secondary mr-1">Node affinity:</span>
+          <v-chip v-if="detail.node_affinity.required?.length" size="x-small" color="warning" variant="flat">
+            <v-icon icon="mdi-server-network" start size="x-small" />
+            {{ detail.node_affinity.required.length }} required term{{ detail.node_affinity.required.length !== 1 ? 's' : '' }}
+          </v-chip>
+          <v-chip v-if="detail.node_affinity.preferred?.length" size="x-small" variant="outlined">
+            <v-icon icon="mdi-server-network" start size="x-small" />
+            {{ detail.node_affinity.preferred.length }} preferred term{{ detail.node_affinity.preferred.length !== 1 ? 's' : '' }}
+          </v-chip>
+        </div>
+        <div
           v-if="hpaEnabled && hpa"
           class="d-flex align-center ga-2 mt-3"
         >
@@ -853,6 +942,115 @@ const handleDeleteIngress = async () => {
           @close="showMetricsDetail = false"
         />
       </v-expand-transition>
+
+      <!-- Labels & Annotations -->
+      <v-card class="mb-4">
+        <v-card-title class="d-flex align-center">
+          <v-icon icon="mdi-tag-multiple-outline" class="mr-2" size="small" />
+          <span class="text-subtitle-1">Labels &amp; Annotations</span>
+          <v-spacer />
+          <v-btn
+            v-if="!showLabelsEdit"
+            size="small"
+            variant="text"
+            prepend-icon="mdi-pencil"
+            @click="openLabelsEdit"
+          >
+            Edit
+          </v-btn>
+          <template v-else>
+            <v-btn size="small" variant="text" @click="showLabelsEdit = false">Cancel</v-btn>
+            <v-btn
+              size="small"
+              color="primary"
+              variant="flat"
+              class="ml-1"
+              :loading="actionLoading"
+              @click="handleLabelsAnnotationsSave"
+            >
+              Save
+            </v-btn>
+          </template>
+        </v-card-title>
+        <v-card-text>
+          <!-- Read mode -->
+          <template v-if="!showLabelsEdit">
+            <div class="mb-2">
+              <span class="text-caption text-medium-emphasis">Pod Labels</span>
+              <div class="d-flex flex-wrap ga-1 mt-1">
+                <v-chip
+                  v-for="(value, key) in detail.pod_labels"
+                  :key="key"
+                  size="x-small"
+                  variant="outlined"
+                >{{ key }}={{ value }}</v-chip>
+                <span v-if="!Object.keys(detail.pod_labels ?? {}).length" class="text-caption text-disabled">none</span>
+              </div>
+            </div>
+            <div>
+              <span class="text-caption text-medium-emphasis">Pod Annotations</span>
+              <div class="d-flex flex-wrap ga-1 mt-1">
+                <v-chip
+                  v-for="(value, key) in detail.pod_annotations"
+                  :key="key"
+                  size="x-small"
+                  variant="outlined"
+                >{{ key }}={{ value }}</v-chip>
+                <span v-if="!Object.keys(detail.pod_annotations ?? {}).length" class="text-caption text-disabled">none</span>
+              </div>
+            </div>
+          </template>
+
+          <!-- Edit mode -->
+          <template v-else>
+            <div class="text-caption text-medium-emphasis mb-2">Pod Labels</div>
+            <v-row
+              v-for="(row, i) in editingLabels"
+              :key="i"
+              dense
+              class="mb-1"
+            >
+              <v-col cols="5">
+                <v-text-field v-model="row.key" label="Key" density="compact" variant="outlined" hide-details />
+              </v-col>
+              <v-col cols="6">
+                <v-text-field v-model="row.value" label="Value" density="compact" variant="outlined" hide-details />
+              </v-col>
+              <v-col cols="1" class="d-flex align-center justify-center">
+                <v-btn icon="mdi-close" variant="text" size="small" @click="editingLabels.splice(i, 1)" />
+              </v-col>
+            </v-row>
+            <v-btn variant="text" size="small" prepend-icon="mdi-plus" class="mb-4"
+              @click="editingLabels.push({ key: '', value: '' })">
+              Add label
+            </v-btn>
+
+            <v-divider class="mb-3" />
+
+            <div class="text-caption text-medium-emphasis mb-2">Pod Annotations</div>
+            <v-row
+              v-for="(row, i) in editingAnnotations"
+              :key="i"
+              dense
+              class="mb-1"
+            >
+              <v-col cols="5">
+                <v-text-field v-model="row.key" label="Key" density="compact" variant="outlined" hide-details />
+              </v-col>
+              <v-col cols="6">
+                <v-text-field v-model="row.value" label="Value" density="compact" variant="outlined" hide-details />
+              </v-col>
+              <v-col cols="1" class="d-flex align-center justify-center">
+                <v-btn icon="mdi-close" variant="text" size="small" @click="editingAnnotations.splice(i, 1)" />
+              </v-col>
+            </v-row>
+            <v-btn variant="text" size="small" prepend-icon="mdi-plus"
+              @click="editingAnnotations.push({ key: '', value: '' })">
+              Add annotation
+            </v-btn>
+          </template>
+        </v-card-text>
+      </v-card>
 
       <!-- Ingresses -->
       <v-card class="mb-4">
@@ -1399,6 +1597,15 @@ const handleDeleteIngress = async () => {
       v-model="showPortForwardDialog"
       :namespace="namespace"
       :pod-name="portForwardPod"
+    />
+
+    <AffinityEditorDialog
+      v-if="detail"
+      v-model="showAffinityDialog"
+      :node-selector="detail.node_selector ?? {}"
+      :node-affinity="detail.node_affinity ?? null"
+      :loading="actionLoading"
+      @save="handleAffinitySave"
     />
 
     <TerminalDialog
