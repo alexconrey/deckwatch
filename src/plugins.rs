@@ -149,7 +149,10 @@ pub async fn fetch_and_validate(
     };
 
     let size = bytes.len();
-    let plugin = LoadedPlugin { name: "__validation__".to_string(), wasm_bytes: bytes };
+    let plugin = LoadedPlugin {
+        name: "__validation__".to_string(),
+        wasm_bytes: bytes,
+    };
 
     match run_plugin(&plugin, &test_ctx) {
         Ok(result) => ValidationResult {
@@ -190,7 +193,10 @@ pub async fn fetch_plugins(settings: &DeckwatchSettings, state: &AppState) -> Ve
         match fetch_bytes(cfg, &http, settings, state).await {
             Ok(bytes) => {
                 tracing::info!(plugin = %cfg.name, bytes = bytes.len(), "loaded plugin");
-                loaded.push(LoadedPlugin { name: cfg.name.clone(), wasm_bytes: bytes });
+                loaded.push(LoadedPlugin {
+                    name: cfg.name.clone(),
+                    wasm_bytes: bytes,
+                });
             }
             Err(e) => {
                 tracing::error!(plugin = %cfg.name, error = %e, "failed to fetch plugin WASM");
@@ -225,7 +231,12 @@ async fn fetch_bytes(
 
 fn resolve_url(source: &PluginSource) -> String {
     match source {
-        PluginSource::Github { repo, git_ref, path, use_release } => {
+        PluginSource::Github {
+            repo,
+            git_ref,
+            path,
+            use_release,
+        } => {
             if *use_release {
                 format!("https://github.com/{repo}/releases/download/{git_ref}/{path}")
             } else {
@@ -241,7 +252,10 @@ async fn resolve_token(
     settings: &DeckwatchSettings,
     state: &AppState,
 ) -> Option<String> {
-    let entry = settings.git_token_secrets.iter().find(|s| s.name == secret_ref_name)?;
+    let entry = settings
+        .git_token_secrets
+        .iter()
+        .find(|s| s.name == secret_ref_name)?;
 
     if let Some(enc) = &entry.encrypted_token {
         if !state.encryption_key.is_empty() {
@@ -249,7 +263,11 @@ async fn resolve_token(
         }
     }
 
-    let ns = if entry.namespace.is_empty() { &state.settings_namespace } else { &entry.namespace };
+    let ns = if entry.namespace.is_empty() {
+        &state.settings_namespace
+    } else {
+        &entry.namespace
+    };
     let secrets_api = state.secrets_api(ns).ok()?;
     let secret = secrets_api.get(&entry.secret_name).await.ok()?;
     let raw = secret.data?.get("token")?.0.clone();
@@ -296,7 +314,10 @@ pub async fn apply_kubernetes_resources(
 ) {
     for resource in resources {
         if let Err(e) = apply_one_resource(resource, kube_client).await {
-            let kind = resource.get("kind").and_then(|v| v.as_str()).unwrap_or("unknown");
+            let kind = resource
+                .get("kind")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown");
             let name = resource
                 .pointer("/metadata/name")
                 .and_then(|v| v.as_str())
@@ -425,7 +446,11 @@ fn build_kube_env_var(spec: &EnvVarSpec) -> EnvVar {
     }
     EnvVar {
         name: spec.name.clone(),
-        value: if spec.value.is_empty() { None } else { Some(spec.value.clone()) },
+        value: if spec.value.is_empty() {
+            None
+        } else {
+            Some(spec.value.clone())
+        },
         ..Default::default()
     }
 }
@@ -444,7 +469,10 @@ fn apply_sidecars(
         }
         let env: Vec<EnvVar> = spec.env.iter().map(build_kube_env_var).collect();
         let ports = spec.port.map(|p| {
-            vec![ContainerPort { container_port: p, ..Default::default() }]
+            vec![ContainerPort {
+                container_port: p,
+                ..Default::default()
+            }]
         });
         let resources = build_resources(spec.cpu.as_deref(), spec.memory.as_deref());
 

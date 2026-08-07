@@ -397,9 +397,7 @@ pub enum PluginSource {
         use_release: bool,
     },
     /// Arbitrary HTTPS URL — for self-hosted Gitea, Forgejo, S3, etc.
-    Url {
-        url: String,
-    },
+    Url { url: String },
 }
 
 /// Configuration for a single external plugin.
@@ -523,9 +521,12 @@ pub async fn put_settings(
         let state_clone = state.clone();
         let plugins_snapshot = settings.plugins.clone();
         tokio::spawn(async move {
-            let mut s = DeckwatchSettings::default();
-            s.git_token_secrets = load_settings_from_db(&state_clone).await.git_token_secrets;
-            s.plugins = plugins_snapshot;
+            let git_token_secrets = load_settings_from_db(&state_clone).await.git_token_secrets;
+            let s = DeckwatchSettings {
+                git_token_secrets,
+                plugins: plugins_snapshot,
+                ..Default::default()
+            };
             let loaded = crate::plugins::fetch_plugins(&s, &state_clone).await;
             tracing::info!(count = loaded.len(), "plugin refresh complete");
             *state_clone.plugins.write().await = loaded;
