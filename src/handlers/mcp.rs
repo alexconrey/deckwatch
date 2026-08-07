@@ -5,6 +5,8 @@
 //!
 //! Wire up: `POST /mcp` in the public API router.
 
+use std::time::Instant;
+
 use axum::extract::State;
 use axum::http::{header, StatusCode};
 use axum::response::IntoResponse;
@@ -55,9 +57,16 @@ pub async fn handle_mcp(
     State(state): State<AppState>,
     Json(request): Json<JsonRpcRequest>,
 ) -> impl IntoResponse {
+    let start = Instant::now();
+    let method = request.method.clone();
+
+    if request.method == "notifications/initialized" {
+        crate::metrics::record_mcp_request(&method, "ok", start.elapsed().as_secs_f64());
+        return StatusCode::OK.into_response();
+    }
+
     let response = match request.method.as_str() {
         "initialize" => handle_initialize(&request),
-        "notifications/initialized" => return StatusCode::OK.into_response(),
         "ping" => success_response(&request, serde_json::json!({})),
         "tools/list" => handle_tools_list(&request),
         "tools/call" => handle_tool_call(&state, &request).await,
@@ -65,6 +74,13 @@ pub async fn handle_mcp(
         "prompts/get" => handle_prompts_get(&request),
         _ => method_not_found(&request),
     };
+
+    let status = if response.error.is_some() {
+        "error"
+    } else {
+        "ok"
+    };
+    crate::metrics::record_mcp_request(&method, status, start.elapsed().as_secs_f64());
 
     ([(header::CONTENT_TYPE, "application/json")], Json(response)).into_response()
 }
@@ -468,8 +484,9 @@ async fn handle_tool_call(state: &AppState, request: &JsonRpcRequest) -> JsonRpc
     let params = &request.params;
     let tool_name = params["name"].as_str().unwrap_or("");
     let args = &params["arguments"];
+    let start = Instant::now();
 
-    let result = match tool_name {
+    let deckwatch_result = match tool_name {
         "create_application" => Some(tool_create_application(state, args).await),
         "list_addons" => Some(tool_list_addons().await),
         "attach_addon" => Some(tool_attach_addon(state, args).await),
@@ -497,24 +514,21 @@ async fn handle_tool_call(state: &AppState, request: &JsonRpcRequest) -> JsonRpc
         _ => None,
     };
 
-    let result = match result {
-        Some(r) => r,
-        None => {
-            let k8s_client = mcp_k8s::K8sClient::new(
-                state.kube_client.clone(),
-                state.allowed_namespaces.clone(),
-                mcp_k8s::permissions::ActionPermissions::default(),
-            );
-            if let Some(r) = mcp_k8s::mcp::handle_tool(&k8s_client, tool_name, args).await {
-                r
-            } else if let Some(r) =
-                mcp_k8s::resources::handle_tool(&k8s_client, tool_name, args).await
-            {
-                r
-            } else {
-                Err(format!("Unknown tool: {tool_name}"))
-            }
-        }
+    let result = if let Some(r) = deckwatch_result {
+        let status = if r.is_ok() { "ok" } else { "error" };
+        crate::metrics::record_mcp_tool_call(tool_name, status, start.elapsed().as_secs_f64());
+        r
+    } else {
+        // mcp-k8s library instruments its own tools via mcp_k8s_tool_calls_total;
+        // no duplicate recording needed here.
+        let k8s_client = mcp_k8s::K8sClient::new(
+            state.kube_client.clone(),
+            state.allowed_namespaces.clone(),
+            mcp_k8s::permissions::ActionPermissions::default(),
+        );
+        mcp_k8s::mcp::handle_tool(&k8s_client, tool_name, args)
+            .await
+            .unwrap_or_else(|| Err(format!("Unknown tool: {tool_name}")))
     };
 
     match result {
