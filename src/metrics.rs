@@ -247,6 +247,42 @@ pub fn record_gitops_build(namespace: &str, status: &str) {
     .increment(1);
 }
 
+/// Record a single MCP JSON-RPC request.
+/// - `method` is the JSON-RPC method (e.g. `tools/call`, `initialize`)
+/// - `status` is `ok` or `error`
+pub fn record_mcp_request(method: &str, status: &str, duration_s: f64) {
+    counter!(
+        "deckwatch_mcp_requests_total",
+        "method" => method.to_owned(),
+        "status" => status.to_owned(),
+    )
+    .increment(1);
+
+    histogram!(
+        "deckwatch_mcp_request_duration_seconds",
+        "method" => method.to_owned(),
+    )
+    .record(duration_s);
+}
+
+/// Record a deckwatch-native MCP tool invocation (e.g. `create_application`).
+/// K8s-passthrough tools are instrumented by the mcp-k8s library itself via
+/// `mcp_k8s_tool_calls_total` / `mcp_k8s_tool_call_duration_seconds`.
+pub fn record_mcp_tool_call(tool: &str, status: &str, duration_s: f64) {
+    counter!(
+        "deckwatch_mcp_tool_calls_total",
+        "tool" => tool.to_owned(),
+        "status" => status.to_owned(),
+    )
+    .increment(1);
+
+    histogram!(
+        "deckwatch_mcp_tool_call_duration_seconds",
+        "tool" => tool.to_owned(),
+    )
+    .record(duration_s);
+}
+
 // -----------------------------------------------------------------------------
 // Frontend metrics ingestion
 // -----------------------------------------------------------------------------

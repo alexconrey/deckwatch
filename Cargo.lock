@@ -1131,7 +1131,7 @@ dependencies = [
 
 [[package]]
 name = "deckwatch"
-version = "0.5.1"
+version = "0.5.2"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -2685,7 +2685,7 @@ checksum = "4facc753ae494aeb6e3c22f839b158aebd4f9270f55cd3c79906c45476c47ab4"
 [[package]]
 name = "mcp-k8s"
 version = "0.1.0"
-source = "git+https://github.com/alexconrey/mcp-k8s.git#cfed2e24d867be7730fd777021bef74d5a988ffa"
+source = "git+https://github.com/alexconrey/mcp-k8s.git#89f584aaac325e52d6ffc19d7203c3613e10a4fb"
 dependencies = [
  "axum",
  "axum-server",
@@ -4559,7 +4559,7 @@ version = "0.8.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c1c97747dbf44bb1ca44a561ece23508e99cb592e862f22222dcf42f51d1e451"
 dependencies = [
- "heck 0.5.0",
+ "heck 0.4.1",
  "proc-macro2",
  "quote",
  "syn 2.0.118",
