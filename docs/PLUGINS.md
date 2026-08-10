@@ -16,7 +16,7 @@ Deckwatch supports external plugins — compiled WASM binaries hosted in Git rep
 ### What plugins cannot do
 
 - Plugins cannot deny or block deployments (they can only add; they cannot remove or replace user-supplied values)
-- Plugins have no network or filesystem access at runtime (no WASI, no host functions)
+- Plugins have no network or filesystem access at runtime (no WASI, no host functions) — this is intentional. Plugins are purely declarative: they receive context and return Kubernetes manifests. Operators like ACK and ESO handle the actual AWS/cloud API calls after those manifests land in the cluster.
 - Plugins cannot read Kubernetes secrets or cluster state — all context is passed by deckwatch in the `PluginContext` struct
 
 ### Injection rules
@@ -24,6 +24,17 @@ Deckwatch supports external plugins — compiled WASM binaries hosted in Git rep
 1. **User values always win.** If an env var name already exists on the primary container, the plugin's value is silently skipped.
 2. **Sidecars don't duplicate.** If a container with the plugin's sidecar name already exists in the pod, the sidecar is skipped.
 3. **Opt-in by annotation.** Plugins act on deployments that carry a specific annotation. A deployment with no relevant annotation gets no injection.
+
+### Roadmap
+
+| Capability | Status | Notes |
+|---|---|---|
+| Env var injection | Shipped | Static values, `secretKeyRef`, `configMapKeyRef` |
+| Sidecar injection | Shipped | |
+| Kubernetes resource creation | Shipped | CRDs, ExternalSecrets, CronJobs, etc. via server-side apply |
+| ServiceAccount binding | Shipped (SDK v0.3.0) | Plugin declares `service_account_name`; deckwatch sets it on the pod template |
+| ServiceAccount management UI | Planned | Create/manage ServiceAccounts from the deckwatch UI, not just via plugins |
+| deckwatch UI for plugin management | Shipped | Settings → Plugins |
 
 ---
 
