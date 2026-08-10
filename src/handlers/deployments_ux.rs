@@ -466,31 +466,30 @@ fn build_deployment_from_request(
             .collect()
     });
 
-    let env_from_sources: Option<Vec<EnvFromSource>> =
-        req.env_from.as_ref().map(|sources| {
-            sources
-                .iter()
-                .filter_map(|ef: &EnvFromInput| {
-                    if let Some(ref name) = ef.secret_ref {
-                        Some(EnvFromSource {
-                            secret_ref: Some(SecretEnvSource {
-                                name: name.clone(),
-                                ..Default::default()
-                            }),
+    let env_from_sources: Option<Vec<EnvFromSource>> = req.env_from.as_ref().map(|sources| {
+        sources
+            .iter()
+            .filter_map(|ef: &EnvFromInput| {
+                if let Some(ref name) = ef.secret_ref {
+                    Some(EnvFromSource {
+                        secret_ref: Some(SecretEnvSource {
+                            name: name.clone(),
                             ..Default::default()
-                        })
-                    } else {
-                        ef.config_map_ref.as_deref().map(|name| EnvFromSource {
-                            config_map_ref: Some(ConfigMapEnvSource {
-                                name: name.to_string(),
-                                ..Default::default()
-                            }),
+                        }),
+                        ..Default::default()
+                    })
+                } else {
+                    ef.config_map_ref.as_deref().map(|name| EnvFromSource {
+                        config_map_ref: Some(ConfigMapEnvSource {
+                            name: name.to_string(),
                             ..Default::default()
-                        })
-                    }
-                })
-                .collect()
-        });
+                        }),
+                        ..Default::default()
+                    })
+                }
+            })
+            .collect()
+    });
 
     let ports: Option<Vec<ContainerPort>> = req.port.map(|p| {
         vec![ContainerPort {
