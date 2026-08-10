@@ -13,14 +13,14 @@ use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::Json;
 use k8s_openapi::api::apps::v1::{Deployment, ReplicaSet};
-use k8s_openapi::api::core::v1::EnvVar;
+use k8s_openapi::api::core::v1::{ConfigMapEnvSource, EnvFromSource, EnvVar, SecretEnvSource};
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
 use kube::api::{DeleteParams, ListParams, Patch, PatchParams, PostParams};
 use serde::{Deserialize, Serialize};
 
 use crate::error::AppError;
 use crate::handlers::deployments::{
-    CreateDeploymentRequest, DeploymentDetailResponse, UpdateDeploymentRequest,
+    CreateDeploymentRequest, DeploymentDetailResponse, EnvFromInput, UpdateDeploymentRequest,
 };
 use crate::kube_ext::deployment_detail;
 use crate::state::AppState;
@@ -434,8 +434,9 @@ fn build_deployment_from_request(
 ) -> Result<Deployment, AppError> {
     use k8s_openapi::api::apps::v1::DeploymentSpec;
     use k8s_openapi::api::core::v1::{
-        Container, ContainerPort, EnvVar, ExecAction, HTTPGetAction, PodSpec, PodTemplateSpec,
-        Probe, ResourceRequirements, TCPSocketAction,
+        ConfigMapEnvSource, Container, ContainerPort, EnvFromSource, EnvVar, ExecAction,
+        HTTPGetAction, PodSpec, PodTemplateSpec, Probe, ResourceRequirements, SecretEnvSource,
+        TCPSocketAction,
     };
     use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
     use k8s_openapi::apimachinery::pkg::apis::meta::v1::LabelSelector;
@@ -464,6 +465,34 @@ fn build_deployment_from_request(
             })
             .collect()
     });
+
+    let env_from_sources: Option<Vec<EnvFromSource>> =
+        req.env_from.as_ref().map(|sources| {
+            sources
+                .iter()
+                .filter_map(|ef: &EnvFromInput| {
+                    if let Some(ref name) = ef.secret_ref {
+                        Some(EnvFromSource {
+                            secret_ref: Some(SecretEnvSource {
+                                name: name.clone(),
+                                ..Default::default()
+                            }),
+                            ..Default::default()
+                        })
+                    } else if let Some(ref name) = ef.config_map_ref {
+                        Some(EnvFromSource {
+                            config_map_ref: Some(ConfigMapEnvSource {
+                                name: name.clone(),
+                                ..Default::default()
+                            }),
+                            ..Default::default()
+                        })
+                    } else {
+                        None
+                    }
+                })
+                .collect()
+        });
 
     let ports: Option<Vec<ContainerPort>> = req.port.map(|p| {
         vec![ContainerPort {
@@ -531,6 +560,7 @@ fn build_deployment_from_request(
         image: Some(req.image.clone()),
         ports,
         env: env_vars,
+        env_from: env_from_sources,
         command: req.command.clone(),
         args: req.args.clone(),
         resources,
@@ -731,6 +761,34 @@ fn apply_update(mut dep: Deployment, req: UpdateDeploymentRequest) -> Deployment
                                 name: v.name,
                                 value: Some(v.value),
                                 ..Default::default()
+                            })
+                            .collect(),
+                    );
+                }
+                if let Some(env_from) = req.env_from {
+                    container.env_from = Some(
+                        env_from
+                            .into_iter()
+                            .filter_map(|ef| {
+                                if let Some(name) = ef.secret_ref {
+                                    Some(EnvFromSource {
+                                        secret_ref: Some(SecretEnvSource {
+                                            name,
+                                            ..Default::default()
+                                        }),
+                                        ..Default::default()
+                                    })
+                                } else if let Some(name) = ef.config_map_ref {
+                                    Some(EnvFromSource {
+                                        config_map_ref: Some(ConfigMapEnvSource {
+                                            name,
+                                            ..Default::default()
+                                        }),
+                                        ..Default::default()
+                                    })
+                                } else {
+                                    None
+                                }
                             })
                             .collect(),
                     );
