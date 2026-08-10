@@ -61,6 +61,7 @@ pub struct DeploymentDetail {
     pub labels: BTreeMap<String, String>,
     pub annotations: BTreeMap<String, String>,
     pub env: Vec<EnvVarOutput>,
+    pub env_from: Vec<EnvFromOutput>,
     pub command: Vec<String>,
     pub args: Vec<String>,
     pub resource_limits: Option<ResourceSpecOutput>,
@@ -107,6 +108,12 @@ pub struct NodeAffinityOutput {
 pub struct EnvVarOutput {
     pub name: String,
     pub value: Option<String>,
+}
+
+#[derive(Serialize, Debug)]
+pub struct EnvFromOutput {
+    pub secret_ref: Option<String>,
+    pub config_map_ref: Option<String>,
 }
 
 #[derive(Serialize, Debug)]
@@ -281,6 +288,20 @@ pub fn deployment_detail(dep: &Deployment) -> DeploymentDetail {
         })
         .unwrap_or_default();
 
+    let env_from = container
+        .map(|c| {
+            c.env_from
+                .as_deref()
+                .unwrap_or_default()
+                .iter()
+                .map(|ef| EnvFromOutput {
+                    secret_ref: ef.secret_ref.as_ref().map(|s| s.name.clone()),
+                    config_map_ref: ef.config_map_ref.as_ref().map(|cm| cm.name.clone()),
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
     let command = container
         .and_then(|c| c.command.clone())
         .unwrap_or_default();
@@ -335,6 +356,7 @@ pub fn deployment_detail(dep: &Deployment) -> DeploymentDetail {
         labels: meta.labels.clone().unwrap_or_default(),
         annotations: meta.annotations.clone().unwrap_or_default(),
         env,
+        env_from,
         command,
         args,
         resource_limits,

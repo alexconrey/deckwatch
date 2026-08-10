@@ -6,9 +6,9 @@ use axum::response::{IntoResponse, Response};
 use axum::Json;
 use k8s_openapi::api::apps::v1::{Deployment, DeploymentSpec};
 use k8s_openapi::api::core::v1::{
-    Affinity, Container, ContainerPort, EnvVar, ExecAction, HTTPGetAction, NodeAffinity,
-    NodeSelector, NodeSelectorRequirement, NodeSelectorTerm, PreferredSchedulingTerm, Probe,
-    ResourceRequirements, TCPSocketAction,
+    Affinity, ConfigMapEnvSource, Container, ContainerPort, EnvFromSource, EnvVar, ExecAction,
+    HTTPGetAction, NodeAffinity, NodeSelector, NodeSelectorRequirement, NodeSelectorTerm,
+    PreferredSchedulingTerm, Probe, ResourceRequirements, SecretEnvSource, TCPSocketAction,
 };
 use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::{LabelSelector, ObjectMeta};
@@ -53,6 +53,7 @@ pub struct CreateDeploymentRequest {
     pub port: Option<i32>,
     pub ports: Option<Vec<PortInput>>,
     pub env: Option<Vec<EnvVarInput>>,
+    pub env_from: Option<Vec<EnvFromInput>>,
     pub labels: Option<BTreeMap<String, String>>,
     pub command: Option<Vec<String>>,
     pub args: Option<Vec<String>>,
@@ -70,6 +71,7 @@ pub struct UpdateDeploymentRequest {
     pub port: Option<i32>,
     pub ports: Option<Vec<PortInput>>,
     pub env: Option<Vec<EnvVarInput>>,
+    pub env_from: Option<Vec<EnvFromInput>>,
     pub command: Option<Vec<String>>,
     pub args: Option<Vec<String>>,
     pub resource_limits: Option<ResourceSpec>,
@@ -137,6 +139,12 @@ pub struct PortInput {
 pub struct EnvVarInput {
     pub name: String,
     pub value: String,
+}
+
+#[derive(Deserialize)]
+pub struct EnvFromInput {
+    pub secret_ref: Option<String>,
+    pub config_map_ref: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -315,6 +323,31 @@ pub async fn create(
             .collect()
     });
 
+    let env_from_sources: Option<Vec<EnvFromSource>> = req.env_from.map(|sources| {
+        sources
+            .into_iter()
+            .filter_map(|ef| {
+                if let Some(name) = ef.secret_ref {
+                    Some(EnvFromSource {
+                        secret_ref: Some(SecretEnvSource {
+                            name,
+                            ..Default::default()
+                        }),
+                        ..Default::default()
+                    })
+                } else {
+                    ef.config_map_ref.map(|name| EnvFromSource {
+                        config_map_ref: Some(ConfigMapEnvSource {
+                            name,
+                            ..Default::default()
+                        }),
+                        ..Default::default()
+                    })
+                }
+            })
+            .collect()
+    });
+
     let ports = resolve_ports(req.port, req.ports);
 
     let resources = build_resources(req.resource_requests, req.resource_limits);
@@ -324,6 +357,7 @@ pub async fn create(
         image: Some(req.image),
         ports,
         env: env_vars,
+        env_from: env_from_sources,
         command: req.command,
         args: req.args,
         resources,
@@ -482,6 +516,32 @@ pub async fn update(
                                 name: v.name,
                                 value: Some(v.value),
                                 ..Default::default()
+                            })
+                            .collect(),
+                    );
+                }
+                if let Some(env_from) = req.env_from {
+                    container.env_from = Some(
+                        env_from
+                            .into_iter()
+                            .filter_map(|ef| {
+                                if let Some(name) = ef.secret_ref {
+                                    Some(EnvFromSource {
+                                        secret_ref: Some(SecretEnvSource {
+                                            name,
+                                            ..Default::default()
+                                        }),
+                                        ..Default::default()
+                                    })
+                                } else {
+                                    ef.config_map_ref.map(|name| EnvFromSource {
+                                        config_map_ref: Some(ConfigMapEnvSource {
+                                            name,
+                                            ..Default::default()
+                                        }),
+                                        ..Default::default()
+                                    })
+                                }
                             })
                             .collect(),
                     );
