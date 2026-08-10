@@ -241,7 +241,8 @@ builds the multi-arch image automatically.
 - Iterative small commits, not monolithic version bumps
 - Concise commit messages; larger context in PR descriptions
 - Do NOT include `Co-Authored-By: Claude` in commits or PRs
-- Do NOT automatically merge PRs — leave for user review
+- **NEVER merge a PR without CI passing** — always wait for all checks to go green first
+- Do NOT automatically merge PRs — open the PR, wait for CI, then let the user merge
 - Run `cargo fmt` before committing to avoid CI failures
 - Create separate branches per body of work
 
