@@ -635,6 +635,30 @@ export interface SetCredentialsResponse {
   gcp_sa_key: string | null;
 }
 
+export type PluginSourceType = "github" | "url";
+
+export interface PluginSourceGithub {
+  type: "github";
+  repo: string;
+  ref: string;
+  path: string;
+  use_release: boolean;
+}
+
+export interface PluginSourceUrl {
+  type: "url";
+  url: string;
+}
+
+export type PluginSource = PluginSourceGithub | PluginSourceUrl;
+
+export interface PluginConfig {
+  name: string;
+  enabled: boolean;
+  source: PluginSource;
+  token_secret?: string | null;
+}
+
 export interface DeckwatchSettings {
   allowed_namespaces: string[];
   default_resource_limits: ResourceDefaults | null;
@@ -652,6 +676,7 @@ export interface DeckwatchSettings {
   credentials?: EncryptedCredentials | null;
   default_storage_class?: string | null;
   ingress_templates?: IngressTemplate[];
+  plugins?: PluginConfig[];
 }
 
 export interface CostSettings {
