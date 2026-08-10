@@ -44,6 +44,8 @@ pub struct PluginResult {
     pub sidecars: Vec<SidecarSpec>,
     #[serde(default)]
     pub kubernetes_resources: Vec<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub service_account_name: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -102,6 +104,11 @@ const PLUGIN_SIDECAR_ANNOTATION_PREFIX: &str = "deckwatch.plugin-sidecar/";
 pub struct LoadedPlugin {
     pub name: String,
     pub wasm_bytes: Vec<u8>,
+    /// Hosts the plugin is allowed to reach via extism's HTTP host function.
+    pub allowed_hosts: Vec<String>,
+    /// Operator-supplied key-value config injected into the extism manifest.
+    /// Cloud credentials, endpoints, and any plugin-specific settings go here.
+    pub config: std::collections::BTreeMap<String, String>,
 }
 
 // ── Validation ────────────────────────────────────────────────────────────────
@@ -152,6 +159,8 @@ pub async fn fetch_and_validate(
     let plugin = LoadedPlugin {
         name: "__validation__".to_string(),
         wasm_bytes: bytes,
+        allowed_hosts: cfg.allowed_hosts.clone(),
+        config: cfg.config.clone(),
     };
 
     match run_plugin(&plugin, &test_ctx) {
@@ -196,6 +205,8 @@ pub async fn fetch_plugins(settings: &DeckwatchSettings, state: &AppState) -> Ve
                 loaded.push(LoadedPlugin {
                     name: cfg.name.clone(),
                     wasm_bytes: bytes,
+                    allowed_hosts: cfg.allowed_hosts.clone(),
+                    config: cfg.config.clone(),
                 });
             }
             Err(e) => {
@@ -294,6 +305,9 @@ pub fn apply_plugins(
                 apply_env_vars(plugin, &result.env_vars, pod_spec, dep_annotations);
                 apply_sidecars(plugin, &result.sidecars, pod_spec, dep_annotations);
                 all_k8s_resources.extend(result.kubernetes_resources);
+                if let Some(sa) = result.service_account_name {
+                    apply_service_account(plugin, sa, pod_spec, dep_annotations);
+                }
             }
             Err(e) => {
                 tracing::error!(plugin = %plugin.name, error = %e, "plugin apply() failed; skipping");
@@ -374,7 +388,20 @@ async fn apply_one_resource(
 
 fn run_plugin(plugin: &LoadedPlugin, ctx: &PluginContext) -> anyhow::Result<PluginResult> {
     let wasm = Wasm::data(plugin.wasm_bytes.clone());
-    let manifest = Manifest::new([wasm]);
+    let mut manifest = Manifest::new([wasm]);
+
+    // Allow the plugin to reach configured hosts via extism's HTTP host function.
+    if !plugin.allowed_hosts.is_empty() {
+        manifest.allowed_hosts = Some(plugin.allowed_hosts.clone());
+    }
+
+    // Inject operator-supplied config (credentials, endpoints, etc.).
+    // Cloud-specific values live here, not in deckwatch core.
+    // Plugins read these via `extism_pdk::config::get("KEY")`.
+    manifest.config.extend(plugin.config.clone());
+
+    // WASI is disabled; plugins use extism's HTTP host function for outbound
+    // network calls, scoped to allowed_hosts above.
     let mut p = Plugin::new(&manifest, [], false)?;
     let input = serde_json::to_string(ctx)?;
     let output = p.call::<&str, &str>("apply", &input)?;
@@ -493,6 +520,29 @@ fn apply_sidecars(
             injected.join(","),
         );
     }
+}
+
+fn apply_service_account(
+    plugin: &LoadedPlugin,
+    sa_name: String,
+    pod_spec: &mut k8s_openapi::api::core::v1::PodSpec,
+    dep_annotations: &mut BTreeMap<String, String>,
+) {
+    let current = pod_spec
+        .service_account_name
+        .as_deref()
+        .unwrap_or("default");
+    if current != "default" {
+        tracing::debug!(
+            plugin = %plugin.name,
+            current_sa = current,
+            requested_sa = %sa_name,
+            "skipping service_account_name — pod already has a non-default service account"
+        );
+        return;
+    }
+    pod_spec.service_account_name = Some(sa_name.clone());
+    dep_annotations.insert(format!("deckwatch.plugin-sa/{}", plugin.name), sa_name);
 }
 
 fn build_resources(cpu: Option<&str>, memory: Option<&str>) -> Option<ResourceRequirements> {

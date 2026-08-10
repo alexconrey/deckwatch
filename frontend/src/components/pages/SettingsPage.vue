@@ -890,6 +890,8 @@ function addPlugin() {
     enabled: true,
     source: { type: "github", repo: "", ref: "main", path: "plugin.wasm", use_release: false },
     token_secret: null,
+    allowed_hosts: [],
+    config: {},
   });
 }
 
@@ -2779,6 +2781,74 @@ onMounted(load);
                 </v-col>
               </v-row>
             </template>
+
+            <!-- Allowed hosts (shared by both source types) -->
+            <v-divider class="my-3" />
+            <div class="text-caption text-medium-emphasis mb-2">
+              <strong>Network access</strong> — hosts the plugin can reach via HTTP.
+              Supports globs (e.g. <code>*.amazonaws.com</code>, <code>vault.corp.internal</code>).
+            </div>
+            <v-combobox
+              v-model="plugin.allowed_hosts"
+              label="Allowed hosts"
+              density="compact"
+              variant="outlined"
+              multiple
+              chips
+              closable-chips
+              hide-details
+              class="mb-3"
+              placeholder="Add a host and press Enter"
+            />
+
+            <!-- Config key-value pairs -->
+            <div class="text-caption text-medium-emphasis mb-2">
+              <strong>Plugin config</strong> — injected as key-value pairs the plugin reads via
+              <code>extism_pdk::config::get()</code>. Use for credentials, endpoints, or any
+              plugin-specific settings (e.g. <code>AWS_ACCESS_KEY_ID</code>, <code>VAULT_TOKEN</code>).
+            </div>
+            <v-row
+              v-for="(_, key) in plugin.config"
+              :key="key"
+              dense
+              class="mb-1"
+            >
+              <v-col cols="5">
+                <v-text-field
+                  :model-value="key"
+                  label="Key"
+                  density="compact"
+                  variant="outlined"
+                  hide-details
+                  @update:model-value="(newKey: string) => {
+                    const val = plugin.config[key];
+                    delete plugin.config[key];
+                    plugin.config[newKey] = val;
+                  }"
+                />
+              </v-col>
+              <v-col cols="6">
+                <v-text-field
+                  v-model="plugin.config[key]"
+                  label="Value"
+                  density="compact"
+                  variant="outlined"
+                  hide-details
+                  :type="key.toLowerCase().includes('secret') || key.toLowerCase().includes('password') || key.toLowerCase().includes('token') ? 'password' : 'text'"
+                />
+              </v-col>
+              <v-col cols="1" class="d-flex align-center justify-center">
+                <v-btn icon="mdi-close" variant="text" size="x-small" @click="delete plugin.config[key]" />
+              </v-col>
+            </v-row>
+            <v-btn
+              variant="text"
+              size="small"
+              prepend-icon="mdi-plus"
+              @click="plugin.config[''] = ''"
+            >
+              Add config entry
+            </v-btn>
           </v-card>
 
           <div v-if="plugins.length === 0" class="text-center py-8 text-secondary text-body-2">
