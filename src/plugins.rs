@@ -528,7 +528,10 @@ fn apply_service_account(
     pod_spec: &mut k8s_openapi::api::core::v1::PodSpec,
     dep_annotations: &mut BTreeMap<String, String>,
 ) {
-    let current = pod_spec.service_account_name.as_deref().unwrap_or("default");
+    let current = pod_spec
+        .service_account_name
+        .as_deref()
+        .unwrap_or("default");
     if current != "default" {
         tracing::debug!(
             plugin = %plugin.name,
@@ -539,10 +542,7 @@ fn apply_service_account(
         return;
     }
     pod_spec.service_account_name = Some(sa_name.clone());
-    dep_annotations.insert(
-        format!("deckwatch.plugin-sa/{}", plugin.name),
-        sa_name,
-    );
+    dep_annotations.insert(format!("deckwatch.plugin-sa/{}", plugin.name), sa_name);
 }
 
 fn build_resources(cpu: Option<&str>, memory: Option<&str>) -> Option<ResourceRequirements> {
