@@ -479,16 +479,14 @@ fn build_deployment_from_request(
                             }),
                             ..Default::default()
                         })
-                    } else if let Some(ref name) = ef.config_map_ref {
-                        Some(EnvFromSource {
+                    } else {
+                        ef.config_map_ref.as_deref().map(|name| EnvFromSource {
                             config_map_ref: Some(ConfigMapEnvSource {
-                                name: name.clone(),
+                                name: name.to_string(),
                                 ..Default::default()
                             }),
                             ..Default::default()
                         })
-                    } else {
-                        None
                     }
                 })
                 .collect()
@@ -778,16 +776,14 @@ fn apply_update(mut dep: Deployment, req: UpdateDeploymentRequest) -> Deployment
                                         }),
                                         ..Default::default()
                                     })
-                                } else if let Some(name) = ef.config_map_ref {
-                                    Some(EnvFromSource {
+                                } else {
+                                    ef.config_map_ref.map(|name| EnvFromSource {
                                         config_map_ref: Some(ConfigMapEnvSource {
                                             name,
                                             ..Default::default()
                                         }),
                                         ..Default::default()
                                     })
-                                } else {
-                                    None
                                 }
                             })
                             .collect(),

@@ -335,16 +335,14 @@ pub async fn create(
                         }),
                         ..Default::default()
                     })
-                } else if let Some(name) = ef.config_map_ref {
-                    Some(EnvFromSource {
+                } else {
+                    ef.config_map_ref.map(|name| EnvFromSource {
                         config_map_ref: Some(ConfigMapEnvSource {
                             name,
                             ..Default::default()
                         }),
                         ..Default::default()
                     })
-                } else {
-                    None
                 }
             })
             .collect()
@@ -535,16 +533,14 @@ pub async fn update(
                                         }),
                                         ..Default::default()
                                     })
-                                } else if let Some(name) = ef.config_map_ref {
-                                    Some(EnvFromSource {
+                                } else {
+                                    ef.config_map_ref.map(|name| EnvFromSource {
                                         config_map_ref: Some(ConfigMapEnvSource {
                                             name,
                                             ..Default::default()
                                         }),
                                         ..Default::default()
                                     })
-                                } else {
-                                    None
                                 }
                             })
                             .collect(),
