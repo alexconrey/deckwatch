@@ -413,6 +413,25 @@ pub struct PluginConfig {
     /// (private repos). Leave unset for public repos.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub token_secret: Option<String>,
+    /// Hosts the plugin is permitted to reach via extism's HTTP host function.
+    /// Supports glob patterns, e.g. `"*.amazonaws.com"`, `"vault.corp.internal"`.
+    /// An empty list denies all outbound HTTP from the plugin.
+    #[serde(default)]
+    pub allowed_hosts: Vec<String>,
+    /// Arbitrary key-value pairs injected into the plugin's extism config
+    /// namespace. The plugin reads these via `extism_pdk::config::get("KEY")`.
+    ///
+    /// Use this to pass credentials, endpoints, or any cloud-specific config
+    /// without deckwatch needing to know about the underlying cloud provider.
+    /// For example an AWS plugin operator would set `AWS_ACCESS_KEY_ID`,
+    /// `AWS_SECRET_ACCESS_KEY`, and `AWS_REGION` here; a GCP plugin operator
+    /// would set `GCP_SERVICE_ACCOUNT_JSON`; and so on.
+    ///
+    /// Values are stored in the settings blob — use `git_token_secrets` for
+    /// values that need rotation, or store long-lived credentials in a
+    /// Kubernetes Secret and reference it from your plugin's logic.
+    #[serde(default)]
+    pub config: std::collections::BTreeMap<String, String>,
 }
 
 pub async fn get_settings(

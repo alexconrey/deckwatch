@@ -450,6 +450,16 @@ fn deckwatch_tool_definitions() -> Vec<serde_json::Value> {
                         "type": "string",
                         "description": "Name of a git_token_secrets entry for authenticated fetches (private repos)"
                     },
+                    "allowed_hosts": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "Hosts the plugin can reach via HTTP (e.g. [\"*.amazonaws.com\"]). Mirrors the saved plugin config."
+                    },
+                    "config": {
+                        "type": "object",
+                        "description": "Key-value config injected into the plugin (credentials, endpoints, etc.). Plugin reads via extism_pdk::config::get().",
+                        "additionalProperties": { "type": "string" }
+                    },
                     "test_namespace": {
                         "type": "string",
                         "description": "Namespace passed to the plugin's apply() function (default: default)"
@@ -1336,6 +1346,14 @@ async fn tool_validate_plugin(
         enabled: true,
         source,
         token_secret: args["token_secret"].as_str().map(|s| s.to_string()),
+        allowed_hosts: args
+            .get("allowed_hosts")
+            .and_then(|v| serde_json::from_value(v.clone()).ok())
+            .unwrap_or_default(),
+        config: args
+            .get("config")
+            .and_then(|v| serde_json::from_value(v.clone()).ok())
+            .unwrap_or_default(),
     };
 
     let test_ctx = crate::plugins::PluginContext {

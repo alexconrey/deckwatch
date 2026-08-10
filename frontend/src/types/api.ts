@@ -657,6 +657,10 @@ export interface PluginConfig {
   enabled: boolean;
   source: PluginSource;
   token_secret?: string | null;
+  /** Hosts the plugin can reach via extism's HTTP host function. */
+  allowed_hosts: string[];
+  /** Operator-supplied key-value config injected into the plugin's extism namespace. */
+  config: Record<string, string>;
 }
 
 export interface DeckwatchSettings {
