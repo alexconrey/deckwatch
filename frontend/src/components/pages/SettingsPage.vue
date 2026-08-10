@@ -28,6 +28,7 @@ import type {
   NotificationSettings,
   OciRegistry,
   OciRegistryType,
+  PluginConfig,
   ResourceDefaults,
   StorageClassSummary,
   TemplateCategory,
@@ -54,6 +55,7 @@ type SectionId =
   | "templates"
   | "git_repositories"
   | "container_registries"
+  | "plugins"
   | "audit";
 
 const navItems: { id: SectionId; title: string; icon: string }[] = [
@@ -66,6 +68,7 @@ const navItems: { id: SectionId; title: string; icon: string }[] = [
   { id: "templates", title: "Templates", icon: "mdi-shape-outline" },
   { id: "git_repositories", title: "Git Repositories", icon: "mdi-git" },
   { id: "container_registries", title: "Container Registries", icon: "mdi-package-variant" },
+  { id: "plugins", title: "Plugins", icon: "mdi-puzzle" },
   { id: "audit", title: "Audit Log", icon: "mdi-clipboard-text-clock" },
 ];
 
@@ -380,6 +383,8 @@ async function deleteIngressClass() {
 const ingressTemplates = ref<IngressTemplate[]>([]);
 
 const gitRepositories = ref<GitRepository[]>([]);
+
+const plugins = ref<PluginConfig[]>([]);
 const ociRegistries = ref<OciRegistry[]>([]);
 const gitTokenSecrets = ref<GitTokenSecret[]>([]);
 
@@ -447,6 +452,7 @@ function applySettings(s: DeckwatchSettings) {
     };
   }
   gitRepositories.value = s.git_repositories ?? [];
+  plugins.value = s.plugins ?? [];
   ociRegistries.value = s.oci_registries ?? [];
   gitTokenSecrets.value = s.git_token_secrets ?? [];
   ingressTemplates.value = (s.ingress_templates ?? []).map((t) => ({
@@ -532,6 +538,7 @@ function buildPayload(): DeckwatchSettings {
     ai_provider: aiProvider.value,
     default_storage_class: defaultStorageClass.value || null,
     ingress_templates: ingressTemplates.value,
+    plugins: plugins.value,
   };
 }
 
@@ -873,6 +880,21 @@ function setIngressTemplateDefault(idx: number) {
   for (let i = 0; i < ingressTemplates.value.length; i++) {
     ingressTemplates.value[i].is_default = i === idx;
   }
+}
+
+// --- plugin helpers ---
+
+function addPlugin() {
+  plugins.value.push({
+    name: "",
+    enabled: true,
+    source: { type: "github", repo: "", ref: "main", path: "plugin.wasm", use_release: false },
+    token_secret: null,
+  });
+}
+
+function removePlugin(idx: number) {
+  plugins.value.splice(idx, 1);
 }
 
 // --- template helpers ---
@@ -2598,6 +2620,170 @@ onMounted(load);
               </v-col>
             </v-row>
           </v-card>
+        </div>
+
+        <!-- Plugins -->
+        <div v-else-if="section === 'plugins'">
+          <div class="d-flex align-center justify-space-between mb-4">
+            <div>
+              <div class="text-h6">Plugins</div>
+              <div class="text-caption text-medium-emphasis">
+                External WASM plugins fetched from Git repositories. Each plugin runs on every
+                deployment create/update and can inject env vars, sidecars, and Kubernetes
+                resources for annotated deployments.
+              </div>
+            </div>
+            <v-btn
+              prepend-icon="mdi-plus"
+              variant="tonal"
+              color="primary"
+              size="small"
+              @click="addPlugin"
+            >
+              Add Plugin
+            </v-btn>
+          </div>
+
+          <v-card
+            v-for="(plugin, idx) in plugins"
+            :key="idx"
+            variant="outlined"
+            class="mb-4 pa-4"
+          >
+            <div class="d-flex align-center justify-space-between mb-3">
+              <div class="d-flex align-center ga-2">
+                <v-icon :icon="plugin.enabled ? 'mdi-puzzle' : 'mdi-puzzle-outline'" size="small" :color="plugin.enabled ? 'primary' : 'disabled'" />
+                <span class="text-subtitle-2">{{ plugin.name || 'Unnamed plugin' }}</span>
+              </div>
+              <div class="d-flex align-center ga-2">
+                <v-switch
+                  v-model="plugin.enabled"
+                  density="compact"
+                  hide-details
+                  color="primary"
+                  :label="plugin.enabled ? 'Enabled' : 'Disabled'"
+                />
+                <v-btn
+                  icon="mdi-delete"
+                  variant="text"
+                  color="error"
+                  size="x-small"
+                  @click="removePlugin(idx)"
+                />
+              </div>
+            </div>
+
+            <v-row dense>
+              <v-col cols="12" sm="6">
+                <v-text-field
+                  v-model="plugin.name"
+                  label="Name"
+                  hint="Unique identifier used in annotation keys (lowercase alphanumeric + hyphens)"
+                  density="compact"
+                  variant="outlined"
+                  persistent-hint
+                />
+              </v-col>
+              <v-col cols="12" sm="6">
+                <v-select
+                  :model-value="plugin.source.type"
+                  :items="[{ title: 'GitHub', value: 'github' }, { title: 'HTTPS URL', value: 'url' }]"
+                  label="Source type"
+                  density="compact"
+                  variant="outlined"
+                  @update:model-value="(v: string) => {
+                    if (v === 'github') plugin.source = { type: 'github', repo: '', ref: 'main', path: 'plugin.wasm', use_release: false };
+                    else plugin.source = { type: 'url', url: '' };
+                  }"
+                />
+              </v-col>
+            </v-row>
+
+            <!-- GitHub source -->
+            <template v-if="plugin.source.type === 'github'">
+              <v-row dense class="mt-1">
+                <v-col cols="12" sm="6">
+                  <v-text-field
+                    v-model="(plugin.source as any).repo"
+                    label="Repository"
+                    placeholder="owner/repo"
+                    density="compact"
+                    variant="outlined"
+                  />
+                </v-col>
+                <v-col cols="6" sm="3">
+                  <v-text-field
+                    v-model="(plugin.source as any).ref"
+                    label="Ref"
+                    placeholder="v1.0.0"
+                    density="compact"
+                    variant="outlined"
+                  />
+                </v-col>
+                <v-col cols="6" sm="3">
+                  <v-text-field
+                    v-model="(plugin.source as any).path"
+                    label="Path"
+                    placeholder="plugin.wasm"
+                    density="compact"
+                    variant="outlined"
+                  />
+                </v-col>
+              </v-row>
+              <v-row dense>
+                <v-col cols="12" sm="6">
+                  <v-switch
+                    v-model="(plugin.source as any).use_release"
+                    label="Fetch from GitHub Releases (recommended for tagged versions)"
+                    density="compact"
+                    hide-details
+                    color="primary"
+                  />
+                </v-col>
+                <v-col cols="12" sm="6">
+                  <v-text-field
+                    v-model="plugin.token_secret"
+                    label="Token secret (optional)"
+                    hint="Name of a git_token_secrets entry for private repos"
+                    density="compact"
+                    variant="outlined"
+                    clearable
+                    persistent-hint
+                  />
+                </v-col>
+              </v-row>
+            </template>
+
+            <!-- URL source -->
+            <template v-else>
+              <v-row dense class="mt-1">
+                <v-col cols="12">
+                  <v-text-field
+                    v-model="(plugin.source as any).url"
+                    label="URL"
+                    placeholder="https://artifacts.example.com/plugin.wasm"
+                    density="compact"
+                    variant="outlined"
+                  />
+                </v-col>
+              </v-row>
+              <v-row dense>
+                <v-col cols="12" sm="6">
+                  <v-text-field
+                    v-model="plugin.token_secret"
+                    label="Token secret (optional)"
+                    density="compact"
+                    variant="outlined"
+                    clearable
+                  />
+                </v-col>
+              </v-row>
+            </template>
+          </v-card>
+
+          <div v-if="plugins.length === 0" class="text-center py-8 text-secondary text-body-2">
+            No plugins configured. Click "Add Plugin" to register an external WASM plugin.
+          </div>
         </div>
 
         <!-- Audit Log -->
