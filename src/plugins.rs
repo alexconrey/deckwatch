@@ -34,6 +34,11 @@ pub struct PluginContext {
     pub deployment_name: String,
     pub annotations: std::collections::HashMap<String, String>,
     pub labels: std::collections::HashMap<String, String>,
+    /// Outputs from plugins that have already run this invocation.
+    /// Populated by `apply_plugins` before each plugin call.
+    #[serde(default)]
+    pub plugin_outputs:
+        std::collections::HashMap<String, std::collections::HashMap<String, String>>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -46,6 +51,9 @@ pub struct PluginResult {
     pub kubernetes_resources: Vec<serde_json::Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub service_account_name: Option<String>,
+    /// Key-value data shared with downstream plugins via `ctx.plugin_outputs`.
+    #[serde(default)]
+    pub outputs: std::collections::HashMap<String, String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -98,6 +106,23 @@ const PLUGIN_SIDECAR_ANNOTATION_PREFIX: &str = "deckwatch.plugin-sidecar/";
 
 // ── LoadedPlugin ─────────────────────────────────────────────────────────────
 
+/// Metadata returned by the plugin's `metadata()` WASM export.
+/// Mirrors `deckwatch_plugin_sdk::PluginMetadata` — kept in sync manually.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct PluginMetadata {
+    pub name: String,
+    #[serde(default)]
+    pub version: String,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub provides: Vec<String>,
+    #[serde(default)]
+    pub depends_on: Vec<String>,
+    #[serde(default)]
+    pub optional_depends_on: Vec<String>,
+}
+
 /// A fetched plugin ready to execute. Stores raw WASM bytes and instantiates
 /// a fresh `extism::Plugin` per call to avoid thread-safety concerns.
 #[derive(Clone)]
@@ -109,6 +134,9 @@ pub struct LoadedPlugin {
     /// Operator-supplied key-value config injected into the extism manifest.
     /// Cloud credentials, endpoints, and any plugin-specific settings go here.
     pub config: std::collections::BTreeMap<String, String>,
+    /// Metadata from the plugin's `metadata()` export — populated at load time.
+    /// Plugins without a `metadata()` export get a default with no dependencies.
+    pub metadata: PluginMetadata,
 }
 
 // ── Validation ────────────────────────────────────────────────────────────────
@@ -161,6 +189,7 @@ pub async fn fetch_and_validate(
         wasm_bytes: bytes,
         allowed_hosts: cfg.allowed_hosts.clone(),
         config: cfg.config.clone(),
+        metadata: PluginMetadata::default(),
     };
 
     match run_plugin(&plugin, &test_ctx) {
@@ -185,6 +214,25 @@ pub async fn fetch_and_validate(
 
 // ── Fetching ─────────────────────────────────────────────────────────────────
 
+/// Call the plugin's `metadata()` export and deserialize the result.
+/// Returns an error if the export is missing or the output can't be parsed —
+/// callers should fall back to `PluginMetadata::default()`.
+fn load_metadata_from_bytes(
+    wasm_bytes: &[u8],
+    allowed_hosts: &[String],
+    config: &std::collections::BTreeMap<String, String>,
+) -> anyhow::Result<PluginMetadata> {
+    let wasm = Wasm::data(wasm_bytes.to_vec());
+    let mut manifest = Manifest::new([wasm]);
+    if !allowed_hosts.is_empty() {
+        manifest.allowed_hosts = Some(allowed_hosts.to_vec());
+    }
+    manifest.config.extend(config.clone());
+    let mut p = Plugin::new(&manifest, [], false)?;
+    let output = p.call::<&str, &str>("metadata", "")?;
+    Ok(serde_json::from_str(output)?)
+}
+
 /// Fetch and load all enabled plugins from their configured sources.
 /// Per-plugin errors are logged and skipped; a broken plugin never blocks startup.
 pub async fn fetch_plugins(settings: &DeckwatchSettings, state: &AppState) -> Vec<LoadedPlugin> {
@@ -202,11 +250,17 @@ pub async fn fetch_plugins(settings: &DeckwatchSettings, state: &AppState) -> Ve
         match fetch_bytes(cfg, &http, settings, state).await {
             Ok(bytes) => {
                 tracing::info!(plugin = %cfg.name, bytes = bytes.len(), "loaded plugin");
+                let metadata = load_metadata_from_bytes(&bytes, &cfg.allowed_hosts, &cfg.config)
+                    .unwrap_or_else(|e| {
+                        tracing::debug!(plugin = %cfg.name, error = %e, "metadata() not exported or failed; using defaults");
+                        PluginMetadata { name: cfg.name.clone(), ..Default::default() }
+                    });
                 loaded.push(LoadedPlugin {
                     name: cfg.name.clone(),
                     wasm_bytes: bytes,
                     allowed_hosts: cfg.allowed_hosts.clone(),
                     config: cfg.config.clone(),
+                    metadata,
                 });
             }
             Err(e) => {
@@ -285,12 +339,81 @@ async fn resolve_token(
     String::from_utf8(raw).ok()
 }
 
+// ── Dependency resolution ─────────────────────────────────────────────────────
+
+/// Topologically sort plugins so those that `provides` a capability run before
+/// those that `depends_on` or `optional_depends_on` that capability.
+///
+/// Uses Kahn's algorithm. Plugins with no dependency edges keep their original
+/// relative order. Cycles are detected and broken with a warning (the full set
+/// is still run).
+pub fn sort_by_dependencies(plugins: &[LoadedPlugin]) -> Vec<&LoadedPlugin> {
+    if plugins.len() <= 1 {
+        return plugins.iter().collect();
+    }
+
+    // Map capability → indices of plugins that provide it.
+    let mut providers: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+    for (i, p) in plugins.iter().enumerate() {
+        for cap in &p.metadata.provides {
+            providers.insert(cap.as_str(), i);
+        }
+    }
+
+    // Build adjacency: edges[i] = set of plugins that must run AFTER i.
+    let n = plugins.len();
+    let mut in_degree = vec![0usize; n];
+    let mut adj: Vec<Vec<usize>> = vec![vec![]; n];
+
+    for (i, p) in plugins.iter().enumerate() {
+        let all_deps = p.metadata.depends_on.iter().chain(p.metadata.optional_depends_on.iter());
+        for cap in all_deps {
+            if let Some(&provider_idx) = providers.get(cap.as_str()) {
+                if provider_idx != i {
+                    adj[provider_idx].push(i);
+                    in_degree[i] += 1;
+                }
+            }
+        }
+    }
+
+    // Kahn's BFS.
+    let mut queue: std::collections::VecDeque<usize> = (0..n).filter(|&i| in_degree[i] == 0).collect();
+    let mut sorted: Vec<usize> = Vec::with_capacity(n);
+
+    while let Some(node) = queue.pop_front() {
+        sorted.push(node);
+        for &next in &adj[node] {
+            in_degree[next] -= 1;
+            if in_degree[next] == 0 {
+                queue.push_back(next);
+            }
+        }
+    }
+
+    // Append any remaining (cycle participants) in original order.
+    if sorted.len() < n {
+        let in_sorted: std::collections::HashSet<usize> = sorted.iter().copied().collect();
+        let remaining: Vec<usize> = (0..n).filter(|i| !in_sorted.contains(i)).collect();
+        tracing::warn!(
+            plugins = ?remaining.iter().map(|&i| &plugins[i].name).collect::<Vec<_>>(),
+            "plugin dependency cycle detected; running in original order"
+        );
+        sorted.extend(remaining);
+    }
+
+    sorted.iter().map(|&i| &plugins[i]).collect()
+}
+
 // ── Applying ─────────────────────────────────────────────────────────────────
 
 /// Run all loaded plugins against `ctx`, merging env vars and sidecars into
 /// `pod_spec`/`dep_annotations`. Returns the collected `kubernetes_resources`
 /// from all plugins so the caller can apply them asynchronously after the
 /// deployment is committed.
+///
+/// Plugins are sorted by declared dependency before execution. Each plugin
+/// receives the accumulated `outputs` from all prior plugins in its context.
 pub fn apply_plugins(
     plugins: &[LoadedPlugin],
     ctx: &PluginContext,
@@ -298,15 +421,27 @@ pub fn apply_plugins(
     dep_annotations: &mut BTreeMap<String, String>,
 ) -> Vec<serde_json::Value> {
     let mut all_k8s_resources: Vec<serde_json::Value> = Vec::new();
+    let mut accumulated_outputs: std::collections::HashMap<
+        String,
+        std::collections::HashMap<String, String>,
+    > = std::collections::HashMap::new();
 
-    for plugin in plugins {
-        match run_plugin(plugin, ctx) {
+    for plugin in sort_by_dependencies(plugins) {
+        // Build enriched context with outputs from prior plugins.
+        let mut enriched_ctx = ctx.clone();
+        enriched_ctx.plugin_outputs = accumulated_outputs.clone();
+
+        match run_plugin(plugin, &enriched_ctx) {
             Ok(result) => {
                 apply_env_vars(plugin, &result.env_vars, pod_spec, dep_annotations);
                 apply_sidecars(plugin, &result.sidecars, pod_spec, dep_annotations);
-                all_k8s_resources.extend(result.kubernetes_resources);
-                if let Some(sa) = result.service_account_name {
+                all_k8s_resources.extend(result.kubernetes_resources.clone());
+                if let Some(sa) = result.service_account_name.clone() {
                     apply_service_account(plugin, sa, pod_spec, dep_annotations);
+                }
+                // Record this plugin's outputs for subsequent plugins.
+                if !result.outputs.is_empty() {
+                    accumulated_outputs.insert(plugin.name.clone(), result.outputs);
                 }
             }
             Err(e) => {

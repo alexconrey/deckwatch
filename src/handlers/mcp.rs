@@ -1373,6 +1373,7 @@ async fn tool_validate_plugin(
             .get("test_labels")
             .and_then(|v| serde_json::from_value(v.clone()).ok())
             .unwrap_or_default(),
+        plugin_outputs: Default::default(),
     };
 
     let vr = crate::plugins::fetch_and_validate(&cfg, test_ctx, state).await;
