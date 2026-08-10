@@ -366,7 +366,11 @@ pub fn sort_by_dependencies(plugins: &[LoadedPlugin]) -> Vec<&LoadedPlugin> {
     let mut adj: Vec<Vec<usize>> = vec![vec![]; n];
 
     for (i, p) in plugins.iter().enumerate() {
-        let all_deps = p.metadata.depends_on.iter().chain(p.metadata.optional_depends_on.iter());
+        let all_deps = p
+            .metadata
+            .depends_on
+            .iter()
+            .chain(p.metadata.optional_depends_on.iter());
         for cap in all_deps {
             if let Some(&provider_idx) = providers.get(cap.as_str()) {
                 if provider_idx != i {
@@ -378,7 +382,8 @@ pub fn sort_by_dependencies(plugins: &[LoadedPlugin]) -> Vec<&LoadedPlugin> {
     }
 
     // Kahn's BFS.
-    let mut queue: std::collections::VecDeque<usize> = (0..n).filter(|&i| in_degree[i] == 0).collect();
+    let mut queue: std::collections::VecDeque<usize> =
+        (0..n).filter(|&i| in_degree[i] == 0).collect();
     let mut sorted: Vec<usize> = Vec::with_capacity(n);
 
     while let Some(node) = queue.pop_front() {
