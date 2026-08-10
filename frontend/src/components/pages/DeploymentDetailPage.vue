@@ -1084,10 +1084,14 @@ const handleDeleteIngress = async () => {
                 <v-chip
                   v-for="host in ing.hosts"
                   :key="host"
+                  :href="`https://${host}`"
+                  target="_blank"
+                  rel="noopener noreferrer"
                   size="x-small"
                   variant="flat"
                   color="primary"
                   class="mr-1"
+                  append-icon="mdi-open-in-new"
                 >
                   {{ host }}
                 </v-chip>
