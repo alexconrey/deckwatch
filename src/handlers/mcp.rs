@@ -66,9 +66,9 @@ pub async fn handle_mcp(
     }
 
     let response = match request.method.as_str() {
-        "initialize" => handle_initialize(&request),
+        "initialize" => handle_initialize(&state, &request).await,
         "ping" => success_response(&request, serde_json::json!({})),
-        "tools/list" => handle_tools_list(&request),
+        "tools/list" => handle_tools_list(&state, &request).await,
         "tools/call" => handle_tool_call(&state, &request).await,
         "prompts/list" => handle_prompts_list(&request),
         "prompts/get" => handle_prompts_get(&request),
@@ -89,27 +89,91 @@ pub async fn handle_mcp(
 // initialize
 // ---------------------------------------------------------------------------
 
-fn handle_initialize(request: &JsonRpcRequest) -> JsonRpcResponse {
-    success_response(
-        request,
-        serde_json::json!({
-            "protocolVersion": "2025-11-25",
-            "capabilities": { "tools": {}, "prompts": {} },
-            "serverInfo": { "name": "deckwatch", "version": "0.3.2" }
-        }),
-    )
+async fn handle_initialize(state: &AppState, request: &JsonRpcRequest) -> JsonRpcResponse {
+    let tuning = settings::load_settings_from_db(state).await.mcp_tuning;
+    let mut result = serde_json::json!({
+        "protocolVersion": "2025-11-25",
+        "capabilities": { "tools": {}, "prompts": {} },
+        "serverInfo": { "name": "deckwatch", "version": env!("CARGO_PKG_VERSION") }
+    });
+    if let Some(global) = tuning.global.filter(|s| !s.is_empty()) {
+        result["instructions"] = serde_json::Value::String(global);
+    }
+    success_response(request, result)
 }
 
 // ---------------------------------------------------------------------------
 // tools/list — upstream mcp-k8s tools + deckwatch-specific tools
 // ---------------------------------------------------------------------------
 
-fn handle_tools_list(request: &JsonRpcRequest) -> JsonRpcResponse {
+async fn handle_tools_list(state: &AppState, request: &JsonRpcRequest) -> JsonRpcResponse {
+    let tuning = settings::load_settings_from_db(state).await.mcp_tuning;
     let perms = mcp_k8s::permissions::ActionPermissions::default();
     let mut tools = mcp_k8s::mcp::tool_definitions(&perms);
     tools.extend(mcp_k8s::resources::all_tool_definitions());
     tools.extend(deckwatch_tool_definitions());
+    let tools = tools.into_iter().map(|t| inject_mcp_hint(t, &tuning)).collect::<Vec<_>>();
     success_response(request, serde_json::json!({ "tools": tools }))
+}
+
+/// Map a tool name to its resource group for hint injection.
+fn mcp_resource_group(name: &str) -> Option<&'static str> {
+    // Check specific deckwatch tools first to avoid ambiguous pattern matches.
+    if matches!(
+        name,
+        "create_application" | "list_addons" | "attach_addon" | "detach_addon" | "list_templates"
+    ) {
+        return Some("applications");
+    }
+    if name.contains("gitops") || name.contains("build") || name == "trigger_build" {
+        return Some("gitops");
+    }
+    if name.contains("plugin") {
+        return Some("plugins");
+    }
+    if name == "enable_monitoring" || name == "disable_monitoring" || name.contains("monitor") {
+        return Some("deployments");
+    }
+    // Pattern-based groups — ordered from most to least specific.
+    if name.contains("ingress") { return Some("ingresses"); }
+    if name.contains("namespace") { return Some("namespaces"); }
+    if name.contains("deployment")
+        || matches!(name, "scale_deployment" | "restart_deployment" | "rollback_deployment")
+    {
+        return Some("deployments");
+    }
+    if name.contains("pod") { return Some("pods"); }
+    if name.contains("secret") { return Some("secrets"); }
+    if name.contains("node") { return Some("nodes"); }
+    if name.contains("pvc") || name.contains("storageclass") || name.contains("storage") {
+        return Some("storage");
+    }
+    None
+}
+
+/// Append the relevant org hint to a tool's description, if one is configured.
+fn inject_mcp_hint(mut tool: serde_json::Value, tuning: &settings::McpTuning) -> serde_json::Value {
+    let name = tool.get("name").and_then(|n| n.as_str()).unwrap_or("").to_string();
+    let hint = match mcp_resource_group(&name) {
+        Some("namespaces")   => tuning.namespaces.as_deref(),
+        Some("deployments")  => tuning.deployments.as_deref(),
+        Some("applications") => tuning.applications.as_deref(),
+        Some("gitops")       => tuning.gitops.as_deref(),
+        Some("ingresses")    => tuning.ingresses.as_deref(),
+        Some("pods")         => tuning.pods.as_deref(),
+        Some("secrets")      => tuning.secrets.as_deref(),
+        Some("nodes")        => tuning.nodes.as_deref(),
+        Some("storage")      => tuning.storage.as_deref(),
+        Some("plugins")      => tuning.plugins.as_deref(),
+        _                    => None,
+    };
+    if let Some(hint) = hint.filter(|h| !h.is_empty()) {
+        if let Some(desc) = tool.get("description").and_then(|d| d.as_str()) {
+            let new_desc = format!("{desc}\n\n[Org guidance: {hint}]");
+            tool["description"] = serde_json::Value::String(new_desc);
+        }
+    }
+    tool
 }
 
 fn deckwatch_tool_definitions() -> Vec<serde_json::Value> {
