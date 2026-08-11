@@ -299,3 +299,49 @@ claude mcp add --transport http deckwatch-local http://localhost:8080/mcp
 The MCP server respects deckwatch's namespace allowlist. If a tool returns
 "namespace not allowed", check the `DECKWATCH_NAMESPACES` environment
 variable on the deckwatch deployment.
+
+---
+
+## MCP Tuning — org-specific guidance
+
+Deckwatch can inject operator-defined guidance into MCP tool descriptions so
+the AI follows your organization's conventions automatically — without you
+having to repeat them in every prompt.
+
+### How it works
+
+At `tools/list` time, deckwatch appends configured hints to the `description`
+field of tools in that resource group. The AI only sees the namespace hint when
+namespace tools are in scope, deployment hints when deployment tools are in
+scope, and so on. Nothing is injected into unrelated interactions.
+
+### Configuring hints
+
+Go to **Settings → MCP Tuning** and fill in the groups you want to enforce.
+
+| Group | When it fires |
+|---|---|
+| Global | Every MCP session (via `initialize` instructions) |
+| Namespaces | Namespace creation, listing, application creation |
+| Deployments | Deployment CRUD, scaling, restarts |
+| Applications & Addons | Application creation, addon management |
+| GitOps & Builds | GitOps config, build triggers, build logs |
+| Ingresses | Ingress CRUD, ingress template management |
+| Pods | Pod listing, log streaming, exec |
+| Secrets | Secret CRUD |
+| Nodes | Node listing, cordon/drain operations |
+| Storage | PVC and StorageClass management |
+| Plugins | Plugin lifecycle (enable, disable, validate) |
+
+### Example: team-based namespace enforcement
+
+In **Settings → MCP Tuning → Namespaces**:
+
+> *"This org uses team-based Kubernetes namespaces (e.g. team-platform,
+> team-rad, team-avionics). When creating applications or suggesting where to
+> deploy, always use an existing team namespace rather than creating a new one.
+> Ask which team owns this work before proceeding."*
+
+After saving, Claude will follow this convention any time it touches
+`create_namespace`, `create_application`, or `list_namespaces` — without
+the user needing to mention it.
