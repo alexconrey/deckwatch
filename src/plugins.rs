@@ -139,6 +139,10 @@ pub struct LoadedPlugin {
     /// These override any same-named key in `config` so that live/rotated
     /// credentials always take precedence over static config entries.
     pub inherit_env_keys: Vec<String>,
+    /// Reads file contents from paths stored in env vars, injecting into extism
+    /// config. Map of config_key → env_var_holding_file_path. Applied after
+    /// `inherit_env_keys` so file contents take final precedence.
+    pub inherit_env_file_keys: std::collections::BTreeMap<String, String>,
     /// Metadata from the plugin's `metadata()` export — populated at load time.
     /// Plugins without a `metadata()` export get a default with no dependencies.
     pub metadata: PluginMetadata,
@@ -195,6 +199,7 @@ pub async fn fetch_and_validate(
         allowed_hosts: cfg.allowed_hosts.clone(),
         config: cfg.config.clone(),
         inherit_env_keys: cfg.inherit_env_keys.clone(),
+        inherit_env_file_keys: cfg.inherit_env_file_keys.clone(),
         metadata: PluginMetadata::default(),
     };
 
@@ -267,6 +272,7 @@ pub async fn fetch_plugins(settings: &DeckwatchSettings, state: &AppState) -> Ve
                     allowed_hosts: cfg.allowed_hosts.clone(),
                     config: cfg.config.clone(),
                     inherit_env_keys: cfg.inherit_env_keys.clone(),
+                    inherit_env_file_keys: cfg.inherit_env_file_keys.clone(),
                     metadata,
                 });
             }
@@ -548,11 +554,35 @@ fn run_plugin(plugin: &LoadedPlugin, ctx: &PluginContext) -> anyhow::Result<Plug
     manifest.config.extend(plugin.config.clone());
 
     // Inject inherited env vars from the deckwatch process environment.
-    // Applied after static config so live/rotated values (e.g. from a
-    // Kubernetes Secret mounted as env vars) override anything static.
+    // Applied after static config so live/rotated values override static entries.
     for key in &plugin.inherit_env_keys {
         if let Ok(val) = std::env::var(key) {
             manifest.config.insert(key.clone(), val);
+        }
+    }
+
+    // Inject file contents from paths stored in env vars.
+    // Cloud-agnostic: deckwatch reads the file; the plugin decides what to do
+    // with the content (e.g. exchange a workload identity token for credentials).
+    // Applied last so file contents take final precedence.
+    for (config_key, env_var) in &plugin.inherit_env_file_keys {
+        if let Ok(path) = std::env::var(env_var) {
+            match std::fs::read_to_string(&path) {
+                Ok(content) => {
+                    manifest
+                        .config
+                        .insert(config_key.clone(), content.trim().to_string());
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        plugin = %plugin.name,
+                        config_key = %config_key,
+                        path = %path,
+                        error = %e,
+                        "inherit_env_file_keys: failed to read file"
+                    );
+                }
+            }
         }
     }
 

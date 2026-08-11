@@ -492,6 +492,22 @@ pub struct PluginConfig {
     /// `inherit_env_keys: ["AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN", "AWS_REGION"]`
     #[serde(default)]
     pub inherit_env_keys: Vec<String>,
+    /// Reads the contents of files whose paths are stored in environment variables,
+    /// injecting the file content into the plugin's extism config.
+    ///
+    /// Keys are the config key to inject; values are the env var whose value is
+    /// the file path. For example, to pass a workload identity token to a plugin:
+    /// `{ "AWS_IDENTITY_TOKEN": "AWS_WEB_IDENTITY_TOKEN_FILE" }`
+    ///
+    /// Deckwatch reads `$AWS_WEB_IDENTITY_TOKEN_FILE` from its filesystem and
+    /// injects the file content as `AWS_IDENTITY_TOKEN` into the plugin config.
+    /// This is cloud-agnostic — deckwatch has no knowledge of what the file
+    /// contains. The plugin is responsible for using it (e.g. STS exchange).
+    ///
+    /// Injected after `inherit_env_keys` so file contents override env vars
+    /// of the same name.
+    #[serde(default)]
+    pub inherit_env_file_keys: std::collections::BTreeMap<String, String>,
 }
 
 pub async fn get_settings(
