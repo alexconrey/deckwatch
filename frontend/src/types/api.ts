@@ -686,6 +686,21 @@ export interface DeckwatchSettings {
   default_storage_class?: string | null;
   ingress_templates?: IngressTemplate[];
   plugins?: PluginConfig[];
+  mcp_tuning?: McpTuning;
+}
+
+export interface McpTuning {
+  global?: string;
+  namespaces?: string;
+  deployments?: string;
+  applications?: string;
+  gitops?: string;
+  ingresses?: string;
+  pods?: string;
+  secrets?: string;
+  nodes?: string;
+  storage?: string;
+  plugins?: string;
 }
 
 export interface CostSettings {

@@ -99,6 +99,54 @@ pub struct DeckwatchSettings {
     /// plugin is a compiled WASM binary fetched from a Git repository.
     #[serde(default)]
     pub plugins: Vec<PluginConfig>,
+    /// Resource-scoped hints injected into MCP tool descriptions at `tools/list`
+    /// time. Each hint is appended to the description of every tool in that
+    /// resource group so the AI only sees it when the relevant tools are in scope.
+    #[serde(default)]
+    pub mcp_tuning: McpTuning,
+}
+
+/// Per-resource-group instruction hints for MCP tools.
+///
+/// Each field is injected into the `description` of tools in that group at
+/// `tools/list` time. `global` is additionally included in the `initialize`
+/// response `instructions` field (applies to all tool interactions).
+///
+/// Groups map to tools by name pattern:
+/// - `namespaces`  → tools containing "namespace"
+/// - `deployments` → tools containing "deployment" + scale/restart/rollback
+/// - `applications`→ create_application, list_addons, attach_addon, detach_addon, list_templates
+/// - `gitops`      → tools containing "gitops" or "build"
+/// - `ingresses`   → tools containing "ingress"
+/// - `pods`        → tools containing "pod"
+/// - `secrets`     → tools containing "secret"
+/// - `nodes`       → tools containing "node"
+/// - `storage`     → tools containing "pvc", "pv", or "storageclass"
+/// - `plugins`     → tools containing "plugin"
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct McpTuning {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub global: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub namespaces: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deployments: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub applications: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gitops: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ingresses: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pods: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub secrets: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub nodes: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub storage: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plugins: Option<String>,
 }
 
 /// Encrypted credential storage. Each field holds an AES-256-GCM ciphertext
@@ -681,6 +729,7 @@ fn default_settings(state: &AppState) -> DeckwatchSettings {
         build_architectures: default_build_architectures(),
         build_settings: default_build_settings(),
         plugins: Vec::new(),
+        mcp_tuning: McpTuning::default(),
     }
 }
 

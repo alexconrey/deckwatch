@@ -26,6 +26,7 @@ import type {
   IngressTemplate,
   NotificationEventType,
   NotificationSettings,
+  McpTuning,
   OciRegistry,
   OciRegistryType,
   PluginConfig,
@@ -56,6 +57,7 @@ type SectionId =
   | "git_repositories"
   | "container_registries"
   | "plugins"
+  | "mcp_tuning"
   | "audit";
 
 const navItems: { id: SectionId; title: string; icon: string }[] = [
@@ -69,6 +71,7 @@ const navItems: { id: SectionId; title: string; icon: string }[] = [
   { id: "git_repositories", title: "Git Repositories", icon: "mdi-git" },
   { id: "container_registries", title: "Container Registries", icon: "mdi-package-variant" },
   { id: "plugins", title: "Plugins", icon: "mdi-puzzle" },
+  { id: "mcp_tuning", title: "MCP Tuning", icon: "mdi-brain" },
   { id: "audit", title: "Audit Log", icon: "mdi-clipboard-text-clock" },
 ];
 
@@ -385,6 +388,60 @@ const ingressTemplates = ref<IngressTemplate[]>([]);
 const gitRepositories = ref<GitRepository[]>([]);
 
 const plugins = ref<PluginConfig[]>([]);
+const mcpTuning = ref<McpTuning>({});
+
+const mcpTuningGroups = [
+  {
+    key: "namespaces", label: "Namespaces", icon: "mdi-view-grid-outline",
+    examples: ["create_namespace", "list_namespaces", "create_application"],
+    placeholder: "e.g. Use team-based namespaces (team-platform, team-rad). Never create per-app namespaces.",
+  },
+  {
+    key: "deployments", label: "Deployments", icon: "mdi-rocket-launch-outline",
+    examples: ["create_deployment", "update_deployment", "scale_deployment"],
+    placeholder: "e.g. Always set resource requests and limits. Production deployments require readiness probes.",
+  },
+  {
+    key: "applications", label: "Applications & Addons", icon: "mdi-application-outline",
+    examples: ["create_application", "attach_addon", "list_templates"],
+    placeholder: "e.g. Use the web-app template for all HTTP services. Attach Redis only for stateful workloads.",
+  },
+  {
+    key: "gitops", label: "GitOps & Builds", icon: "mdi-source-branch",
+    examples: ["set_gitops", "trigger_build", "list_builds"],
+    placeholder: "e.g. All production images must be built from the main branch, never from feature branches.",
+  },
+  {
+    key: "ingresses", label: "Ingresses", icon: "mdi-transit-connection-variant",
+    examples: ["create_ingress", "update_ingress", "list_ingress_templates"],
+    placeholder: "e.g. Use the internal-alb template for all ingresses. Never expose services publicly.",
+  },
+  {
+    key: "pods", label: "Pods", icon: "mdi-cube-outline",
+    examples: ["list_pods", "get_pod_logs", "exec_pod"],
+    placeholder: "e.g. Pod exec access is restricted to the platform team. Use log streaming for debugging.",
+  },
+  {
+    key: "secrets", label: "Secrets", icon: "mdi-lock-outline",
+    examples: ["list_secrets", "get_secret", "create_secret"],
+    placeholder: "e.g. Secrets must be created via ExternalSecrets from Vault, not manually via kubectl.",
+  },
+  {
+    key: "nodes", label: "Nodes", icon: "mdi-server-outline",
+    examples: ["list_nodes", "cordon_node", "drain_node"],
+    placeholder: "e.g. Node maintenance requires a change request. Always drain before cordoning.",
+  },
+  {
+    key: "storage", label: "Storage", icon: "mdi-database-outline",
+    examples: ["list_pvcs", "create_pvc", "list_storageclasses"],
+    placeholder: "e.g. Use the gp3 storage class for all persistent volumes.",
+  },
+  {
+    key: "plugins", label: "Plugins", icon: "mdi-puzzle-outline",
+    examples: ["list_plugins", "enable_plugin", "validate_plugin"],
+    placeholder: "e.g. Always validate a plugin before enabling it in production.",
+  },
+] as const;
 const ociRegistries = ref<OciRegistry[]>([]);
 const gitTokenSecrets = ref<GitTokenSecret[]>([]);
 
@@ -453,6 +510,7 @@ function applySettings(s: DeckwatchSettings) {
   }
   gitRepositories.value = s.git_repositories ?? [];
   plugins.value = s.plugins ?? [];
+  mcpTuning.value = s.mcp_tuning ?? {};
   ociRegistries.value = s.oci_registries ?? [];
   gitTokenSecrets.value = s.git_token_secrets ?? [];
   ingressTemplates.value = (s.ingress_templates ?? []).map((t) => ({
@@ -539,6 +597,7 @@ function buildPayload(): DeckwatchSettings {
     default_storage_class: defaultStorageClass.value || null,
     ingress_templates: ingressTemplates.value,
     plugins: plugins.value,
+    mcp_tuning: mcpTuning.value,
   };
 }
 
@@ -2875,6 +2934,75 @@ onMounted(load);
           <div v-if="plugins.length === 0" class="text-center py-8 text-secondary text-body-2">
             No plugins configured. Click "Add Plugin" to register an external WASM plugin.
           </div>
+        </div>
+
+        <!-- MCP Tuning -->
+        <div v-else-if="section === 'mcp_tuning'">
+          <div class="mb-4">
+            <div class="text-h6">MCP Tuning</div>
+            <div class="text-caption text-medium-emphasis">
+              Org-specific guidance injected into MCP tool descriptions. Each hint is appended
+              only to tools in that resource group — the AI sees namespace guidance when working
+              with namespaces, deployment guidance when working with deployments, and so on.
+              Keeps instructions contextual rather than flooding every interaction.
+            </div>
+          </div>
+
+          <v-card variant="outlined" class="mb-4">
+            <v-card-title class="text-subtitle-2 d-flex align-center ga-2">
+              <v-icon icon="mdi-earth" size="small" />
+              Global instructions
+            </v-card-title>
+            <v-card-text>
+              <div class="text-caption text-medium-emphasis mb-2">
+                Included in every MCP session via the <code>initialize</code> response.
+                Use sparingly — applies to all tool interactions regardless of resource type.
+              </div>
+              <v-textarea
+                v-model="mcpTuning.global"
+                placeholder="e.g. All infrastructure changes must be approved by the platform team before deployment."
+                density="compact"
+                variant="outlined"
+                rows="3"
+                auto-grow
+                hide-details
+              />
+            </v-card-text>
+          </v-card>
+
+          <v-row dense>
+            <v-col
+              v-for="group in mcpTuningGroups"
+              :key="group.key"
+              cols="12"
+              md="6"
+            >
+              <v-card variant="outlined" class="pa-3 fill-height">
+                <div class="d-flex align-center ga-2 mb-1">
+                  <v-icon :icon="group.icon" size="small" color="primary" />
+                  <span class="text-subtitle-2">{{ group.label }}</span>
+                </div>
+                <div class="d-flex flex-wrap ga-1 mb-2">
+                  <v-chip
+                    v-for="example in group.examples"
+                    :key="example"
+                    size="x-small"
+                    variant="tonal"
+                    color="secondary"
+                  >{{ example }}</v-chip>
+                </div>
+                <v-textarea
+                  v-model="(mcpTuning as any)[group.key]"
+                  :placeholder="group.placeholder"
+                  density="compact"
+                  variant="outlined"
+                  rows="2"
+                  auto-grow
+                  hide-details
+                />
+              </v-card>
+            </v-col>
+          </v-row>
         </div>
 
         <!-- Audit Log -->
