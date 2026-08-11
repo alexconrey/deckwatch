@@ -37,6 +37,16 @@ use state::AppState;
 async fn main() {
     let _ = rustls::crypto::ring::default_provider().install_default();
 
+    // Route extism plugin log!() calls through deckwatch's own tracing
+    // subscriber so plugin errors surface in pod logs alongside everything else.
+    // Without this, plugin log!() calls are silently dropped.
+    if let Err(e) = extism::set_log_callback(
+        |msg: &str| tracing::warn!(target: "deckwatch::plugin", "{}", msg.trim()),
+        "warn",
+    ) {
+        eprintln!("failed to configure extism plugin logging: {e}");
+    }
+
     tracing_subscriber::fmt()
         .with_env_filter(
             EnvFilter::try_from_default_env()
