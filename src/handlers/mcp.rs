@@ -112,7 +112,10 @@ async fn handle_tools_list(state: &AppState, request: &JsonRpcRequest) -> JsonRp
     let mut tools = mcp_k8s::mcp::tool_definitions(&perms);
     tools.extend(mcp_k8s::resources::all_tool_definitions());
     tools.extend(deckwatch_tool_definitions());
-    let tools = tools.into_iter().map(|t| inject_mcp_hint(t, &tuning)).collect::<Vec<_>>();
+    let tools = tools
+        .into_iter()
+        .map(|t| inject_mcp_hint(t, &tuning))
+        .collect::<Vec<_>>();
     success_response(request, serde_json::json!({ "tools": tools }))
 }
 
@@ -135,16 +138,29 @@ fn mcp_resource_group(name: &str) -> Option<&'static str> {
         return Some("deployments");
     }
     // Pattern-based groups — ordered from most to least specific.
-    if name.contains("ingress") { return Some("ingresses"); }
-    if name.contains("namespace") { return Some("namespaces"); }
+    if name.contains("ingress") {
+        return Some("ingresses");
+    }
+    if name.contains("namespace") {
+        return Some("namespaces");
+    }
     if name.contains("deployment")
-        || matches!(name, "scale_deployment" | "restart_deployment" | "rollback_deployment")
+        || matches!(
+            name,
+            "scale_deployment" | "restart_deployment" | "rollback_deployment"
+        )
     {
         return Some("deployments");
     }
-    if name.contains("pod") { return Some("pods"); }
-    if name.contains("secret") { return Some("secrets"); }
-    if name.contains("node") { return Some("nodes"); }
+    if name.contains("pod") {
+        return Some("pods");
+    }
+    if name.contains("secret") {
+        return Some("secrets");
+    }
+    if name.contains("node") {
+        return Some("nodes");
+    }
     if name.contains("pvc") || name.contains("storageclass") || name.contains("storage") {
         return Some("storage");
     }
@@ -153,19 +169,23 @@ fn mcp_resource_group(name: &str) -> Option<&'static str> {
 
 /// Append the relevant org hint to a tool's description, if one is configured.
 fn inject_mcp_hint(mut tool: serde_json::Value, tuning: &settings::McpTuning) -> serde_json::Value {
-    let name = tool.get("name").and_then(|n| n.as_str()).unwrap_or("").to_string();
+    let name = tool
+        .get("name")
+        .and_then(|n| n.as_str())
+        .unwrap_or("")
+        .to_string();
     let hint = match mcp_resource_group(&name) {
-        Some("namespaces")   => tuning.namespaces.as_deref(),
-        Some("deployments")  => tuning.deployments.as_deref(),
+        Some("namespaces") => tuning.namespaces.as_deref(),
+        Some("deployments") => tuning.deployments.as_deref(),
         Some("applications") => tuning.applications.as_deref(),
-        Some("gitops")       => tuning.gitops.as_deref(),
-        Some("ingresses")    => tuning.ingresses.as_deref(),
-        Some("pods")         => tuning.pods.as_deref(),
-        Some("secrets")      => tuning.secrets.as_deref(),
-        Some("nodes")        => tuning.nodes.as_deref(),
-        Some("storage")      => tuning.storage.as_deref(),
-        Some("plugins")      => tuning.plugins.as_deref(),
-        _                    => None,
+        Some("gitops") => tuning.gitops.as_deref(),
+        Some("ingresses") => tuning.ingresses.as_deref(),
+        Some("pods") => tuning.pods.as_deref(),
+        Some("secrets") => tuning.secrets.as_deref(),
+        Some("nodes") => tuning.nodes.as_deref(),
+        Some("storage") => tuning.storage.as_deref(),
+        Some("plugins") => tuning.plugins.as_deref(),
+        _ => None,
     };
     if let Some(hint) = hint.filter(|h| !h.is_empty()) {
         if let Some(desc) = tool.get("description").and_then(|d| d.as_str()) {
