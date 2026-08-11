@@ -661,6 +661,11 @@ export interface PluginConfig {
   allowed_hosts: string[];
   /** Operator-supplied key-value config injected into the plugin's extism namespace. */
   config: Record<string, string>;
+  /** Env var names to read from the deckwatch pod environment and inject into
+   *  the plugin config at invocation time, overriding any same-named config entry.
+   *  Use for credentials that are already mounted as pod env vars (e.g. from a
+   *  Kubernetes Secret) so they don't need to be stored in settings. */
+  inherit_env_keys: string[];
 }
 
 export interface DeckwatchSettings {

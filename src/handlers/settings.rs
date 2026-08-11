@@ -432,6 +432,18 @@ pub struct PluginConfig {
     /// Kubernetes Secret and reference it from your plugin's logic.
     #[serde(default)]
     pub config: std::collections::BTreeMap<String, String>,
+    /// Environment variable names to read from the deckwatch process environment
+    /// and inject into the plugin's extism config at invocation time. Injected
+    /// values overwrite any same-named key in `config`, so live credentials
+    /// (e.g. rotated by a Kubernetes secret or IRSA) always win over static
+    /// config entries.
+    ///
+    /// Use this when credentials are already present as pod environment variables
+    /// rather than stored in settings. For example, to pass through AWS credentials
+    /// that are mounted as env vars via a Kubernetes Secret:
+    /// `inherit_env_keys: ["AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN", "AWS_REGION"]`
+    #[serde(default)]
+    pub inherit_env_keys: Vec<String>,
 }
 
 pub async fn get_settings(

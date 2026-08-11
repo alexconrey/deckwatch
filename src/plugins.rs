@@ -134,6 +134,11 @@ pub struct LoadedPlugin {
     /// Operator-supplied key-value config injected into the extism manifest.
     /// Cloud credentials, endpoints, and any plugin-specific settings go here.
     pub config: std::collections::BTreeMap<String, String>,
+    /// Environment variable names to read from the deckwatch process environment
+    /// and inject into the extism manifest config at invocation time.
+    /// These override any same-named key in `config` so that live/rotated
+    /// credentials always take precedence over static config entries.
+    pub inherit_env_keys: Vec<String>,
     /// Metadata from the plugin's `metadata()` export — populated at load time.
     /// Plugins without a `metadata()` export get a default with no dependencies.
     pub metadata: PluginMetadata,
@@ -189,6 +194,7 @@ pub async fn fetch_and_validate(
         wasm_bytes: bytes,
         allowed_hosts: cfg.allowed_hosts.clone(),
         config: cfg.config.clone(),
+        inherit_env_keys: cfg.inherit_env_keys.clone(),
         metadata: PluginMetadata::default(),
     };
 
@@ -260,6 +266,7 @@ pub async fn fetch_plugins(settings: &DeckwatchSettings, state: &AppState) -> Ve
                     wasm_bytes: bytes,
                     allowed_hosts: cfg.allowed_hosts.clone(),
                     config: cfg.config.clone(),
+                    inherit_env_keys: cfg.inherit_env_keys.clone(),
                     metadata,
                 });
             }
@@ -539,6 +546,15 @@ fn run_plugin(plugin: &LoadedPlugin, ctx: &PluginContext) -> anyhow::Result<Plug
     // Cloud-specific values live here, not in deckwatch core.
     // Plugins read these via `extism_pdk::config::get("KEY")`.
     manifest.config.extend(plugin.config.clone());
+
+    // Inject inherited env vars from the deckwatch process environment.
+    // Applied after static config so live/rotated values (e.g. from a
+    // Kubernetes Secret mounted as env vars) override anything static.
+    for key in &plugin.inherit_env_keys {
+        if let Ok(val) = std::env::var(key) {
+            manifest.config.insert(key.clone(), val);
+        }
+    }
 
     // WASI is disabled; plugins use extism's HTTP host function for outbound
     // network calls, scoped to allowed_hosts above.
