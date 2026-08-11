@@ -540,6 +540,13 @@ async fn apply_one_resource(
 }
 
 fn run_plugin(plugin: &LoadedPlugin, ctx: &PluginContext) -> anyhow::Result<PluginResult> {
+    tracing::debug!(
+        plugin = %plugin.name,
+        namespace = %ctx.namespace,
+        deployment = %ctx.deployment_name,
+        "calling plugin apply()"
+    );
+
     let wasm = Wasm::data(plugin.wasm_bytes.clone());
     let mut manifest = Manifest::new([wasm]);
 
@@ -590,8 +597,28 @@ fn run_plugin(plugin: &LoadedPlugin, ctx: &PluginContext) -> anyhow::Result<Plug
     // network calls, scoped to allowed_hosts above.
     let mut p = Plugin::new(&manifest, [], false)?;
     let input = serde_json::to_string(ctx)?;
-    let output = p.call::<&str, &str>("apply", &input)?;
-    Ok(serde_json::from_str(output)?)
+    let output = p.call::<&str, &str>("apply", &input).map_err(|e| {
+        tracing::error!(
+            plugin = %plugin.name,
+            namespace = %ctx.namespace,
+            deployment = %ctx.deployment_name,
+            error = %e,
+            "plugin apply() failed"
+        );
+        e
+    })?;
+    let result: PluginResult = serde_json::from_str(output)?;
+    tracing::debug!(
+        plugin = %plugin.name,
+        namespace = %ctx.namespace,
+        deployment = %ctx.deployment_name,
+        env_vars = result.env_vars.len(),
+        sidecars = result.sidecars.len(),
+        k8s_resources = result.kubernetes_resources.len(),
+        service_account = ?result.service_account_name,
+        "plugin apply() completed"
+    );
+    Ok(result)
 }
 
 fn apply_env_vars(
