@@ -714,5 +714,5 @@ fn build_resources(
 }
 
 #[cfg(test)]
-#[path = "../handlers_applications_tests.rs"]
+#[path = "applications_tests.rs"]
 mod handlers_applications_tests;

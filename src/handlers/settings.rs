@@ -966,5 +966,5 @@ pub async fn delete_git_token_secret(
 }
 
 #[cfg(test)]
-#[path = "../settings_tests.rs"]
+#[path = "settings_tests.rs"]
 mod settings_tests;

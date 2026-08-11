@@ -477,5 +477,5 @@ mod tests {
 }
 
 #[cfg(test)]
-#[path = "../handlers_tracing_handler_tests.rs"]
+#[path = "tracing_handler_tests.rs"]
 mod handlers_tracing_handler_tests;

@@ -1547,20 +1547,24 @@ fn handle_prompts_get(request: &JsonRpcRequest) -> JsonRpcResponse {
 
     match name {
         "pre-deployment-check" => {
-            let prompt_text = r#"You are reviewing the current project directory to determine if this application is ready to be onboarded to deckwatch for Kubernetes deployment. Analyze the codebase and report a checklist with pass/fail for each item:
+            let prompt_text = r#"You are reviewing the current project directory to determine if this application is ready to be onboarded to deckwatch for Kubernetes deployment.
 
-1. **Dockerfile exists**: Look for a Dockerfile (or Dockerfile.*) in the project root. Check that it builds a runnable container — verify it has a CMD or ENTRYPOINT.
-2. **Git repository**: Check if this is a git repo with a remote origin configured (`git remote -v`). Deckwatch GitOps requires a reachable git URL.
-3. **Container port exposed**: Check the Dockerfile for an EXPOSE directive. The deployment needs to know which port the app listens on.
-4. **Health endpoint**: Search the codebase for a health check endpoint (e.g. `/health`, `/healthz`, `/readyz`, `/api/healthz`). Deckwatch configures readiness probes against these.
-5. **Database configuration**: Check for database connection strings in config files, env vars, or code. Flag if using SQLite or localhost — production deployments should use an external database (RDS, etc.).
-6. **Dependencies pinned**: Check if dependency versions are pinned (requirements.txt with ==, Cargo.lock, package-lock.json, go.sum). Unpinned dependencies cause non-reproducible builds.
-7. **Environment variables**: Look for .env files, environment variable references in the code, or config files. Document which env vars the app needs — these will need to be set on the deckwatch deployment.
-8. **No secrets in code**: Scan for hardcoded passwords, API keys, tokens, or credentials in the source code. These should be in Kubernetes Secrets, not baked into the image.
-9. **Startup time**: Check if the app has a long startup sequence (database migrations, cache warming, etc.). If so, recommend configuring a startup probe in addition to the readiness probe.
-10. **.dockerignore exists**: Check for a .dockerignore file to avoid bloating the container image with unnecessary files (node_modules, .git, test fixtures, etc.).
+IMPORTANT CONTEXT: Deckwatch includes a built-in GitOps pipeline. When a git push is detected, deckwatch automatically builds a container image using Kaniko and deploys it — no external CI/CD system (GitHub Actions, Jenkins, GitLab CI, etc.) is required or expected. Do NOT recommend setting up a CI pipeline; deckwatch IS the pipeline.
 
-Format the output as a checklist with a checkmark or X for each item, with specific details on what needs to be fixed for any failing checks. End with a summary of whether the app is ready for deckwatch onboarding."#;
+Analyze the codebase and report a checklist with pass/fail for each item:
+
+1. **Dockerfile exists**: Look for a Dockerfile (or Dockerfile.*) in the project root. Check that it builds a runnable container — verify it has a CMD or ENTRYPOINT. Deckwatch uses Kaniko to build this image on every git push.
+2. **Git repository with remote**: Check if this is a git repo with a remote origin configured (`git remote -v`). Deckwatch polls this URL to detect new commits and trigger builds — this is the deployment trigger, replacing a traditional CI pipeline.
+3. **Container port exposed**: Check the Dockerfile for an EXPOSE directive. Deckwatch needs to know which port the app listens on to configure the Service and readiness probe.
+4. **Health endpoint**: Search the codebase for a health check endpoint (e.g. `/health`, `/healthz`, `/readyz`, `/ping`). Deckwatch configures Kubernetes readiness and liveness probes against these automatically.
+5. **No secrets in code**: Scan for hardcoded passwords, API keys, tokens, or credentials in source code. These must be in Kubernetes Secrets or managed via deckwatch's plugin system — never baked into the image.
+6. **Environment variables documented**: Look for `.env` files, environment variable references in code or config files. List which env vars the app needs — these will be configured on the deckwatch deployment, not in a CI system.
+7. **Dependencies pinned**: Check if dependency versions are pinned (requirements.txt with ==, Cargo.lock, package-lock.json, go.sum). Unpinned dependencies cause non-reproducible Kaniko builds.
+8. **Database not localhost**: Check for database connection strings. Flag if SQLite, localhost, or 127.0.0.1 is used — production workloads need an external database reachable from the cluster.
+9. **Startup time**: Check for long startup sequences (migrations, cache warming). If present, a Kubernetes startup probe should be configured in addition to the readiness probe.
+10. **.dockerignore exists**: Check for a .dockerignore file. Missing it causes Kaniko to send the full source tree as build context, significantly slowing builds. Flag any large directories (node_modules, .git, test fixtures) that should be excluded.
+
+Format the output as a checklist with a checkmark or X for each item, with specific details on what needs to be fixed for any failing checks. End with a summary of whether the app is ready for deckwatch onboarding, and remind the user that no external CI pipeline is needed — deckwatch handles image builds automatically."#;
 
             success_response(
                 request,
@@ -1582,20 +1586,20 @@ Format the output as a checklist with a checkmark or X for each item, with speci
             let dep = args["deployment_name"].as_str().unwrap_or("my-app");
 
             let prompt_text = format!(
-                r#"You are evaluating whether the application "{dep}" in namespace "{ns}" is ready for production deployment on deckwatch. Run the following checks using the available MCP tools and report a checklist with pass/fail for each item:
+                r#"You are evaluating whether the application "{dep}" in namespace "{ns}" is ready for production on deckwatch. Deckwatch builds and deploys images automatically via GitOps — no external CI/CD pipeline is required or expected. Run the following checks using the available MCP tools and report a checklist with pass/fail for each item:
 
 1. **Deployment exists**: Call `get_deployment` for namespace "{ns}", name "{dep}"
-2. **Container image**: Check the image field — flag if it uses `:latest` tag or no tag
-3. **GitOps configured**: Call `get_gitops` — check repo_url, branch, dockerfile_path are set
-4. **Database**: Check DATABASE_URL env var — flag if pointing to localhost, sqlite, or missing
-5. **Resource limits**: Check resource_limits and resource_requests are set
-6. **Readiness probe**: Check readiness_probe is configured
+2. **GitOps configured**: Call `get_gitops` — check repo_url, branch, and dockerfile_path are set. If not configured, this deployment is managed manually rather than via GitOps and won't receive automatic updates on git push.
+3. **Last build status**: If GitOps is configured, check last_build_status — flag if "failed" or "building" is stuck
+4. **Database**: Check DATABASE_URL env var — flag if pointing to localhost, sqlite, or 127.0.0.1
+5. **Resource limits**: Check resource_limits and resource_requests are both set
+6. **Readiness probe**: Check readiness_probe is configured — required for zero-downtime rollouts
 7. **Ingress**: Call `list_ingresses` in namespace "{ns}" — check an ingress exists for this service
-8. **Application label**: Check deckwatch.io/application label exists on the deployment
-9. **Pod health**: Call `list_pods` in namespace "{ns}" — check all pods are Running/Ready with zero restarts
-10. **Image pull**: Verify no ImagePullBackOff or ErrImagePull on any pod
+8. **Pod health**: Call `list_pods` in namespace "{ns}" — check all pods are Running/Ready with zero restarts
+9. **Image pull errors**: Verify no ImagePullBackOff or ErrImagePull on any pod
+10. **OOMKilled**: Check if any pod has been OOMKilled — indicates memory limits are too low
 
-Format the output as a checklist with a checkmark or X for each item, with details on what needs to be fixed for any failing checks."#,
+Format the output as a checklist with a checkmark or X for each item, with details on what needs to be fixed for failing checks."#,
             );
 
             success_response(
@@ -1650,5 +1654,5 @@ fn method_not_found(request: &JsonRpcRequest) -> JsonRpcResponse {
 }
 
 #[cfg(test)]
-#[path = "../handlers_mcp_tests.rs"]
+#[path = "mcp_tests.rs"]
 mod tests;

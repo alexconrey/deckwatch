@@ -251,5 +251,5 @@ fn extract_current_utilization(metrics: &[MetricStatus]) -> (Option<i32>, Option
 }
 
 #[cfg(test)]
-#[path = "../handlers_autoscaling_tests.rs"]
+#[path = "autoscaling_tests.rs"]
 mod handlers_autoscaling_tests;

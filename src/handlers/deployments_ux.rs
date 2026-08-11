@@ -936,5 +936,5 @@ pub async fn set_auto_rollback(
 // `kube_ext::deployment_detail`) — no separate GET endpoint is needed.
 
 #[cfg(test)]
-#[path = "../handlers_deployments_ux_tests.rs"]
+#[path = "deployments_ux_tests.rs"]
 mod handlers_deployments_ux_tests;

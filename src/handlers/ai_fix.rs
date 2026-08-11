@@ -499,5 +499,5 @@ fn make_short_name(prefix: &str, agent: &str, source: &str, ts: i64) -> String {
 // ========================================================================
 
 #[cfg(test)]
-#[path = "../handlers_ai_fix_tests.rs"]
+#[path = "ai_fix_tests.rs"]
 mod handlers_ai_fix_tests;

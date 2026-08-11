@@ -894,5 +894,5 @@ async fn list_ingresses_for_service(
 }
 
 #[cfg(test)]
-#[path = "../handlers_addons_tests.rs"]
+#[path = "addons_tests.rs"]
 mod handlers_addons_tests;

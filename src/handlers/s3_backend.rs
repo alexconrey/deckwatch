@@ -620,5 +620,5 @@ fn strip_prefix(child: &OPath, base: &OPath) -> Option<String> {
 // collapse into `Arc<dyn StorageBackend>` and the match disappears.
 
 #[cfg(test)]
-#[path = "../handlers_s3_backend_tests.rs"]
+#[path = "s3_backend_tests.rs"]
 mod handlers_s3_backend_tests;

@@ -368,5 +368,5 @@ async fn ensure_service(
 }
 
 #[cfg(test)]
-#[path = "../handlers_ingresses_tests.rs"]
+#[path = "ingresses_tests.rs"]
 mod tests;

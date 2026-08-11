@@ -776,5 +776,5 @@ pub async fn list_job_pods(
 }
 
 #[cfg(test)]
-#[path = "../handlers_gitops_tests.rs"]
+#[path = "gitops_tests.rs"]
 mod tests;
