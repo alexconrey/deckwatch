@@ -512,6 +512,38 @@ fn deckwatch_tool_definitions() -> Vec<serde_json::Value> {
             }
         }),
         serde_json::json!({
+            "name": "update_plugin_config",
+            "description": "Update configuration fields of a named plugin without replacing the entire plugin definition. All fields are optional — only supplied fields are applied. Triggers a background WASM refetch when config changes.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string", "description": "Plugin name as configured in settings" },
+                    "config": {
+                        "type": "object",
+                        "description": "Static key-value pairs injected into the plugin's extism config (credentials, endpoints, etc.). Merges with existing config — use null values to remove keys.",
+                        "additionalProperties": { "type": "string" }
+                    },
+                    "inherit_env_keys": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "Env var names to read from the deckwatch pod environment and inject into plugin config at invocation time. Replaces the existing list."
+                    },
+                    "inherit_env_file_keys": {
+                        "type": "object",
+                        "description": "Map of config_key → env_var_holding_file_path. Deckwatch reads each file and injects its content as the config key. Used for workload identity tokens (e.g. IRSA). Replaces the existing map.",
+                        "additionalProperties": { "type": "string" }
+                    },
+                    "allowed_hosts": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "Hosts the plugin can reach via extism's HTTP host function. Supports globs. Replaces the existing list."
+                    }
+                },
+                "required": ["name"],
+                "additionalProperties": false
+            }
+        }),
+        serde_json::json!({
             "name": "validate_plugin",
             "description": "Validate a plugin before adding it to settings. Fetches the WASM binary from the given source, confirms it loads and exports an `apply` function, then dry-runs it with a configurable test context and reports exactly what env vars, sidecars, and Kubernetes resources it would inject. Does not modify any state.",
             "inputSchema": {
@@ -604,6 +636,7 @@ async fn handle_tool_call(state: &AppState, request: &JsonRpcRequest) -> JsonRpc
         "list_plugins" => Some(tool_list_plugins(state).await),
         "enable_plugin" => Some(tool_enable_plugin(state, args).await),
         "disable_plugin" => Some(tool_disable_plugin(state, args).await),
+        "update_plugin_config" => Some(tool_update_plugin_config(state, args).await),
         "validate_plugin" => Some(tool_validate_plugin(state, args).await),
         _ => None,
     };
@@ -1415,6 +1448,89 @@ async fn tool_disable_plugin(state: &AppState, args: &serde_json::Value) -> Resu
         "status": "disabled and unloaded from memory"
     })
     .to_string())
+}
+
+async fn tool_update_plugin_config(
+    state: &AppState,
+    args: &serde_json::Value,
+) -> Result<String, String> {
+    let name = args["name"].as_str().ok_or("name is required")?;
+
+    let mut s = settings::load_settings_from_db(state).await;
+    let cfg = s
+        .plugins
+        .iter_mut()
+        .find(|p| p.name == name)
+        .ok_or_else(|| format!("plugin '{name}' not found in settings"))?;
+
+    let mut changed = false;
+
+    if let Some(config_val) = args.get("config").filter(|v| !v.is_null()) {
+        let updates: std::collections::BTreeMap<String, String> =
+            serde_json::from_value(config_val.clone())
+                .map_err(|e| format!("invalid config: {e}"))?;
+        cfg.config.extend(updates);
+        changed = true;
+    }
+
+    if let Some(keys_val) = args.get("inherit_env_keys").filter(|v| !v.is_null()) {
+        cfg.inherit_env_keys = serde_json::from_value(keys_val.clone())
+            .map_err(|e| format!("invalid inherit_env_keys: {e}"))?;
+        changed = true;
+    }
+
+    if let Some(file_keys_val) = args.get("inherit_env_file_keys").filter(|v| !v.is_null()) {
+        cfg.inherit_env_file_keys = serde_json::from_value(file_keys_val.clone())
+            .map_err(|e| format!("invalid inherit_env_file_keys: {e}"))?;
+        changed = true;
+    }
+
+    if let Some(hosts_val) = args.get("allowed_hosts").filter(|v| !v.is_null()) {
+        cfg.allowed_hosts = serde_json::from_value(hosts_val.clone())
+            .map_err(|e| format!("invalid allowed_hosts: {e}"))?;
+        changed = true;
+    }
+
+    if !changed {
+        return Ok(format!(
+            "plugin '{name}' — no fields supplied, nothing changed"
+        ));
+    }
+
+    settings::upsert_settings_to_db_pub(&state.db, &s)
+        .await
+        .map_err(|e| format!("failed to save settings: {e}"))?;
+
+    // Reload the plugin with updated config in the background.
+    if s.plugins.iter().any(|p| p.name == name && p.enabled) {
+        let state_clone = state.clone();
+        let plugins_cfg = s.plugins.clone();
+        tokio::spawn(async move {
+            let git_token_secrets = settings::load_settings_from_db(&state_clone)
+                .await
+                .git_token_secrets;
+            let snap = settings::DeckwatchSettings {
+                plugins: plugins_cfg,
+                git_token_secrets,
+                ..Default::default()
+            };
+            let loaded = crate::plugins::fetch_plugins(&snap, &state_clone).await;
+            tracing::info!(count = loaded.len(), "plugins reloaded after config update");
+            *state_clone.plugins.write().await = loaded;
+        });
+    }
+
+    let updated = s.plugins.iter().find(|p| p.name == name).unwrap();
+    serde_json::to_string_pretty(&serde_json::json!({
+        "name": updated.name,
+        "enabled": updated.enabled,
+        "config_keys": updated.config.keys().collect::<Vec<_>>(),
+        "inherit_env_keys": updated.inherit_env_keys,
+        "inherit_env_file_keys": updated.inherit_env_file_keys,
+        "allowed_hosts": updated.allowed_hosts,
+        "status": "updated — plugin reloading in background"
+    }))
+    .map_err(|e| e.to_string())
 }
 
 async fn tool_validate_plugin(
