@@ -1442,6 +1442,10 @@ async fn tool_validate_plugin(
             .get("inherit_env_keys")
             .and_then(|v| serde_json::from_value(v.clone()).ok())
             .unwrap_or_default(),
+        inherit_env_file_keys: args
+            .get("inherit_env_file_keys")
+            .and_then(|v| serde_json::from_value(v.clone()).ok())
+            .unwrap_or_default(),
     };
 
     let test_ctx = crate::plugins::PluginContext {

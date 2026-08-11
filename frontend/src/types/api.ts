@@ -666,6 +666,10 @@ export interface PluginConfig {
    *  Use for credentials that are already mounted as pod env vars (e.g. from a
    *  Kubernetes Secret) so they don't need to be stored in settings. */
   inherit_env_keys: string[];
+  /** Map of config_key → env_var_holding_file_path. Deckwatch reads the file
+   *  and injects its content as the config key. Cloud-agnostic: the plugin
+   *  decides what to do with the content (e.g. STS token exchange). */
+  inherit_env_file_keys: Record<string, string>;
 }
 
 export interface DeckwatchSettings {

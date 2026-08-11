@@ -952,6 +952,7 @@ function addPlugin() {
     allowed_hosts: [],
     config: {},
     inherit_env_keys: [],
+    inherit_env_file_keys: {},
   });
 }
 
@@ -2880,6 +2881,58 @@ onMounted(load);
               class="mb-3"
               placeholder="e.g. AWS_ACCESS_KEY_ID — add and press Enter"
             />
+
+            <!-- Inherit env file keys -->
+            <div class="text-caption text-medium-emphasis mb-2 mt-3">
+              <strong>Inherit file contents</strong> — reads the contents of files whose paths
+              are in env vars, injecting them as plugin config keys. Used for workload identity
+              tokens (e.g. IRSA). The plugin handles what to do with the content.
+            </div>
+            <v-row
+              v-for="(envVar, configKey) in plugin.inherit_env_file_keys"
+              :key="configKey"
+              dense
+              class="mb-1"
+            >
+              <v-col cols="5">
+                <v-text-field
+                  :model-value="configKey"
+                  label="Config key"
+                  placeholder="AWS_IDENTITY_TOKEN"
+                  density="compact"
+                  variant="outlined"
+                  hide-details
+                  @update:model-value="(newKey: string) => {
+                    const val = plugin.inherit_env_file_keys[configKey];
+                    delete plugin.inherit_env_file_keys[configKey];
+                    plugin.inherit_env_file_keys[newKey] = val;
+                  }"
+                />
+              </v-col>
+              <v-col cols="6">
+                <v-text-field
+                  v-model="plugin.inherit_env_file_keys[configKey]"
+                  label="Env var holding file path"
+                  placeholder="AWS_WEB_IDENTITY_TOKEN_FILE"
+                  density="compact"
+                  variant="outlined"
+                  hide-details
+                />
+              </v-col>
+              <v-col cols="1" class="d-flex align-center justify-center">
+                <v-btn icon="mdi-close" variant="text" size="x-small"
+                  @click="delete plugin.inherit_env_file_keys[configKey]" />
+              </v-col>
+            </v-row>
+            <v-btn
+              variant="text"
+              size="small"
+              prepend-icon="mdi-plus"
+              class="mb-3"
+              @click="plugin.inherit_env_file_keys[''] = ''"
+            >
+              Add file key
+            </v-btn>
 
             <!-- Config key-value pairs -->
             <div class="text-caption text-medium-emphasis mb-2">
