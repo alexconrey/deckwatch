@@ -445,5 +445,5 @@ async fn load_git_token(state: &AppState, ns: &str, dep: &Deployment) -> String 
 }
 
 #[cfg(test)]
-#[path = "../handlers_webhooks_tests.rs"]
+#[path = "webhooks_tests.rs"]
 mod handlers_webhooks_tests;

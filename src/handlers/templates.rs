@@ -315,5 +315,5 @@ fn templates_equal(a: &DeploymentTemplate, b: &DeploymentTemplate) -> bool {
 }
 
 #[cfg(test)]
-#[path = "../handlers_templates_tests.rs"]
+#[path = "templates_tests.rs"]
 mod handlers_templates_tests;

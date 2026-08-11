@@ -490,5 +490,5 @@ mod tests {
 }
 
 #[cfg(test)]
-#[path = "../handlers_admission_tests.rs"]
+#[path = "admission_tests.rs"]
 mod handlers_admission_tests;

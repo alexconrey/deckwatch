@@ -1276,5 +1276,5 @@ fn build_node_affinity(input: NodeAffinityInput) -> Option<Affinity> {
 }
 
 #[cfg(test)]
-#[path = "../handlers_deployments_tests.rs"]
+#[path = "deployments_tests.rs"]
 mod handlers_deployments_tests;

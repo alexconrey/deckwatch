@@ -1650,5 +1650,5 @@ fn method_not_found(request: &JsonRpcRequest) -> JsonRpcResponse {
 }
 
 #[cfg(test)]
-#[path = "../handlers_mcp_tests.rs"]
+#[path = "mcp_tests.rs"]
 mod tests;

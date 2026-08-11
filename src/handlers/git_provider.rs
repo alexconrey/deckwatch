@@ -665,5 +665,5 @@ impl GitProvider for GenericGit {
 // --------------------------------------------------------------------- tests
 
 #[cfg(test)]
-#[path = "../handlers_git_provider_tests.rs"]
+#[path = "git_provider_tests.rs"]
 mod tests;

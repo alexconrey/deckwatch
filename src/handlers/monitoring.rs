@@ -439,5 +439,5 @@ pub async fn probe_podmonitor_crd(client: &kube::Client) -> Result<(), String> {
 }
 
 #[cfg(test)]
-#[path = "../handlers_monitoring_tests.rs"]
+#[path = "monitoring_tests.rs"]
 mod handlers_monitoring_tests;

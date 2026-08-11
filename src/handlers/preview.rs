@@ -623,5 +623,5 @@ mod tests {
 }
 
 #[cfg(test)]
-#[path = "../handlers_preview_tests.rs"]
+#[path = "preview_tests.rs"]
 mod handlers_preview_tests;
