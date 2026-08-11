@@ -33,6 +33,10 @@ Deckwatch supports external plugins — compiled WASM binaries hosted in Git rep
 | Sidecar injection | Shipped | |
 | Kubernetes resource creation | Shipped | CRDs, ExternalSecrets, CronJobs, etc. via server-side apply |
 | ServiceAccount binding | Shipped (SDK v0.3.0) | Plugin declares `service_account_name`; deckwatch sets it on the pod template |
+| Plugin dependency resolution | Shipped (SDK v0.4.0) | `metadata()` export, `provides`/`depends_on`, topological sort, output threading |
+| Plugin networking (`allowed_hosts`) | Shipped | Controls which URLs the plugin can reach via extism HTTP host function |
+| Plugin config injection (`config` + `inherit_env_keys`) | Shipped | Static config map + live env var passthrough for rotated credentials |
+| MCP resource-scoped hints | Shipped | Per-group org guidance injected into tool descriptions at `tools/list` time |
 | ServiceAccount management UI | Planned | Create/manage ServiceAccounts from the deckwatch UI, not just via plugins |
 | deckwatch UI for plugin management | Shipped | Settings → Plugins |
 
@@ -96,7 +100,22 @@ Plugins are configured as part of `DeckwatchSettings`, stored in the deckwatch d
       },
 
       // Optional. Name of a git_token_secrets entry for private repos.
-      "token_secret": "my-github-pat"
+      "token_secret": "my-github-pat",
+
+      // Optional. Hosts the plugin can reach via extism's HTTP host function.
+      // Supports glob patterns. Empty = deny all outbound HTTP from the plugin.
+      "allowed_hosts": ["*.amazonaws.com"],
+
+      // Optional. Key-value config injected into the plugin's extism namespace.
+      // The plugin reads these via extism_pdk::config::get("KEY").
+      // Use for static credentials, endpoints, or plugin-specific settings.
+      "config": { "AWS_REGION": "us-east-1" },
+
+      // Optional. Environment variable names to read from the deckwatch process
+      // environment and inject into the plugin config at invocation time.
+      // These OVERRIDE same-named "config" entries so live/rotated credentials
+      // (e.g. from a Kubernetes Secret mounted as env vars) always win.
+      "inherit_env_keys": ["AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN"]
     }
   ]
 }

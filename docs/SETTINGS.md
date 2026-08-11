@@ -29,6 +29,7 @@ The Settings page renders a sidebar tree with the following sections:
 | **Git Repositories** | `git_repositories` | Managed list of Git repos for GitOps dropdowns |
 | **Container Registries** | `container_registries` | Managed list of OCI registries for GitOps dropdowns |
 | **Plugins** | `plugins` | External WASM plugins loaded from Git repositories |
+| **MCP Tuning** | `mcp_tuning` | Resource-scoped org guidance injected into MCP tool descriptions |
 | **Audit Log** | `audit` | Read-only view of the `audit_log` table |
 
 ## Schema
@@ -127,3 +128,59 @@ kubectl create configmap deckwatch-config -n deckwatch \
   --from-literal=settings='{"allowed_namespaces":[]}'
 ```
 
+
+## Plugin `inherit_env_keys`
+
+Plugins read credentials via `extism_pdk::config::get()`. For credentials that
+are already mounted as pod environment variables (e.g. from a Kubernetes Secret
+or IRSA), you can avoid storing them in settings by listing their names in
+`inherit_env_keys`. Deckwatch reads those keys from the deckwatch process
+environment at each plugin invocation and injects them — overriding any
+same-named entry in the static `config` map so live/rotated values always win.
+
+```jsonc
+{
+  "plugins": [{
+    "name": "aws",
+    "inherit_env_keys": [
+      "AWS_ACCESS_KEY_ID",
+      "AWS_SECRET_ACCESS_KEY",
+      "AWS_SESSION_TOKEN",
+      "AWS_REGION"
+    ]
+  }]
+}
+```
+
+## MCP Tuning
+
+Org-specific guidance injected into MCP tool descriptions at `tools/list` time.
+Each hint is appended only to tools in its resource group — namespace guidance
+only appears when Claude is working with namespaces, deployment guidance only
+when working with deployments. Keeps instructions contextual without flooding
+every interaction.
+
+| Field | Tools affected |
+|---|---|
+| `global` | All tools (via `initialize` response `instructions` field) |
+| `namespaces` | `create_namespace`, `list_namespaces`, `create_application`, etc. |
+| `deployments` | `create_deployment`, `update_deployment`, `scale_deployment`, etc. |
+| `applications` | `create_application`, `attach_addon`, `detach_addon`, `list_templates` |
+| `gitops` | `set_gitops`, `trigger_build`, `list_builds`, `get_build_log`, etc. |
+| `ingresses` | `create_ingress`, `update_ingress`, `list_ingresses`, etc. |
+| `pods` | `list_pods`, `get_pod_logs`, `exec_pod`, `evict_pod`, etc. |
+| `secrets` | `list_secrets`, `get_secret`, `create_secret`, etc. |
+| `nodes` | `list_nodes`, `cordon_node`, `uncordon_node`, `drain_node` |
+| `storage` | `list_pvcs`, `create_pvc`, `list_storageclasses`, etc. |
+| `plugins` | `list_plugins`, `enable_plugin`, `disable_plugin`, `validate_plugin` |
+
+Example — enforcing team-based namespaces:
+
+```jsonc
+{
+  "mcp_tuning": {
+    "namespaces": "This org uses team-based namespaces (team-platform, team-rad, team-avionics). When creating applications, always ask which team owns this work and use their existing namespace. Never create per-application namespaces.",
+    "deployments": "All deployments must have resource requests and limits set. Readiness probes are required for production workloads."
+  }
+}
+```
