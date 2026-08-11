@@ -892,6 +892,7 @@ function addPlugin() {
     token_secret: null,
     allowed_hosts: [],
     config: {},
+    inherit_env_keys: [],
   });
 }
 
@@ -2799,6 +2800,26 @@ onMounted(load);
               hide-details
               class="mb-3"
               placeholder="Add a host and press Enter"
+            />
+
+            <!-- Inherit env keys -->
+            <div class="text-caption text-medium-emphasis mb-2">
+              <strong>Inherit env vars</strong> — environment variable names to read from the
+              deckwatch pod at invocation time and pass to the plugin. Use this for credentials
+              already mounted as pod env vars (e.g. via a Kubernetes Secret) so they don't
+              need to be stored in settings. These override same-named keys in the config map above.
+            </div>
+            <v-combobox
+              v-model="plugin.inherit_env_keys"
+              label="Inherit env var names"
+              density="compact"
+              variant="outlined"
+              multiple
+              chips
+              closable-chips
+              hide-details
+              class="mb-3"
+              placeholder="e.g. AWS_ACCESS_KEY_ID — add and press Enter"
             />
 
             <!-- Config key-value pairs -->
