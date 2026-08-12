@@ -396,8 +396,12 @@ pub async fn create(
     };
 
     // Apply plugins: inject env vars and sidecars before the kube API call;
-    // collect kubernetes_resources to apply after the deployment is committed.
-    let plugin_k8s_resources: Vec<serde_json::Value> = {
+    // collect kubernetes_resources and wanted service accounts to apply after
+    // the deployment is committed.
+    let (plugin_k8s_resources, plugin_wanted_sas): (
+        Vec<serde_json::Value>,
+        Vec<crate::plugins::WantsServiceAccount>,
+    ) = {
         let plugins = state.plugins.read().await;
         if !plugins.is_empty() {
             let ctx = crate::plugins::PluginContext {
@@ -429,13 +433,13 @@ pub async fn create(
                 if let Some(pod_spec) = spec.template.spec.as_mut() {
                     crate::plugins::apply_plugins(&plugins, &ctx, pod_spec, dep_annotations)
                 } else {
-                    vec![]
+                    (vec![], vec![])
                 }
             } else {
-                vec![]
+                (vec![], vec![])
             }
         } else {
-            vec![]
+            (vec![], vec![])
         }
     };
 
@@ -445,12 +449,19 @@ pub async fn create(
     let created = created?;
 
     // Apply plugin-declared kubernetes resources (CRDs, ExternalSecrets, etc.)
-    // after the deployment is committed. Best-effort: failures are logged but
-    // do not roll back the deployment.
-    if !plugin_k8s_resources.is_empty() {
+    // and wanted service accounts after the deployment is committed.
+    // Best-effort: failures are logged but do not roll back the deployment.
+    if !plugin_k8s_resources.is_empty() || !plugin_wanted_sas.is_empty() {
         let kube_client = state.kube_client.clone();
+        let ns_clone = ns.clone();
         tokio::spawn(async move {
             crate::plugins::apply_kubernetes_resources(&plugin_k8s_resources, &kube_client).await;
+            crate::plugins::apply_wanted_service_accounts(
+                &plugin_wanted_sas,
+                &ns_clone,
+                &kube_client,
+            )
+            .await;
         });
     }
     let detail = deployment_detail(&created);
@@ -603,9 +614,12 @@ pub async fn update(
         }
     }
 
-    // Apply plugins after user edits; collect kubernetes_resources to apply
-    // after the deployment replace is committed.
-    let plugin_k8s_resources: Vec<serde_json::Value> = {
+    // Apply plugins after user edits; collect kubernetes_resources and
+    // wanted service accounts to apply after the deployment replace is committed.
+    let (plugin_k8s_resources, plugin_wanted_sas): (
+        Vec<serde_json::Value>,
+        Vec<crate::plugins::WantsServiceAccount>,
+    ) = {
         let plugins = state.plugins.read().await;
         if !plugins.is_empty() {
             let ctx = crate::plugins::PluginContext {
@@ -634,13 +648,13 @@ pub async fn update(
                 if let Some(pod_spec) = spec.template.spec.as_mut() {
                     crate::plugins::apply_plugins(&plugins, &ctx, pod_spec, dep_annotations)
                 } else {
-                    vec![]
+                    (vec![], vec![])
                 }
             } else {
-                vec![]
+                (vec![], vec![])
             }
         } else {
-            vec![]
+            (vec![], vec![])
         }
     };
 
@@ -649,10 +663,17 @@ pub async fn update(
     t.finish(updated.is_ok());
     let updated = updated?;
 
-    if !plugin_k8s_resources.is_empty() {
+    if !plugin_k8s_resources.is_empty() || !plugin_wanted_sas.is_empty() {
         let kube_client = state.kube_client.clone();
+        let ns_clone = ns.clone();
         tokio::spawn(async move {
             crate::plugins::apply_kubernetes_resources(&plugin_k8s_resources, &kube_client).await;
+            crate::plugins::apply_wanted_service_accounts(
+                &plugin_wanted_sas,
+                &ns_clone,
+                &kube_client,
+            )
+            .await;
         });
     }
 

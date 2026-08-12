@@ -7,6 +7,7 @@ import { usePolling } from "@/composables/usePolling";
 import { cronjobsApi } from "@/api/cronjobs";
 import { secretsApi } from "@/api/secrets";
 import { configmapsApi } from "@/api/configmaps";
+import { serviceaccountsApi } from "@/api/serviceaccounts";
 import { settingsApi } from "@/api/settings";
 import { ApiError } from "@/api/client";
 import { patchArray } from "@/utils/deepPatch";
@@ -18,6 +19,7 @@ import type {
   SecretDetail,
   ConfigMapSummary,
   ConfigMapDetail,
+  ServiceAccountSummary,
 } from "@/types/api";
 import StatusChip from "@/components/common/StatusChip.vue";
 import ReplicaGauge from "@/components/views/deployment/ReplicaGauge.vue";
@@ -62,12 +64,18 @@ function costForDeployment(d: DeploymentSummary): string {
 
 const search = ref("");
 
-type TabKey = "deployments" | "cronjobs" | "secrets" | "configmaps";
+type TabKey = "deployments" | "cronjobs" | "secrets" | "configmaps" | "serviceaccounts";
 // Initial tab honors ?tab= query so /deployments?tab=secrets (used by the
 // removed /secrets route redirect) opens directly on the Secrets pane.
 const initialTab = ((): TabKey => {
   const q = router.currentRoute.value.query.tab;
-  if (q === "cronjobs" || q === "secrets" || q === "configmaps") return q;
+  if (
+    q === "cronjobs" ||
+    q === "secrets" ||
+    q === "configmaps" ||
+    q === "serviceaccounts"
+  )
+    return q;
   return "deployments";
 })();
 const tab = ref<TabKey>(initialTab);
@@ -107,6 +115,17 @@ const cmName = ref("");
 const cmEntries = ref<{ key: string; value: string }[]>([
   { key: "", value: "" },
 ]);
+
+// --- ServiceAccounts state ---
+const serviceaccounts = ref<ServiceAccountSummary[]>([]);
+const serviceaccountsLoading = ref(false);
+const serviceaccountsError = ref<string | null>(null);
+
+const showCreateSa = ref(false);
+const saDialogSubmitting = ref(false);
+const saDialogError = ref<string | null>(null);
+const saName = ref("");
+const saIrsaRoleArn = ref("");
 
 // RFC 1123 label
 const namePattern = /^[a-z0-9]([-a-z0-9]{0,251}[a-z0-9])?$/;
@@ -226,6 +245,13 @@ const cmHeaders = [
   { title: "", key: "actions", width: "180px", sortable: false },
 ];
 
+const saHeaders = [
+  { title: "Name", key: "name" },
+  { title: "IRSA Role ARN", key: "irsa_role_arn" },
+  { title: "Age", key: "created_at", width: "120px" },
+  { title: "", key: "actions", width: "80px", sortable: false },
+];
+
 const fetchCronjobs = async (namespace: string) => {
   if (!namespace) return;
   cronjobsLoading.value = true;
@@ -287,6 +313,27 @@ const fetchConfigMaps = async (namespace: string) => {
   }
 };
 
+const fetchServiceAccounts = async (namespace: string) => {
+  if (!namespace) return;
+  serviceaccountsLoading.value = true;
+  serviceaccountsError.value = null;
+  try {
+    const res = await serviceaccountsApi.list(namespace);
+    if (serviceaccounts.value.length === 0) {
+      serviceaccounts.value = res.service_accounts;
+    } else {
+      patchArray(serviceaccounts.value, res.service_accounts);
+    }
+  } catch (e) {
+    serviceaccountsError.value =
+      e instanceof ApiError ? e.body.message
+        : e instanceof Error ? e.message
+          : "Failed to fetch service accounts";
+  } finally {
+    serviceaccountsLoading.value = false;
+  }
+};
+
 const refresh = async () => {
   if (!ns.selected) return;
   await Promise.all([
@@ -294,6 +341,7 @@ const refresh = async () => {
     fetchCronjobs(ns.selected),
     fetchSecrets(ns.selected),
     fetchConfigMaps(ns.selected),
+    fetchServiceAccounts(ns.selected),
   ]);
 };
 

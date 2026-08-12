@@ -16,7 +16,7 @@ use sea_orm::entity::prelude::*;
 use sea_orm::ActiveModelTrait;
 use sea_orm::ActiveValue::Set;
 
-use crate::entities::application_plugins;
+use crate::entities::application_plugin_resources;
 use crate::entities::builds;
 use crate::entities::gitops_configs;
 use crate::kube_ext::deployment_phase;
@@ -57,34 +57,27 @@ pub fn get_oci_repository(dep: &Deployment) -> Option<&str> {
 
 pub async fn run_poller(state: AppState) {
     let mut interval = tokio::time::interval(std::time::Duration::from_secs(10));
-    let mut plugin_interval = tokio::time::interval(std::time::Duration::from_secs(30));
     let http_client = reqwest::Client::new();
 
     loop {
-        tokio::select! {
-            _ = interval.tick() => {
-                let cycle_start = Instant::now();
+        interval.tick().await;
 
-                if let Err(e) = poll_cycle(&state, &http_client).await {
-                    tracing::error!(error = %e, "watcher poll cycle failed");
-                }
+        let cycle_start = Instant::now();
 
-                if let Err(e) = monitor_builds(&state, &http_client).await {
-                    tracing::error!(error = %e, "watcher build monitor failed");
-                }
-
-                // Update resource gauges (best-effort; errors are logged, not fatal).
-                update_resource_gauges(&state).await;
-
-                metrics::record_gitops_poll_duration(cycle_start.elapsed().as_secs_f64());
-            }
-            _ = plugin_interval.tick() => {
-                // Reconcile plugin associations for all managed applications.
-                if let Err(e) = reconcile_application_plugins(&state).await {
-                    tracing::error!(error = %e, "plugin reconciler failed");
-                }
-            }
+        if let Err(e) = poll_cycle(&state, &http_client).await {
+            tracing::error!(error = %e, "watcher poll cycle failed");
         }
+
+        if let Err(e) = monitor_builds(&state, &http_client).await {
+            tracing::error!(error = %e, "watcher build monitor failed");
+        }
+
+        reconcile_application_plugins(&state).await;
+
+        // Update resource gauges (best-effort; errors are logged, not fatal).
+        update_resource_gauges(&state).await;
+
+        metrics::record_gitops_poll_duration(cycle_start.elapsed().as_secs_f64());
     }
 }
 
@@ -1427,6 +1420,180 @@ async fn update_build_status(
     }
 }
 
+async fn reconcile_application_plugins(state: &AppState) {
+    let rows = match application_plugin_resources::Entity::find()
+        .all(&state.db)
+        .await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::warn!(error = %e, "reconcile_application_plugins: failed to query db");
+            return;
+        }
+    };
+
+    if rows.is_empty() {
+        return;
+    }
+
+    let mut app_state: HashMap<String, HashMap<String, String>> = HashMap::new();
+    for row in rows {
+        let state_map: HashMap<String, String> =
+            serde_json::from_str(&row.state).unwrap_or_default();
+        let entry = app_state.entry(row.application_id).or_default();
+        entry.extend(state_map);
+    }
+
+    for (app_id, env_map) in &app_state {
+        if env_map.is_empty() {
+            continue;
+        }
+
+        let (ns, app_name) = match app_id.split_once('/') {
+            Some(pair) => pair,
+            None => continue,
+        };
+
+        if !state.is_namespace_allowed(ns) {
+            continue;
+        }
+
+        let env_vars: Vec<EnvVar> = env_map
+            .iter()
+            .map(|(k, v)| EnvVar {
+                name: k.clone(),
+                value: Some(v.clone()),
+                ..Default::default()
+            })
+            .collect();
+
+        let label_selector = format!("deckwatch.io/application={app_name}");
+        let pp = PatchParams::apply("deckwatch-plugin-resources").force();
+
+        let dep_api: Api<Deployment> = Api::namespaced(state.kube_client.clone(), ns);
+        let lp = ListParams::default().labels(&label_selector);
+        match dep_api.list(&lp).await {
+            Ok(deps) => {
+                for dep in deps.items {
+                    let dep_name = match dep.metadata.name.as_deref() {
+                        Some(n) => n.to_string(),
+                        None => continue,
+                    };
+
+                    let patch = serde_json::json!({
+                        "apiVersion": "apps/v1",
+                        "kind": "Deployment",
+                        "metadata": {
+                            "name": dep_name,
+                            "namespace": ns,
+                        },
+                        "spec": {
+                            "template": {
+                                "spec": {
+                                    "containers": [{
+                                        "name": dep.spec.as_ref()
+                                            .and_then(|s| s.template.spec.as_ref())
+                                            .and_then(|ps| ps.containers.first())
+                                            .map(|c| c.name.clone())
+                                            .unwrap_or_default(),
+                                        "env": env_vars.iter().map(|e| serde_json::json!({
+                                            "name": e.name,
+                                            "value": e.value.as_deref().unwrap_or(""),
+                                        })).collect::<Vec<_>>(),
+                                    }]
+                                }
+                            }
+                        }
+                    });
+
+                    if let Err(e) = dep_api.patch(&dep_name, &pp, &Patch::Apply(&patch)).await {
+                        tracing::warn!(
+                            namespace = %ns,
+                            deployment = %dep_name,
+                            error = %e,
+                            "reconcile_application_plugins: failed to patch deployment"
+                        );
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::warn!(namespace = %ns, error = %e, "reconcile_application_plugins: failed to list deployments");
+            }
+        }
+
+        let cj_api = match state.cronjobs_api(ns) {
+            Ok(a) => a,
+            Err(e) => {
+                tracing::warn!(namespace = %ns, error = %e, "reconcile_application_plugins: failed to get cronjobs api");
+                continue;
+            }
+        };
+
+        match cj_api.list(&lp).await {
+            Ok(cjs) => {
+                use k8s_openapi::api::batch::v1::CronJob;
+                for cj in cjs.items {
+                    let cj_name = match cj.metadata.name.as_deref() {
+                        Some(n) => n.to_string(),
+                        None => continue,
+                    };
+
+                    let container_name = cj
+                        .spec
+                        .as_ref()
+                        .and_then(|s| s.job_template.spec.as_ref())
+                        .and_then(|js| js.template.spec.as_ref())
+                        .and_then(|ps| ps.containers.first())
+                        .map(|c| c.name.clone())
+                        .unwrap_or_default();
+
+                    let patch = serde_json::json!({
+                        "apiVersion": "batch/v1",
+                        "kind": "CronJob",
+                        "metadata": {
+                            "name": cj_name,
+                            "namespace": ns,
+                        },
+                        "spec": {
+                            "jobTemplate": {
+                                "spec": {
+                                    "template": {
+                                        "spec": {
+                                            "containers": [{
+                                                "name": container_name,
+                                                "env": env_vars.iter().map(|e| serde_json::json!({
+                                                    "name": e.name,
+                                                    "value": e.value.as_deref().unwrap_or(""),
+                                                })).collect::<Vec<_>>(),
+                                            }]
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    });
+
+                    let cj_typed_api: Api<CronJob> = Api::namespaced(state.kube_client.clone(), ns);
+                    if let Err(e) = cj_typed_api
+                        .patch(&cj_name, &pp, &Patch::Apply(&patch))
+                        .await
+                    {
+                        tracing::warn!(
+                            namespace = %ns,
+                            cronjob = %cj_name,
+                            error = %e,
+                            "reconcile_application_plugins: failed to patch cronjob"
+                        );
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::warn!(namespace = %ns, error = %e, "reconcile_application_plugins: failed to list cronjobs");
+            }
+        }
+    }
+}
+
 /// Refresh all resource-count gauges. Runs once per poll cycle.
 ///
 /// For deployments we break down by (namespace, status) so Prometheus can
@@ -1507,179 +1674,6 @@ async fn update_resource_gauges(state: &AppState) {
             }
         }
     }
-}
-
-/// Reconcile plugin associations for all managed applications.
-///
-/// For every `application_plugins` row, finds deployments belonging to the
-/// application (via `deckwatch.io/application=<name>` label selector) and
-/// re-runs the associated plugins against them. Uses server-side apply so
-/// deckwatch field ownership is properly tracked.
-///
-/// This is the controller pattern: plugin execution becomes source-agnostic —
-/// changes via kubectl, ArgoCD, or mcp-k8s are all picked up on the next
-/// 30-second tick.
-pub async fn reconcile_application_plugins(state: &AppState) -> anyhow::Result<()> {
-    use sea_orm::EntityTrait;
-
-    // Load all application<->plugin associations from DB.
-    let assocs = application_plugins::Entity::find().all(&state.db).await?;
-
-    if assocs.is_empty() {
-        return Ok(());
-    }
-
-    // Snapshot the currently loaded plugins to avoid holding the lock during
-    // potentially-slow K8s API calls.
-    let loaded_plugins: Vec<crate::plugins::LoadedPlugin> = { state.plugins.read().await.clone() };
-
-    if loaded_plugins.is_empty() {
-        return Ok(());
-    }
-
-    // Group associations by application_id.
-    let mut by_app: std::collections::HashMap<String, Vec<String>> =
-        std::collections::HashMap::new();
-    for assoc in &assocs {
-        by_app
-            .entry(assoc.application_id.clone())
-            .or_default()
-            .push(assoc.plugin_name.clone());
-    }
-
-    for (app_id, plugin_names) in &by_app {
-        // Parse application_id as "{ns}/{name}".
-        let Some((ns, app_name)) = app_id.split_once('/') else {
-            continue;
-        };
-
-        if !state.is_namespace_allowed(ns) {
-            continue;
-        }
-
-        // Resolve the set of plugins to run for this application.
-        let plugins_for_app: Vec<crate::plugins::LoadedPlugin> = loaded_plugins
-            .iter()
-            .filter(|p| plugin_names.contains(&p.name))
-            .cloned()
-            .collect();
-
-        if plugins_for_app.is_empty() {
-            continue;
-        }
-
-        // List all deployments that belong to this application
-        // (label selector: deckwatch.io/application=<app_name>).
-        let dep_api = match state.deployments_api(ns) {
-            Ok(a) => a,
-            Err(e) => {
-                tracing::warn!(
-                    app_id,
-                    error = %e,
-                    "plugin reconciler: failed to get deployments API"
-                );
-                continue;
-            }
-        };
-
-        let lp = kube::api::ListParams::default()
-            .labels(&format!("deckwatch.io/application={app_name}"));
-        let deps = match dep_api.list(&lp).await {
-            Ok(d) => d,
-            Err(e) => {
-                tracing::warn!(
-                    app_id,
-                    error = %e,
-                    "plugin reconciler: failed to list deployments"
-                );
-                continue;
-            }
-        };
-
-        for dep in deps.iter() {
-            let dep_name = match dep.metadata.name.as_deref() {
-                Some(n) => n,
-                None => continue,
-            };
-
-            let annotations: std::collections::HashMap<String, String> = dep
-                .metadata
-                .annotations
-                .clone()
-                .unwrap_or_default()
-                .into_iter()
-                .collect();
-            let labels: std::collections::HashMap<String, String> = dep
-                .metadata
-                .labels
-                .clone()
-                .unwrap_or_default()
-                .into_iter()
-                .collect();
-
-            let ctx = crate::plugins::PluginContext {
-                namespace: ns.to_string(),
-                deployment_name: dep_name.to_string(),
-                annotations,
-                labels,
-                plugin_outputs: std::collections::HashMap::new(),
-            };
-
-            // Clone pod spec from the live deployment to mutate.
-            let mut pod_spec = match dep.spec.as_ref().and_then(|s| s.template.spec.clone()) {
-                Some(ps) => ps,
-                None => continue,
-            };
-
-            let mut dep_annotations: std::collections::BTreeMap<String, String> =
-                dep.metadata.annotations.clone().unwrap_or_default();
-
-            let k8s_resources = crate::plugins::apply_plugins(
-                &plugins_for_app,
-                &ctx,
-                &mut pod_spec,
-                &mut dep_annotations,
-            );
-
-            // Patch the deployment with annotation and pod spec changes using
-            // server-side apply for correct field ownership tracking.
-            let patch = serde_json::json!({
-                "apiVersion": "apps/v1",
-                "kind": "Deployment",
-                "metadata": {
-                    "name": dep_name,
-                    "namespace": ns,
-                    "annotations": dep_annotations,
-                },
-                "spec": {
-                    "template": {
-                        "spec": pod_spec,
-                    }
-                }
-            });
-
-            let pp = kube::api::PatchParams::apply("deckwatch-plugin").force();
-            if let Err(e) = dep_api
-                .patch(dep_name, &pp, &kube::api::Patch::Apply(&patch))
-                .await
-            {
-                tracing::warn!(
-                    app_id,
-                    deployment = dep_name,
-                    error = %e,
-                    "plugin reconciler: failed to patch deployment"
-                );
-            }
-
-            // Apply any Kubernetes resources emitted by plugins.
-            if !k8s_resources.is_empty() {
-                crate::plugins::apply_kubernetes_resources(&k8s_resources, &state.kube_client)
-                    .await;
-            }
-        }
-    }
-
-    Ok(())
 }
 
 #[cfg(test)]

@@ -691,6 +691,7 @@ export interface DeckwatchSettings {
   ingress_templates?: IngressTemplate[];
   plugins?: PluginConfig[];
   mcp_tuning?: McpTuning;
+  marketplace_url?: string;
 }
 
 export interface McpTuning {
@@ -886,6 +887,36 @@ export interface CreateConfigMapRequest {
   data: Record<string, string>;
 }
 
+// --- ServiceAccounts ---
+
+export interface ServiceAccountSummary {
+  name: string;
+  namespace: string;
+  /** Populated when the IRSA annotation `eks.amazonaws.com/role-arn` is set. */
+  irsa_role_arn: string | null;
+  created_at: string | null;
+  labels: Record<string, string>;
+}
+
+export interface ServiceAccountDetail extends ServiceAccountSummary {
+  annotations: Record<string, string>;
+}
+
+export interface ServiceAccountListResponse {
+  service_accounts: ServiceAccountSummary[];
+}
+
+export interface CreateServiceAccountRequest {
+  name: string;
+  annotations?: Record<string, string>;
+  labels?: Record<string, string>;
+}
+
+export interface PatchServiceAccountRequest {
+  annotations?: Record<string, string>;
+  labels?: Record<string, string>;
+}
+
 // --- Job Pods ---
 
 export interface JobPodSummary {
@@ -981,6 +1012,7 @@ export interface PluginSummary {
   provides: string[];
   depends_on: string[];
   config_schema: ConfigField[];
+  resources: PluginResource[];
   wasm_size_bytes: number;
 }
 
@@ -991,4 +1023,54 @@ export interface ApplicationPluginEntry {
   created_at: string;
   /** Whether the plugin is currently loaded in deckwatch. */
   is_loaded: boolean;
+}
+
+// --- Marketplace types ---
+
+export type MarketplaceTrustLevel = 'verified' | 'community';
+
+export interface MarketplaceEntry {
+  name: string;
+  slug: string;
+  description: string;
+  author: string;
+  homepage: string;
+  trust_level: MarketplaceTrustLevel;
+  tags: string[];
+  latest_version: string;
+  source: PluginSource;
+  allowed_hosts_hint: string[];
+}
+
+export interface MarketplaceCatalog {
+  version: number;
+  updated_at: string;
+  plugins: MarketplaceEntry[];
+}
+
+// --- Plugin-declared provisioned resources ---
+
+export interface PluginResource {
+  id: string;
+  label: string;
+  icon: string;
+  description: string;
+  singleton: boolean;
+  fields: ConfigField[];
+  output_keys: string[];
+}
+
+export interface ProvisionedResource {
+  id: string;
+  application_id: string;
+  plugin_name: string;
+  resource_id: string;
+  fields: Record<string, string>;
+  state: Record<string, string>;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ProvisionRequest {
+  fields: Record<string, string>;
 }

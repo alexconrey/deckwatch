@@ -11,11 +11,11 @@ use crate::audit;
 use crate::auth::{self, AuthConfig};
 use crate::handlers::registry::RegistryStore;
 use crate::handlers::{
-    addons, admission, ai_fix, applications, autoscaling, configmaps_ui, cronjobs, deployments,
-    deployments_ux, diagnostics, docs, events, exec, git, gitops, health, ingressclasses,
-    ingresses, license, logs, mcp, monitoring, namespaces, nodes, plugins, pods, portforward,
-    prometheus_query, promote, registry, registry_ui, resource_metrics, secrets, settings,
-    storageclasses, templates, tracing_handler, webhooks,
+    addons, admission, ai_fix, application_resources, applications, autoscaling, configmaps_ui,
+    cronjobs, deployments, deployments_ux, diagnostics, docs, events, exec, git, gitops, health,
+    ingressclasses, ingresses, license, logs, mcp, monitoring, namespaces, nodes, pods,
+    portforward, prometheus_query, promote, registry, registry_ui, resource_metrics, secrets,
+    serviceaccounts, settings, storageclasses, templates, tracing_handler, webhooks,
 };
 use crate::metrics;
 use crate::state::AppState;
@@ -230,6 +230,15 @@ pub fn build_router(
             "/api/namespaces/{ns}/applications/{name}/members/{kind}/{resource_name}",
             axum::routing::delete(applications::remove_member),
         )
+        // Plugin-declared provisioned resources
+        .route(
+            "/api/namespaces/{ns}/applications/{name}/resources",
+            get(application_resources::list),
+        )
+        .route(
+            "/api/namespaces/{ns}/applications/{name}/resources/{plugin}/{resource_id}",
+            post(application_resources::provision).delete(application_resources::deprovision),
+        )
         .route("/api/git/branches", get(git::list_branches))
         .route("/api/namespaces/{ns}/events", get(events::list_namespaced))
         .route("/api/events", get(events::list_cluster))
@@ -260,6 +269,16 @@ pub fn build_router(
             get(configmaps_ui::get)
                 .put(configmaps_ui::update)
                 .delete(configmaps_ui::delete),
+        )
+        .route(
+            "/api/namespaces/{ns}/serviceaccounts",
+            get(serviceaccounts::list).post(serviceaccounts::create),
+        )
+        .route(
+            "/api/namespaces/{ns}/serviceaccounts/{name}",
+            get(serviceaccounts::get)
+                .patch(serviceaccounts::patch)
+                .delete(serviceaccounts::delete),
         )
         // Job pods (for build logs)
         .route(
@@ -348,25 +367,6 @@ pub fn build_router(
         )
         // Audit log
         .route("/api/audit", get(audit::list_audit_logs))
-        // Plugin API
-        .route("/api/plugins", get(plugins::list_plugins))
-        .route(
-            "/api/plugins/{name}/schema",
-            get(plugins::get_plugin_schema),
-        )
-        .route(
-            "/api/plugins/{name}/config",
-            post(plugins::save_plugin_config),
-        )
-        // Application plugin associations
-        .route(
-            "/api/namespaces/{ns}/applications/{name}/plugins",
-            get(applications::list_plugins_for_app),
-        )
-        .route(
-            "/api/namespaces/{ns}/applications/{name}/plugins/{plugin}",
-            post(applications::add_plugin).delete(applications::remove_plugin),
-        )
         .with_state(state)
         .layer(auth_layer.clone());
 
