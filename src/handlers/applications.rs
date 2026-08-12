@@ -16,6 +16,7 @@ use sea_orm::ActiveValue::Set;
 use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter};
 use serde::{Deserialize, Serialize};
 
+use crate::entities::application_plugins;
 use crate::entities::applications;
 use crate::error::AppError;
 use crate::kube_ext::{
@@ -193,6 +194,14 @@ pub async fn get(
         .as_deref()
         .and_then(|s| serde_json::from_str(s).ok());
 
+    // Load plugin associations for this application.
+    let plugin_rows = application_plugins::Entity::find()
+        .filter(application_plugins::Column::ApplicationId.eq(&app_id))
+        .all(&state.db)
+        .await
+        .unwrap_or_default();
+    let plugins: Vec<String> = plugin_rows.into_iter().map(|r| r.plugin_name).collect();
+
     Ok(Json(ApplicationDetail {
         name: row.name,
         namespace: ns,
@@ -203,6 +212,7 @@ pub async fn get(
         deployments,
         cronjobs,
         health,
+        plugins,
     }))
 }
 
@@ -711,6 +721,149 @@ fn build_resources(
             ..Default::default()
         })
     }
+}
+
+// ============================================================
+// Application plugin association handlers
+// ============================================================
+
+/// Summary of an application<->plugin association.
+#[derive(Serialize)]
+pub struct ApplicationPluginEntry {
+    pub plugin_name: String,
+    pub created_at: String,
+    /// Whether the plugin is currently loaded (vs configured but fetch failed).
+    pub is_loaded: bool,
+}
+
+/// POST /api/namespaces/{ns}/applications/{name}/plugins/{plugin}
+///
+/// Associate a plugin with an application. Idempotent — inserting a duplicate
+/// association is silently ignored via the unique index.
+pub async fn add_plugin(
+    State(state): State<AppState>,
+    Path((ns, name, plugin_name)): Path<(String, String, String)>,
+) -> Result<StatusCode, AppError> {
+    let app_id = format!("{ns}/{name}");
+
+    // Verify application exists.
+    let _app = applications::Entity::find_by_id(&app_id)
+        .one(&state.db)
+        .await
+        .map_err(|e| AppError::BadRequest(format!("database error: {e}")))?
+        .ok_or_else(|| AppError::NotFound(format!("application '{name}' not found")))?;
+
+    // Verify plugin is loaded.
+    {
+        let plugins = state.plugins.read().await;
+        if !plugins.iter().any(|p| p.name == plugin_name) {
+            return Err(AppError::NotFound(format!(
+                "plugin '{plugin_name}' not loaded — check Settings > Plugins"
+            )));
+        }
+    }
+
+    let model = application_plugins::ActiveModel {
+        id: Set(uuid::Uuid::new_v4().to_string()),
+        application_id: Set(app_id.clone()),
+        plugin_name: Set(plugin_name.clone()),
+        created_at: Set(now_utc()),
+    };
+
+    // Insert; if the unique index fires, treat as a no-op (already associated).
+    use sea_orm::sea_query::OnConflict;
+    let _ = application_plugins::Entity::insert(model)
+        .on_conflict(
+            OnConflict::columns([
+                application_plugins::Column::ApplicationId,
+                application_plugins::Column::PluginName,
+            ])
+            .do_nothing()
+            .to_owned(),
+        )
+        .exec(&state.db)
+        .await
+        .map_err(|e| AppError::BadRequest(format!("database error: {e}")))?;
+
+    crate::audit::log_action(
+        &state.db,
+        "create",
+        "application-plugin",
+        &plugin_name,
+        &ns,
+        &format!("associated plugin '{plugin_name}' with application '{name}'"),
+    )
+    .await
+    .ok();
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// DELETE /api/namespaces/{ns}/applications/{name}/plugins/{plugin}
+///
+/// Remove a plugin association from an application.
+pub async fn remove_plugin(
+    State(state): State<AppState>,
+    Path((ns, name, plugin_name)): Path<(String, String, String)>,
+) -> Result<StatusCode, AppError> {
+    let app_id = format!("{ns}/{name}");
+
+    let deleted = application_plugins::Entity::delete_many()
+        .filter(application_plugins::Column::ApplicationId.eq(&app_id))
+        .filter(application_plugins::Column::PluginName.eq(&plugin_name))
+        .exec(&state.db)
+        .await
+        .map_err(|e| AppError::BadRequest(format!("database error: {e}")))?;
+
+    if deleted.rows_affected == 0 {
+        return Err(AppError::NotFound(format!(
+            "plugin '{plugin_name}' not associated with application '{name}'"
+        )));
+    }
+
+    crate::audit::log_action(
+        &state.db,
+        "delete",
+        "application-plugin",
+        &plugin_name,
+        &ns,
+        &format!("removed plugin '{plugin_name}' from application '{name}'"),
+    )
+    .await
+    .ok();
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// GET /api/namespaces/{ns}/applications/{name}/plugins
+///
+/// List all plugins associated with an application.
+pub async fn list_plugins_for_app(
+    State(state): State<AppState>,
+    Path((ns, name)): Path<(String, String)>,
+) -> Result<Json<Vec<ApplicationPluginEntry>>, AppError> {
+    let app_id = format!("{ns}/{name}");
+
+    let rows = application_plugins::Entity::find()
+        .filter(application_plugins::Column::ApplicationId.eq(&app_id))
+        .all(&state.db)
+        .await
+        .map_err(|e| AppError::BadRequest(format!("database error: {e}")))?;
+
+    let loaded = state.plugins.read().await;
+    let entries: Vec<ApplicationPluginEntry> = rows
+        .iter()
+        .map(|r| {
+            let is_loaded = loaded.iter().any(|p| p.name == r.plugin_name);
+            ApplicationPluginEntry {
+                plugin_name: r.plugin_name.clone(),
+                created_at: r.created_at.to_string(),
+                is_loaded,
+            }
+        })
+        .collect();
+
+    Ok(Json(entries))
 }
 
 #[cfg(test)]

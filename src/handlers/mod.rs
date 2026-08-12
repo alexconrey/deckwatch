@@ -23,6 +23,7 @@ pub mod mcp;
 pub mod monitoring;
 pub mod namespaces;
 pub mod nodes;
+pub mod plugins;
 pub mod pods;
 pub mod portforward;
 pub mod preview;

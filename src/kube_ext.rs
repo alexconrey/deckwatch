@@ -948,6 +948,10 @@ pub struct ApplicationDetail {
     pub deployments: Vec<DeploymentSummary>,
     pub cronjobs: Vec<CronJobSummary>,
     pub health: ApplicationHealth,
+    /// Plugins associated with this application. Each entry is a plugin name.
+    /// Empty if no plugins are associated or the feature is not yet used.
+    #[serde(default)]
+    pub plugins: Vec<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]

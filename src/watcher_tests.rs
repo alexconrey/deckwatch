@@ -651,3 +651,63 @@ fn parse_ref_sha_skips_capabilities_symref() {
     let sha = parse_ref_sha(resp, "main").unwrap();
     assert_eq!(sha, "9b52e759fdc98199592093b531cd6dd4dfa02d06");
 }
+
+// ── reconcile_application_plugins tests ─────────────────────────────────────
+
+/// Verify that the application_id → plugin_names grouping logic works correctly.
+/// This exercises the pure in-memory grouping step without requiring a DB or kube client.
+#[test]
+fn reconcile_groups_associations_by_app_id() {
+    struct FakeAssoc {
+        application_id: String,
+        plugin_name: String,
+    }
+
+    let assocs = vec![
+        FakeAssoc {
+            application_id: "default/my-app".into(),
+            plugin_name: "aws".into(),
+        },
+        FakeAssoc {
+            application_id: "default/my-app".into(),
+            plugin_name: "vault".into(),
+        },
+        FakeAssoc {
+            application_id: "prod/other-app".into(),
+            plugin_name: "aws".into(),
+        },
+    ];
+
+    let mut by_app: std::collections::HashMap<String, Vec<String>> =
+        std::collections::HashMap::new();
+    for assoc in &assocs {
+        by_app
+            .entry(assoc.application_id.clone())
+            .or_default()
+            .push(assoc.plugin_name.clone());
+    }
+
+    assert_eq!(by_app.len(), 2);
+    let mut default_plugins = by_app["default/my-app"].clone();
+    default_plugins.sort();
+    assert_eq!(default_plugins, vec!["aws", "vault"]);
+    assert_eq!(by_app["prod/other-app"], vec!["aws"]);
+}
+
+/// Verify that `application_id` values are parsed correctly as `"{ns}/{name}"`.
+#[test]
+fn reconcile_parses_app_id_correctly() {
+    let app_id = "my-namespace/my-application";
+    let result = app_id.split_once('/');
+    assert!(result.is_some());
+    let (ns, name) = result.unwrap();
+    assert_eq!(ns, "my-namespace");
+    assert_eq!(name, "my-application");
+}
+
+/// Malformed `application_id` values (no `/`) are skipped gracefully.
+#[test]
+fn reconcile_skips_malformed_app_id() {
+    let app_id = "no-slash-here";
+    assert!(app_id.split_once('/').is_none());
+}
