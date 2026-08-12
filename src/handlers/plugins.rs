@@ -4,13 +4,16 @@
 //! - `GET /api/plugins` — list all loaded plugins with metadata including `config_schema`
 //! - `GET /api/plugins/{name}/schema` — return `config_schema` for a named plugin
 //! - `POST /api/plugins/{name}/config` — save plugin config, encrypting `Secret`-typed fields
+//! - `POST /api/plugins/{name}/upload` — upload a WASM binary directly for local dev/testing
 
+use axum::body::Bytes;
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::Json;
 use serde::Serialize;
 
 use crate::error::AppError;
+use crate::handlers::settings::PluginSource;
 use crate::plugins::ConfigField;
 use crate::state::AppState;
 
@@ -133,6 +136,96 @@ pub async fn save_plugin_config(
     {
         tracing::warn!(error = %e, "failed to write audit log for plugin config update");
     }
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// POST /api/plugins/{name}/upload
+///
+/// Accepts a raw WASM binary (`Content-Type: application/octet-stream`) and
+/// stores it under `UPLOADS_DIR/{name}.wasm`. Switches the plugin source to
+/// `Upload` and triggers an immediate reload, so the new binary is live
+/// without a GitHub push or release workflow.
+///
+/// Intended for local development — build with `make build` then:
+/// ```sh
+/// curl -X POST http://localhost:8080/api/plugins/aws/upload \
+///      -H "Content-Type: application/octet-stream" \
+///      --data-binary @dist/plugin.wasm
+/// ```
+pub async fn upload_plugin_wasm(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+    body: Bytes,
+) -> Result<StatusCode, AppError> {
+    if body.is_empty() {
+        return Err(AppError::BadRequest("request body is empty".into()));
+    }
+    if !body.starts_with(b"\0asm") {
+        return Err(AppError::BadRequest(
+            "not a valid WASM binary (missing \\0asm magic bytes)".into(),
+        ));
+    }
+
+    // Ensure uploads directory exists.
+    let uploads_dir = std::path::Path::new(crate::plugins::UPLOADS_DIR);
+    tokio::fs::create_dir_all(uploads_dir)
+        .await
+        .map_err(|e| AppError::BadRequest(format!("failed to create uploads dir: {e}")))?;
+
+    let filename = format!("{name}.wasm");
+    let dest = uploads_dir.join(&filename);
+    tokio::fs::write(&dest, &body)
+        .await
+        .map_err(|e| AppError::BadRequest(format!("failed to write WASM: {e}")))?;
+
+    tracing::info!(plugin = %name, bytes = body.len(), path = %dest.display(), "WASM uploaded");
+
+    // Update plugin source to Upload and trigger reload.
+    let mut settings = crate::handlers::settings::load_settings_from_db(&state).await;
+    if let Some(plugin_cfg) = settings.plugins.iter_mut().find(|p| p.name == name) {
+        plugin_cfg.source = PluginSource::Upload {
+            filename: filename.clone(),
+        };
+    } else {
+        return Err(AppError::NotFound(format!(
+            "plugin '{name}' not found in settings — add it first then upload"
+        )));
+    }
+
+    crate::handlers::settings::upsert_settings_to_db_pub(&state.db, &settings)
+        .await
+        .map_err(|e| AppError::BadRequest(format!("failed to save settings: {e}")))?;
+
+    // Reload in background.
+    let state_clone = state.clone();
+    let name_clone = name.clone();
+    let plugin_snapshot = settings.plugins.iter().find(|p| p.name == name).cloned();
+    if let Some(cfg) = plugin_snapshot {
+        tokio::spawn(async move {
+            let s = crate::handlers::settings::DeckwatchSettings {
+                plugins: vec![cfg],
+                ..Default::default()
+            };
+            let loaded = crate::plugins::fetch_plugins(&s, &state_clone).await;
+            tracing::info!(plugin = %name_clone, count = loaded.len(), "plugin reload after upload");
+            *state_clone.plugins.write().await = loaded;
+        });
+    }
+
+    crate::audit::log_action(
+        &state.db,
+        "upload",
+        "plugin",
+        &name,
+        "",
+        &format!(
+            "uploaded WASM binary for plugin '{name}' ({} bytes)",
+            body.len()
+        ),
+    )
+    .await
+    .ok();
 
     Ok(StatusCode::NO_CONTENT)
 }
