@@ -1,7 +1,9 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from "vue";
+import { useRouter } from "vue-router";
 import { gitTokensApi } from "@/api/gitTokens";
 import { ingressclassesApi } from "@/api/ingressclasses";
+import { pluginsApi } from "@/api/plugins";
 import { settingsApi } from "@/api/settings";
 import { storageclassesApi } from "@/api/storageclasses";
 import { templatesApi } from "@/api/templates";
@@ -30,10 +32,13 @@ import type {
   OciRegistry,
   OciRegistryType,
   PluginConfig,
+  PluginSummary,
   ResourceDefaults,
   StorageClassSummary,
   TemplateCategory,
 } from "@/types/api";
+
+const router = useRouter();
 
 const NOTIFICATION_EVENTS: { value: NotificationEventType; title: string; hint: string }[] = [
   { value: "build_completed", title: "Build succeeded", hint: "Fires when a kaniko job promotes a new image" },
@@ -388,6 +393,9 @@ const ingressTemplates = ref<IngressTemplate[]>([]);
 const gitRepositories = ref<GitRepository[]>([]);
 
 const plugins = ref<PluginConfig[]>([]);
+// Loaded plugins from GET /api/plugins — drives the overview table in the plugins section.
+const loadedPlugins = ref<PluginSummary[]>([]);
+const loadedPluginsError = ref<string | null>(null);
 const mcpTuning = ref<McpTuning>({});
 
 const mcpTuningGroups = [
@@ -554,6 +562,14 @@ async function load() {
     error.value = e instanceof Error ? e.message : "Failed to load settings";
   } finally {
     loading.value = false;
+  }
+  // Fetch loaded plugins separately so a plugin-API failure doesn't block
+  // the critical settings load path.
+  try {
+    loadedPlugins.value = await pluginsApi.list();
+    loadedPluginsError.value = null;
+  } catch {
+    loadedPluginsError.value = "Could not load plugin list from deckwatch.";
   }
 }
 
@@ -2706,6 +2722,92 @@ onMounted(load);
               Add Plugin
             </v-btn>
           </div>
+
+          <!-- Loaded plugins overview -->
+          <h3 class="text-subtitle-1 mb-2">Loaded plugins</h3>
+          <p class="text-body-2 text-secondary mb-3">
+            Plugins currently loaded in deckwatch. "Configure" is shown when a plugin declares
+            configuration fields.
+          </p>
+
+          <v-alert
+            v-if="loadedPluginsError"
+            type="warning"
+            density="compact"
+            variant="tonal"
+            class="mb-3"
+          >
+            {{ loadedPluginsError }}
+          </v-alert>
+
+          <div
+            v-else-if="loadedPlugins.length === 0"
+            class="text-center py-4 text-secondary text-body-2 mb-4"
+          >
+            No plugins are currently loaded.
+          </div>
+
+          <v-table v-else density="comfortable" class="mb-6">
+            <thead>
+              <tr>
+                <th>Name</th>
+                <th>Version</th>
+                <th>Description</th>
+                <th>Status</th>
+                <th class="text-right">Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="lp in loadedPlugins" :key="lp.name">
+                <td>
+                  <div class="d-flex align-center ga-2">
+                    <v-icon icon="mdi-puzzle" size="small" color="primary" />
+                    <span class="font-weight-medium">{{ lp.name }}</span>
+                  </div>
+                </td>
+                <td>
+                  <span class="text-caption text-secondary">{{ lp.version || "—" }}</span>
+                </td>
+                <td>
+                  <span class="text-body-2">{{ lp.description || "—" }}</span>
+                </td>
+                <td>
+                  <v-chip
+                    :color="
+                      plugins.find((p) => p.name === lp.name)?.enabled !== false
+                        ? 'success'
+                        : 'warning'
+                    "
+                    size="x-small"
+                    variant="tonal"
+                  >
+                    {{
+                      plugins.find((p) => p.name === lp.name)?.enabled !== false
+                        ? "loaded"
+                        : "disabled"
+                    }}
+                  </v-chip>
+                </td>
+                <td class="text-right">
+                  <v-btn
+                    v-if="lp.config_schema.length > 0"
+                    size="small"
+                    variant="tonal"
+                    color="primary"
+                    prepend-icon="mdi-cog"
+                    @click="router.push({ name: 'plugin-settings', params: { name: lp.name } })"
+                  >
+                    Configure
+                  </v-btn>
+                  <span v-else class="text-caption text-secondary">No config fields</span>
+                </td>
+              </tr>
+            </tbody>
+          </v-table>
+
+          <v-divider class="mb-6" />
+
+          <div class="text-subtitle-1 mb-3">Plugin sources</div>
 
           <v-card
             v-for="(plugin, idx) in plugins"

@@ -3,6 +3,7 @@ import type {
   AddMemberRequest,
   ApplicationDetail,
   ApplicationListResponse,
+  ApplicationPluginEntry,
   CreateApplicationRequest,
   UpdateApplicationRequest,
 } from "@/types/api";
@@ -44,6 +45,28 @@ export const applicationsApi = {
   removeMember: (ns: string, name: string, kind: string, resource: string) =>
     apiFetch<ApplicationDetail>(
       `/namespaces/${ns}/applications/${name}/members/${kind}/${resource}`,
+      { method: "DELETE" },
+    ),
+
+  // --- Plugin association (Feature 2) ---
+
+  /** GET /api/namespaces/{ns}/applications/{name}/plugins */
+  listPlugins: (ns: string, name: string) =>
+    apiFetch<ApplicationPluginEntry[]>(
+      `/namespaces/${ns}/applications/${name}/plugins`,
+    ),
+
+  /** POST /api/namespaces/{ns}/applications/{name}/plugins/{plugin} */
+  addPlugin: (ns: string, name: string, plugin: string) =>
+    apiFetch<void>(
+      `/namespaces/${ns}/applications/${name}/plugins/${plugin}`,
+      { method: "POST" },
+    ),
+
+  /** DELETE /api/namespaces/{ns}/applications/{name}/plugins/{plugin} */
+  removePlugin: (ns: string, name: string, plugin: string) =>
+    apiFetch<void>(
+      `/namespaces/${ns}/applications/${name}/plugins/${plugin}`,
       { method: "DELETE" },
     ),
 };

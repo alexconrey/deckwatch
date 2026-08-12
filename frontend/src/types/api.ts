@@ -958,3 +958,37 @@ export interface DiagnosticHistoryResponse {
 export interface TemplatesUpdateRequest {
   templates: DeploymentTemplate[];
 }
+
+// --- Plugin schema types (Feature 1: self-describing plugin config) ---
+
+export type ConfigFieldType = 'string' | 'secret' | 'bool' | 'select';
+
+export interface ConfigField {
+  key: string;
+  label: string;
+  description: string;
+  field_type: ConfigFieldType;
+  default?: string | null;
+  required: boolean;
+  options: string[];
+  env_source?: string | null;
+}
+
+export interface PluginSummary {
+  name: string;
+  version: string;
+  description: string;
+  provides: string[];
+  depends_on: string[];
+  config_schema: ConfigField[];
+  wasm_size_bytes: number;
+}
+
+// --- Application plugin association types (Feature 2) ---
+
+export interface ApplicationPluginEntry {
+  plugin_name: string;
+  created_at: string;
+  /** Whether the plugin is currently loaded in deckwatch. */
+  is_loaded: boolean;
+}
