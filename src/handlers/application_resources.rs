@@ -56,6 +56,8 @@ pub struct ProvisionedResource {
     pub fields: serde_json::Value,
     /// Plugin-returned state (env var key-value pairs).
     pub state: serde_json::Value,
+    /// Deployment annotations stamped by the plugin.
+    pub annotations: serde_json::Value,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -65,6 +67,8 @@ fn row_to_response(row: application_plugin_resources::Model) -> ProvisionedResou
         serde_json::from_str(&row.fields).unwrap_or(serde_json::Value::Object(Default::default()));
     let state: serde_json::Value =
         serde_json::from_str(&row.state).unwrap_or(serde_json::Value::Object(Default::default()));
+    let annotations: serde_json::Value = serde_json::from_str(&row.annotations)
+        .unwrap_or(serde_json::Value::Object(Default::default()));
     ProvisionedResource {
         id: row.id,
         application_id: row.application_id,
@@ -72,6 +76,7 @@ fn row_to_response(row: application_plugin_resources::Model) -> ProvisionedResou
         resource_id: row.resource_id,
         fields,
         state,
+        annotations,
         created_at: row.created_at.to_string(),
         updated_at: row.updated_at.to_string(),
     }
@@ -156,6 +161,7 @@ pub async fn provision(
     // Drop the read lock before the async apply call.
     let kubernetes_resources = result.kubernetes_resources.clone();
     let state_map = result.state.clone();
+    let deployment_annotations = result.deployment_annotations.clone();
     drop(plugins);
 
     // Apply any Kubernetes resources emitted by the plugin.
@@ -168,6 +174,8 @@ pub async fn provision(
     let id = uuid::Uuid::new_v4().to_string();
     let fields_json = serde_json::to_string(&fields).unwrap_or_else(|_| "{}".to_string());
     let state_json = serde_json::to_string(&state_map).unwrap_or_else(|_| "{}".to_string());
+    let annotations_json =
+        serde_json::to_string(&deployment_annotations).unwrap_or_else(|_| "{}".to_string());
 
     let row = application_plugin_resources::ActiveModel {
         id: Set(id),
@@ -176,6 +184,7 @@ pub async fn provision(
         resource_id: Set(resource_id),
         fields: Set(fields_json),
         state: Set(state_json),
+        annotations: Set(annotations_json),
         created_at: Set(now),
         updated_at: Set(now),
     };

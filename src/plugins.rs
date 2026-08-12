@@ -245,6 +245,10 @@ pub struct ResourceProvisionRequest {
 pub struct ResourceProvisionResult {
     #[serde(default)]
     pub state: std::collections::HashMap<String, String>,
+    /// Annotations to stamp on all application deployments (e.g. `"deckwatch.io/aws-s3-bucket"`).
+    /// Old plugins without this field deserialize to an empty map.
+    #[serde(default)]
+    pub deployment_annotations: std::collections::HashMap<String, String>,
     #[serde(default)]
     pub kubernetes_resources: Vec<serde_json::Value>,
     #[serde(default)]
@@ -374,6 +378,7 @@ fn host_now_fn() -> Function {
             Ok(())
         },
     )
+    .with_namespace("extism:host/user")
 }
 
 /// Call the plugin's `metadata()` export and deserialize the result.
@@ -758,6 +763,18 @@ pub fn run_provision(
     }
     manifest.config.extend(plugin.config.clone());
 
+    // Inject the current timestamp so plugins can sign AWS requests without
+    // needing a system clock (unavailable in wasm32-unknown-unknown).
+    // Injected at call time so it is always fresh — plugins read it via
+    // extism_pdk::config::get("CURRENT_TIMESTAMP").
+    let now_ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    manifest
+        .config
+        .insert("CURRENT_TIMESTAMP".to_string(), now_ts.to_string());
+
     for key in &plugin.inherit_env_keys {
         if let Ok(val) = std::env::var(key) {
             manifest.config.insert(key.clone(), val);
@@ -834,6 +851,15 @@ fn run_plugin(plugin: &LoadedPlugin, ctx: &PluginContext) -> anyhow::Result<Plug
     // Cloud-specific values live here, not in deckwatch core.
     // Plugins read these via `extism_pdk::config::get("KEY")`.
     manifest.config.extend(plugin.config.clone());
+
+    // Fresh timestamp for AWS signing (same as run_plugin).
+    let now_ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    manifest
+        .config
+        .insert("CURRENT_TIMESTAMP".to_string(), now_ts.to_string());
 
     // Inject inherited env vars from the deckwatch process environment.
     // Applied after static config so live/rotated values override static entries.
