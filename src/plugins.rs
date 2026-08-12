@@ -54,6 +54,15 @@ pub struct PluginResult {
     /// Key-value data shared with downstream plugins via `ctx.plugin_outputs`.
     #[serde(default)]
     pub outputs: std::collections::HashMap<String, String>,
+
+    /// Errors the plugin wants surfaced in deckwatch's structured logs.
+    ///
+    /// Plugins populate this instead of calling `extism_pdk::log!()` — the
+    /// extism log pipe cannot be bridged into deckwatch's tracing subscriber
+    /// without a global callback conflict. Each entry is logged at ERROR level
+    /// after `apply()` returns; the deployment is not blocked.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub errors: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -660,6 +669,18 @@ fn run_plugin(plugin: &LoadedPlugin, ctx: &PluginContext) -> anyhow::Result<Plug
         e
     })?;
     let result: PluginResult = serde_json::from_str(output)?;
+
+    // Drain any errors the plugin reported via result.errors. These replace
+    // extism_pdk::log!() calls, which cannot reach deckwatch's tracing subscriber.
+    for err in &result.errors {
+        tracing::error!(
+            plugin = %plugin.name,
+            namespace = %ctx.namespace,
+            deployment = %ctx.deployment_name,
+            "plugin reported error: {err}"
+        );
+    }
+
     tracing::info!(
         plugin = %plugin.name,
         namespace = %ctx.namespace,
@@ -668,6 +689,7 @@ fn run_plugin(plugin: &LoadedPlugin, ctx: &PluginContext) -> anyhow::Result<Plug
         sidecars = result.sidecars.len(),
         k8s_resources = result.kubernetes_resources.len(),
         service_account = ?result.service_account_name,
+        errors = result.errors.len(),
         "plugin apply() completed"
     );
     Ok(result)

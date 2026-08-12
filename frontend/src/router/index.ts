@@ -92,6 +92,13 @@ const router = createRouter({
             import("@/components/pages/SettingsPage.vue"),
         },
         {
+          path: "settings/plugins/:name",
+          name: "plugin-settings",
+          component: () =>
+            import("@/components/pages/PluginSettingsPage.vue"),
+          props: true,
+        },
+        {
           path: "cluster",
           name: "ClusterOverview",
           component: () =>

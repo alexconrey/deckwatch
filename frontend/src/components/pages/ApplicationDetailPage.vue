@@ -1,14 +1,18 @@
 <script setup lang="ts">
-import { computed, ref, watch } from "vue";
+import { computed, onMounted, ref, watch } from "vue";
 import { useRouter } from "vue-router";
 import { applicationsApi } from "@/api/applications";
+import { pluginsApi } from "@/api/plugins";
 import { usePolling } from "@/composables/usePolling";
+import { useSnackbar } from "@/composables/useSnackbar";
 import { deepPatch } from "@/utils/deepPatch";
 import { usePodMetrics } from "@/composables/useResourceMetrics";
 import type {
   ApplicationDetail,
   ApplicationGitConfig,
+  ApplicationPluginEntry,
   DiagAgent,
+  PluginSummary,
   UpdateApplicationRequest,
 } from "@/types/api";
 import ApplicationHealthChip from "@/components/common/ApplicationHealthChip.vue";
@@ -265,6 +269,106 @@ const onFixWithAi = (agent: DiagAgent) => {
   // still gives the operator feedback that their intent was captured.
   fixNotice.value = { agent };
 };
+
+// --- Plugins tab ---
+
+const { success: pluginSuccess, error: pluginError } = useSnackbar();
+
+const activeTab = ref<"overview" | "plugins">("overview");
+
+// Associated plugins for this application.
+const appPlugins = ref<ApplicationPluginEntry[]>([]);
+const pluginsLoading = ref(false);
+const pluginsErrorMsg = ref<string | null>(null);
+
+// All loaded plugins (for the "Add Plugin" dropdown).
+const allLoadedPlugins = ref<PluginSummary[]>([]);
+
+// "Add Plugin" dialog state.
+const showAddPluginDialog = ref(false);
+const selectedPlugin = ref<string | null>(null);
+const addingPlugin = ref(false);
+
+// "Remove Plugin" state.
+const pluginToRemove = ref<string | null>(null);
+const removingPlugin = ref(false);
+
+async function fetchAppPlugins() {
+  pluginsLoading.value = true;
+  pluginsErrorMsg.value = null;
+  try {
+    appPlugins.value = await applicationsApi.listPlugins(
+      props.namespace,
+      props.name,
+    );
+  } catch (e) {
+    pluginsErrorMsg.value =
+      e instanceof Error ? e.message : "Failed to load plugin associations";
+  } finally {
+    pluginsLoading.value = false;
+  }
+}
+
+async function fetchAllPlugins() {
+  try {
+    allLoadedPlugins.value = await pluginsApi.list();
+  } catch {
+    // Non-critical; the dropdown will be empty.
+  }
+}
+
+async function openAddPluginDialog() {
+  showAddPluginDialog.value = true;
+  selectedPlugin.value = null;
+  await fetchAllPlugins();
+}
+
+async function confirmAddPlugin() {
+  if (!selectedPlugin.value) return;
+  addingPlugin.value = true;
+  try {
+    await applicationsApi.addPlugin(
+      props.namespace,
+      props.name,
+      selectedPlugin.value,
+    );
+    pluginSuccess(`Plugin "${selectedPlugin.value}" associated`);
+    showAddPluginDialog.value = false;
+    await fetchAppPlugins();
+  } catch (e) {
+    pluginError(e instanceof Error ? e.message : "Failed to add plugin");
+  } finally {
+    addingPlugin.value = false;
+  }
+}
+
+async function removePlugin(pluginName: string) {
+  pluginToRemove.value = pluginName;
+  removingPlugin.value = true;
+  try {
+    await applicationsApi.removePlugin(props.namespace, props.name, pluginName);
+    pluginSuccess(`Plugin "${pluginName}" removed`);
+    await fetchAppPlugins();
+  } catch (e) {
+    pluginError(e instanceof Error ? e.message : "Failed to remove plugin");
+  } finally {
+    removingPlugin.value = false;
+    pluginToRemove.value = null;
+  }
+}
+
+// Load app plugins when the Plugins tab is first activated.
+watch(activeTab, (tab) => {
+  if (tab === "plugins" && appPlugins.value.length === 0 && !pluginsLoading.value) {
+    void fetchAppPlugins();
+  }
+});
+
+onMounted(() => {
+  if (activeTab.value === "plugins") {
+    void fetchAppPlugins();
+  }
+});
 </script>
 
 <template>
@@ -338,7 +442,14 @@ const onFixWithAi = (agent: DiagAgent) => {
 
     <v-progress-linear v-if="loading" indeterminate color="primary" />
 
-    <template v-if="detail">
+    <!-- Tab bar (only when detail is loaded) -->
+    <v-tabs v-if="detail" v-model="activeTab" class="mb-4">
+      <v-tab value="overview" prepend-icon="mdi-view-dashboard-outline">Overview</v-tab>
+      <v-tab value="plugins" prepend-icon="mdi-puzzle">Plugins</v-tab>
+    </v-tabs>
+
+    <!-- Overview tab -->
+    <template v-if="detail && activeTab === 'overview'">
       <v-card class="mb-4">
         <v-card-title class="text-subtitle-1">Description</v-card-title>
         <v-card-text>
@@ -523,6 +634,136 @@ const onFixWithAi = (agent: DiagAgent) => {
           </template>
         </v-data-table>
       </v-card>
+    </template>
+
+    <!-- Plugins tab -->
+    <template v-if="detail && activeTab === 'plugins'">
+      <div class="d-flex align-center mb-4">
+        <h3 class="text-h6">Associated plugins</h3>
+        <v-spacer />
+        <v-btn
+          color="primary"
+          variant="tonal"
+          size="small"
+          prepend-icon="mdi-plus"
+          @click="openAddPluginDialog"
+        >
+          Add Plugin
+        </v-btn>
+      </div>
+
+      <v-alert
+        v-if="pluginsErrorMsg"
+        type="error"
+        variant="tonal"
+        density="compact"
+        class="mb-4"
+      >
+        {{ pluginsErrorMsg }}
+      </v-alert>
+
+      <v-progress-linear v-if="pluginsLoading" indeterminate color="primary" class="mb-4" />
+
+      <div
+        v-else-if="appPlugins.length === 0 && !pluginsErrorMsg"
+        class="text-center py-8 text-secondary text-body-2"
+      >
+        No plugins associated with this application. Click "Add Plugin" to associate one.
+      </div>
+
+      <v-card
+        v-for="ap in appPlugins"
+        :key="ap.plugin_name"
+        variant="outlined"
+        class="mb-3 pa-4"
+      >
+        <!-- Not-loaded warning -->
+        <v-alert
+          v-if="!ap.is_loaded"
+          type="warning"
+          density="compact"
+          variant="tonal"
+          class="mb-3"
+        >
+          This plugin is configured in the database but is not currently loaded.
+          Check <strong>Settings &rarr; Plugins</strong>.
+        </v-alert>
+
+        <div class="d-flex align-center ga-3">
+          <v-icon icon="mdi-puzzle" :color="ap.is_loaded ? 'primary' : 'warning'" />
+          <div class="flex-grow-1">
+            <div class="text-subtitle-2 font-weight-medium">{{ ap.plugin_name }}</div>
+            <div class="text-caption text-secondary">
+              Associated {{ ap.created_at ? new Date(ap.created_at).toLocaleDateString() : "—" }}
+            </div>
+          </div>
+          <v-chip
+            :color="ap.is_loaded ? 'success' : 'warning'"
+            size="x-small"
+            variant="tonal"
+          >
+            {{ ap.is_loaded ? "loaded" : "unavailable" }}
+          </v-chip>
+          <v-btn
+            size="small"
+            variant="tonal"
+            color="primary"
+            prepend-icon="mdi-cog"
+            :to="{ name: 'plugin-settings', params: { name: ap.plugin_name } }"
+          >
+            Configure
+          </v-btn>
+          <v-btn
+            icon="mdi-delete"
+            variant="text"
+            color="error"
+            size="small"
+            :loading="removingPlugin && pluginToRemove === ap.plugin_name"
+            @click="removePlugin(ap.plugin_name)"
+          />
+        </div>
+      </v-card>
+
+      <!-- Add Plugin dialog -->
+      <v-dialog v-model="showAddPluginDialog" max-width="480">
+        <v-card>
+          <v-card-title>Add Plugin</v-card-title>
+          <v-card-text>
+            <p class="text-body-2 mb-4">
+              Select a loaded plugin to associate with this application. The
+              plugin's <code>apply()</code> will be run on all member deployments
+              on the next reconcile cycle.
+            </p>
+            <v-select
+              v-model="selectedPlugin"
+              :items="allLoadedPlugins.map((p) => ({ title: p.name, value: p.name }))"
+              item-title="title"
+              item-value="value"
+              label="Plugin"
+              variant="outlined"
+              density="comfortable"
+              :no-data-text="
+                allLoadedPlugins.length === 0
+                  ? 'No plugins loaded — configure one in Settings → Plugins first'
+                  : 'No plugins available'
+              "
+            />
+          </v-card-text>
+          <v-card-actions>
+            <v-spacer />
+            <v-btn variant="text" @click="showAddPluginDialog = false">Cancel</v-btn>
+            <v-btn
+              color="primary"
+              variant="flat"
+              :loading="addingPlugin"
+              :disabled="!selectedPlugin"
+              @click="confirmAddPlugin"
+            >
+              Associate
+            </v-btn>
+          </v-card-actions>
+        </v-card>
+      </v-dialog>
     </template>
 
     <AddMemberDialog
