@@ -5,7 +5,7 @@ use k8s_openapi::api::apps::v1::Deployment;
 use k8s_openapi::api::autoscaling::v2::HorizontalPodAutoscaler;
 use k8s_openapi::api::batch::v1::{CronJob, Job};
 use k8s_openapi::api::core::v1::{
-    ConfigMap, Event, Namespace, Node, PersistentVolumeClaim, Pod, Secret, Service,
+    ConfigMap, Event, Namespace, Node, PersistentVolumeClaim, Pod, Secret, Service, ServiceAccount,
 };
 use k8s_openapi::api::networking::v1::{Ingress, IngressClass};
 use k8s_openapi::api::storage::v1::StorageClass;
@@ -98,6 +98,11 @@ impl AppState {
     }
 
     pub fn configmaps_api(&self, ns: &str) -> Result<Api<ConfigMap>, AppError> {
+        self.check_namespace(ns)?;
+        Ok(Api::namespaced(self.kube_client.clone(), ns))
+    }
+
+    pub fn serviceaccounts_api(&self, ns: &str) -> Result<Api<ServiceAccount>, AppError> {
         self.check_namespace(ns)?;
         Ok(Api::namespaced(self.kube_client.clone(), ns))
     }

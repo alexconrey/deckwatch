@@ -2,6 +2,7 @@
 import { computed, onMounted, ref, watch } from "vue";
 import { useRouter } from "vue-router";
 import { applicationsApi } from "@/api/applications";
+import { applicationResourcesApi } from "@/api/application_resources";
 import { pluginsApi } from "@/api/plugins";
 import { usePolling } from "@/composables/usePolling";
 import { useSnackbar } from "@/composables/useSnackbar";
@@ -12,7 +13,9 @@ import type {
   ApplicationGitConfig,
   ApplicationPluginEntry,
   DiagAgent,
+  PluginResource,
   PluginSummary,
+  ProvisionedResource,
   UpdateApplicationRequest,
 } from "@/types/api";
 import ApplicationHealthChip from "@/components/common/ApplicationHealthChip.vue";
@@ -274,7 +277,7 @@ const onFixWithAi = (agent: DiagAgent) => {
 
 const { success: pluginSuccess, error: pluginError } = useSnackbar();
 
-const activeTab = ref<"overview" | "plugins">("overview");
+const activeTab = ref<"overview" | "plugins" | "infrastructure">("overview");
 
 // Associated plugins for this application.
 const appPlugins = ref<ApplicationPluginEntry[]>([]);
@@ -369,6 +372,107 @@ onMounted(() => {
     void fetchAppPlugins();
   }
 });
+
+// --- Infrastructure tab (plugin-declared provisioned resources) ---
+
+const infraResources = ref<ProvisionedResource[]>([]);
+const infraLoading = ref(false);
+const infraError = ref<string | null>(null);
+
+const infraPlugins = computed<PluginSummary[]>(() =>
+  allLoadedPlugins.value.filter((p) => p.resources && p.resources.length > 0),
+);
+
+const infraProvisionedMap = computed<Map<string, ProvisionedResource>>(() => {
+  const m = new Map<string, ProvisionedResource>();
+  for (const r of infraResources.value) {
+    m.set(`${r.plugin_name}:${r.resource_id}`, r);
+  }
+  return m;
+});
+
+async function fetchInfraResources() {
+  infraLoading.value = true;
+  infraError.value = null;
+  try {
+    infraResources.value = await applicationResourcesApi.list(props.namespace, props.name);
+  } catch (e) {
+    infraError.value = e instanceof Error ? e.message : "Failed to load resources";
+  } finally {
+    infraLoading.value = false;
+  }
+}
+
+const showProvisionDialog = ref(false);
+const provisioningPlugin = ref<string>("");
+const provisioningResourceId = ref<string>("");
+const provisioningResource = ref<PluginResource | null>(null);
+const provisionFields = ref<Record<string, string>>({});
+const provisioning = ref(false);
+
+function openProvisionDialog(pluginName: string, resource: PluginResource) {
+  provisioningPlugin.value = pluginName;
+  provisioningResourceId.value = resource.id;
+  provisioningResource.value = resource;
+  const defaults: Record<string, string> = {};
+  for (const f of resource.fields) { defaults[f.key] = f.default ?? ""; }
+  provisionFields.value = defaults;
+  showProvisionDialog.value = true;
+}
+
+async function confirmProvision() {
+  provisioning.value = true;
+  try {
+    const newResource = await applicationResourcesApi.provision(
+      props.namespace, props.name, provisioningPlugin.value, provisioningResourceId.value,
+      { fields: provisionFields.value },
+    );
+    infraResources.value.push(newResource);
+    showProvisionDialog.value = false;
+    pluginSuccess(`${provisioningResource.value?.label ?? "Resource"} provisioned`);
+  } catch (e) {
+    pluginError(e instanceof Error ? e.message : "Provisioning failed");
+  } finally {
+    provisioning.value = false;
+  }
+}
+
+const showDeprovisionDialog = ref(false);
+const deprovisionTarget = ref<{ plugin: string; resource_id: string; label: string } | null>(null);
+const deprovisioning = ref(false);
+
+function openDeprovisionDialog(plugin: string, resource_id: string, label: string) {
+  deprovisionTarget.value = { plugin, resource_id, label };
+  showDeprovisionDialog.value = true;
+}
+
+async function confirmDeprovision() {
+  if (!deprovisionTarget.value) return;
+  deprovisioning.value = true;
+  try {
+    await applicationResourcesApi.deprovision(
+      props.namespace, props.name,
+      deprovisionTarget.value.plugin, deprovisionTarget.value.resource_id,
+    );
+    infraResources.value = infraResources.value.filter(
+      (r) => !(r.plugin_name === deprovisionTarget.value!.plugin && r.resource_id === deprovisionTarget.value!.resource_id),
+    );
+    pluginSuccess(`${deprovisionTarget.value.label} record removed`);
+    showDeprovisionDialog.value = false;
+  } catch (e) {
+    pluginError(e instanceof Error ? e.message : "Deprovision failed");
+  } finally {
+    deprovisioning.value = false;
+    deprovisionTarget.value = null;
+  }
+}
+
+watch(activeTab, async (tab) => {
+  if (tab === "infrastructure") {
+    if (infraResources.value.length === 0 && !infraLoading.value) await fetchInfraResources();
+    if (allLoadedPlugins.value.length === 0) await fetchAllPlugins();
+  }
+});
 </script>
 
 <template>
@@ -446,6 +550,7 @@ onMounted(() => {
     <v-tabs v-if="detail" v-model="activeTab" class="mb-4">
       <v-tab value="overview" prepend-icon="mdi-view-dashboard-outline">Overview</v-tab>
       <v-tab value="plugins" prepend-icon="mdi-puzzle">Plugins</v-tab>
+      <v-tab value="infrastructure" prepend-icon="mdi-server">Infrastructure</v-tab>
     </v-tabs>
 
     <!-- Overview tab -->
@@ -760,6 +865,122 @@ onMounted(() => {
               @click="confirmAddPlugin"
             >
               Associate
+            </v-btn>
+          </v-card-actions>
+        </v-card>
+      </v-dialog>
+    </template>
+
+    <!-- Infrastructure tab -->
+    <template v-if="detail && activeTab === 'infrastructure'">
+      <v-alert v-if="infraError" type="error" variant="tonal" density="compact" class="mb-4">
+        {{ infraError }}
+      </v-alert>
+      <v-progress-linear v-if="infraLoading" indeterminate color="primary" class="mb-4" />
+
+      <div v-if="infraPlugins.length === 0 && !infraLoading" class="text-center py-8 text-secondary text-body-2">
+        No plugins with provisionable resources are loaded. Configure a plugin in Settings &rarr; Plugins first.
+      </div>
+
+      <template v-for="plugin in infraPlugins" :key="plugin.name">
+        <v-card class="mb-4" variant="outlined">
+          <v-card-title class="d-flex align-center ga-2">
+            <v-icon icon="mdi-puzzle" color="primary" />
+            {{ plugin.name }}
+          </v-card-title>
+          <v-card-text>
+            <div
+              v-for="resource in plugin.resources"
+              :key="resource.id"
+              class="mb-3"
+            >
+              <div class="d-flex align-center ga-2 mb-2">
+                <v-icon :icon="resource.icon || 'mdi-cube-outline'" />
+                <span class="text-subtitle-2">{{ resource.label }}</span>
+                <v-chip v-if="resource.singleton" size="x-small" variant="tonal" color="secondary">singleton</v-chip>
+                <v-spacer />
+                <template v-if="infraProvisionedMap.has(`${plugin.name}:${resource.id}`)">
+                  <v-chip size="small" color="success" variant="tonal">provisioned</v-chip>
+                  <v-btn
+                    size="small"
+                    variant="tonal"
+                    color="error"
+                    @click="openDeprovisionDialog(plugin.name, resource.id, resource.label)"
+                  >
+                    Remove record
+                  </v-btn>
+                </template>
+                <template v-else>
+                  <v-btn
+                    size="small"
+                    color="primary"
+                    variant="tonal"
+                    @click="openProvisionDialog(plugin.name, resource)"
+                  >
+                    Provision
+                  </v-btn>
+                </template>
+              </div>
+              <div v-if="resource.description" class="text-caption text-secondary mb-1">{{ resource.description }}</div>
+              <template v-if="infraProvisionedMap.get(`${plugin.name}:${resource.id}`) as prov">
+                <v-table density="compact" class="mt-1">
+                  <tbody>
+                    <tr v-for="(val, key) in prov.state" :key="key">
+                      <td class="text-caption font-weight-medium" style="width:200px">{{ key }}</td>
+                      <td class="text-caption text-mono">{{ val }}</td>
+                    </tr>
+                  </tbody>
+                </v-table>
+              </template>
+            </div>
+          </v-card-text>
+        </v-card>
+      </template>
+
+      <!-- Provision dialog -->
+      <v-dialog v-model="showProvisionDialog" max-width="520">
+        <v-card>
+          <v-card-title>Provision {{ provisioningResource?.label }}</v-card-title>
+          <v-card-text>
+            <template v-for="field in provisioningResource?.fields ?? []" :key="field.key">
+              <v-text-field
+                v-model="provisionFields[field.key]"
+                :label="field.label"
+                :hint="field.description"
+                :required="field.required"
+                :type="field.field_type === 'secret' ? 'password' : 'text'"
+                variant="outlined"
+                density="compact"
+                class="mb-2"
+                persistent-hint
+              />
+            </template>
+          </v-card-text>
+          <v-card-actions>
+            <v-spacer />
+            <v-btn variant="text" @click="showProvisionDialog = false">Cancel</v-btn>
+            <v-btn color="primary" variant="flat" :loading="provisioning" @click="confirmProvision">
+              Provision
+            </v-btn>
+          </v-card-actions>
+        </v-card>
+      </v-dialog>
+
+      <!-- Deprovision dialog -->
+      <v-dialog v-model="showDeprovisionDialog" max-width="480">
+        <v-card>
+          <v-card-title>Remove resource record</v-card-title>
+          <v-card-text>
+            <p class="text-body-2">
+              Remove the <strong>{{ deprovisionTarget?.label }}</strong> record from this application?
+              The cloud resource itself will NOT be deleted and must be cleaned up manually.
+            </p>
+          </v-card-text>
+          <v-card-actions>
+            <v-spacer />
+            <v-btn variant="text" @click="showDeprovisionDialog = false">Cancel</v-btn>
+            <v-btn color="error" variant="flat" :loading="deprovisioning" @click="confirmDeprovision">
+              Remove record
             </v-btn>
           </v-card-actions>
         </v-card>

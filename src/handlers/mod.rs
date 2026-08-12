@@ -1,6 +1,7 @@
 pub mod addons;
 pub mod admission;
 pub mod ai_fix;
+pub mod application_resources;
 pub mod applications;
 pub mod autoscaling;
 pub mod configmaps_ui;
@@ -34,6 +35,7 @@ pub mod registry_ui;
 pub mod resource_metrics;
 pub mod s3_backend;
 pub mod secrets;
+pub mod serviceaccounts;
 pub mod settings;
 pub mod storageclasses;
 pub mod templates;

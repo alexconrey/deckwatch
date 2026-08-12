@@ -41,6 +41,23 @@ pub struct PluginContext {
         std::collections::HashMap<String, std::collections::HashMap<String, String>>,
 }
 
+/// Structured plugin output requesting SA creation/reconciliation.
+///
+/// When a plugin sets this field, deckwatch's own SA handler creates or patches
+/// the ServiceAccount (with retry on 409) instead of going through the generic
+/// `kubernetes_resources` path. This gives full visibility in the deckwatch UI
+/// and audit log, and avoids silent failures when the ClusterRole is missing.
+///
+/// Mirrors `deckwatch_plugin_sdk::WantsServiceAccount` — kept in sync manually.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WantsServiceAccount {
+    pub name: String,
+    /// IRSA role ARN for `eks.amazonaws.com/role-arn` annotation.
+    /// Empty string means no IRSA — a plain SA is created.
+    #[serde(default)]
+    pub irsa_role_arn: String,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct PluginResult {
     #[serde(default)]
@@ -51,6 +68,11 @@ pub struct PluginResult {
     pub kubernetes_resources: Vec<serde_json::Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub service_account_name: Option<String>,
+    /// Structured SA request — preferred over emitting a raw SA in
+    /// `kubernetes_resources`. Deckwatch handles create/patch with retry and
+    /// surfaces the result in the UI and audit log.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wants_service_account: Option<WantsServiceAccount>,
     /// Key-value data shared with downstream plugins via `ctx.plugin_outputs`.
     #[serde(default)]
     pub outputs: std::collections::HashMap<String, String>,
@@ -182,6 +204,50 @@ pub struct PluginMetadata {
     /// Old plugins that do not export this field deserialize to an empty Vec.
     #[serde(default)]
     pub config_schema: Vec<ConfigField>,
+    /// Infrastructure resources this plugin can provision.
+    /// Old plugins that do not export this field deserialize to an empty Vec.
+    #[serde(default)]
+    pub resources: Vec<PluginResource>,
+}
+
+/// A provisionable infrastructure resource declared by a plugin.
+/// Mirrors `deckwatch_plugin_sdk::PluginResource` — kept in sync manually.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct PluginResource {
+    pub id: String,
+    pub label: String,
+    #[serde(default)]
+    pub icon: String,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub singleton: bool,
+    #[serde(default)]
+    pub fields: Vec<ConfigField>,
+    #[serde(default)]
+    pub output_keys: Vec<String>,
+}
+
+/// Request sent to the plugin's `provision()` WASM export.
+/// Mirrors `deckwatch_plugin_sdk::ResourceProvisionRequest` — kept in sync manually.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ResourceProvisionRequest {
+    pub application_name: String,
+    pub namespace: String,
+    pub resource_id: String,
+    pub fields: std::collections::HashMap<String, String>,
+}
+
+/// Result returned from the plugin's `provision()` WASM export.
+/// Mirrors `deckwatch_plugin_sdk::ResourceProvisionResult` — kept in sync manually.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ResourceProvisionResult {
+    #[serde(default)]
+    pub state: std::collections::HashMap<String, String>,
+    #[serde(default)]
+    pub kubernetes_resources: Vec<serde_json::Value>,
+    #[serde(default)]
+    pub errors: Vec<String>,
 }
 
 /// A fetched plugin ready to execute. Stores raw WASM bytes and instantiates
@@ -487,9 +553,11 @@ pub fn sort_by_dependencies(plugins: &[LoadedPlugin]) -> Vec<&LoadedPlugin> {
 // ── Applying ─────────────────────────────────────────────────────────────────
 
 /// Run all loaded plugins against `ctx`, merging env vars and sidecars into
-/// `pod_spec`/`dep_annotations`. Returns the collected `kubernetes_resources`
-/// from all plugins so the caller can apply them asynchronously after the
-/// deployment is committed.
+/// `pod_spec`/`dep_annotations`. Returns a tuple of:
+/// - `Vec<serde_json::Value>` — raw Kubernetes resources emitted by plugins
+///   (applied via `apply_kubernetes_resources` after the deployment is committed)
+/// - `Vec<WantsServiceAccount>` — structured SA requests that should be
+///   handled via `apply_wanted_service_accounts` with create-or-patch retry
 ///
 /// Plugins are sorted by declared dependency before execution. Each plugin
 /// receives the accumulated `outputs` from all prior plugins in its context.
@@ -498,8 +566,9 @@ pub fn apply_plugins(
     ctx: &PluginContext,
     pod_spec: &mut k8s_openapi::api::core::v1::PodSpec,
     dep_annotations: &mut BTreeMap<String, String>,
-) -> Vec<serde_json::Value> {
+) -> (Vec<serde_json::Value>, Vec<WantsServiceAccount>) {
     let mut all_k8s_resources: Vec<serde_json::Value> = Vec::new();
+    let mut all_wanted_sas: Vec<WantsServiceAccount> = Vec::new();
     let mut accumulated_outputs: std::collections::HashMap<
         String,
         std::collections::HashMap<String, String>,
@@ -518,6 +587,16 @@ pub fn apply_plugins(
                 if let Some(sa) = result.service_account_name.clone() {
                     apply_service_account(plugin, sa, pod_spec, dep_annotations);
                 }
+                if let Some(wanted_sa) = result.wants_service_account.clone() {
+                    // Set the SA name on the pod spec so pods bind to it immediately.
+                    apply_service_account(
+                        plugin,
+                        wanted_sa.name.clone(),
+                        pod_spec,
+                        dep_annotations,
+                    );
+                    all_wanted_sas.push(wanted_sa);
+                }
                 // Record this plugin's outputs for subsequent plugins.
                 if !result.outputs.is_empty() {
                     accumulated_outputs.insert(plugin.name.clone(), result.outputs);
@@ -529,7 +608,27 @@ pub fn apply_plugins(
         }
     }
 
-    all_k8s_resources
+    (all_k8s_resources, all_wanted_sas)
+}
+
+/// Create or patch ServiceAccounts declared via `WantsServiceAccount` plugin
+/// output. Called after the deployment is committed; errors are logged but do
+/// not fail the request. Uses deckwatch's SA handler which provides retry
+/// semantics and full UI/audit-log visibility.
+pub async fn apply_wanted_service_accounts(
+    wanted: &[WantsServiceAccount],
+    namespace: &str,
+    kube_client: &kube::Client,
+) {
+    for sa in wanted {
+        crate::handlers::serviceaccounts::ensure_service_account(
+            kube_client,
+            namespace,
+            &sa.name,
+            &sa.irsa_role_arn,
+        )
+        .await;
+    }
 }
 
 /// Apply a list of Kubernetes resources collected from plugins via server-side
@@ -598,6 +697,82 @@ async fn apply_one_resource(
 
     tracing::info!(kind, name, namespace, "plugin resource applied");
     Ok(())
+}
+
+pub fn run_provision(
+    plugin: &LoadedPlugin,
+    req: &ResourceProvisionRequest,
+) -> anyhow::Result<ResourceProvisionResult> {
+    tracing::info!(
+        plugin = %plugin.name,
+        namespace = %req.namespace,
+        application = %req.application_name,
+        resource_id = %req.resource_id,
+        "calling plugin provision()"
+    );
+
+    let wasm = Wasm::data(plugin.wasm_bytes.clone());
+    let mut manifest = Manifest::new([wasm]);
+
+    if !plugin.allowed_hosts.is_empty() {
+        manifest.allowed_hosts = Some(plugin.allowed_hosts.clone());
+    }
+    manifest.config.extend(plugin.config.clone());
+
+    for key in &plugin.inherit_env_keys {
+        if let Ok(val) = std::env::var(key) {
+            manifest.config.insert(key.clone(), val);
+        }
+    }
+
+    for (config_key, env_var) in &plugin.inherit_env_file_keys {
+        if let Ok(path) = std::env::var(env_var) {
+            match std::fs::read_to_string(&path) {
+                Ok(content) => {
+                    manifest
+                        .config
+                        .insert(config_key.clone(), content.trim().to_string());
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        plugin = %plugin.name,
+                        config_key = %config_key,
+                        path = %path,
+                        error = %e,
+                        "inherit_env_file_keys: failed to read file"
+                    );
+                }
+            }
+        }
+    }
+
+    let mut p = Plugin::new(&manifest, [], false)?;
+    let input = serde_json::to_string(req)?;
+    let output = p.call::<&str, &str>("provision", &input)?;
+    let result: ResourceProvisionResult = serde_json::from_str(output)?;
+
+    for err in &result.errors {
+        tracing::error!(
+            plugin = %plugin.name,
+            namespace = %req.namespace,
+            application = %req.application_name,
+            resource_id = %req.resource_id,
+            "plugin provision() reported error: {err}"
+        );
+    }
+
+    tracing::info!(
+        plugin = %plugin.name,
+        namespace = %req.namespace,
+        application = %req.application_name,
+        resource_id = %req.resource_id,
+        state_keys = result.state.len(),
+        k8s_resources = result.kubernetes_resources.len(),
+        errors = result.errors.len(),
+        "plugin provision() completed"
+    );
+
+    Ok(result)
 }
 
 fn run_plugin(plugin: &LoadedPlugin, ctx: &PluginContext) -> anyhow::Result<PluginResult> {
@@ -854,6 +1029,27 @@ fn build_resources(cpu: Option<&str>, memory: Option<&str>) -> Option<ResourceRe
 mod tests {
     use super::*;
 
+    /// `PluginMetadata` deserializes with `resources: []` when the field is absent.
+    /// This ensures old WASM plugins (compiled before resources support) still load cleanly.
+    #[test]
+    fn plugin_metadata_missing_resources_defaults_to_empty() {
+        let json = r#"{
+            "name": "old-plugin",
+            "version": "0.1.0",
+            "description": "a legacy plugin",
+            "provides": [],
+            "depends_on": [],
+            "optional_depends_on": [],
+            "config_schema": []
+        }"#;
+        let meta: PluginMetadata = serde_json::from_str(json).expect("should deserialize");
+        assert!(
+            meta.resources.is_empty(),
+            "resources should default to [] when absent"
+        );
+        assert_eq!(meta.name, "old-plugin");
+    }
+
     /// `PluginMetadata` deserializes with `config_schema: []` when the field is absent.
     /// This ensures old WASM plugins (compiled before v0.5.0 of the SDK) still load cleanly.
     #[test]
@@ -884,6 +1080,7 @@ mod tests {
             provides: vec!["aws:iam-role".to_string()],
             depends_on: vec![],
             optional_depends_on: vec![],
+            resources: vec![],
             config_schema: vec![
                 ConfigField {
                     key: "AWS_REGION".to_string(),
