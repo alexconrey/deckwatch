@@ -560,6 +560,63 @@ const deleteCm = async (name: string) => {
           : "Failed to delete configmap";
   }
 };
+
+// --- ServiceAccount dialog ---
+
+const resetSaForm = () => {
+  saName.value = "";
+  saIrsaRoleArn.value = "";
+  saDialogError.value = null;
+  saDialogSubmitting.value = false;
+};
+
+const openCreateSa = () => {
+  resetSaForm();
+  showCreateSa.value = true;
+};
+
+const submitSa = async () => {
+  if (!ns.selected) return;
+  if (!namePattern.test(saName.value)) {
+    saDialogError.value = "Invalid service account name";
+    return;
+  }
+  saDialogSubmitting.value = true;
+  saDialogError.value = null;
+  try {
+    const annotations: Record<string, string> = {};
+    if (saIrsaRoleArn.value.trim()) {
+      annotations["eks.amazonaws.com/role-arn"] = saIrsaRoleArn.value.trim();
+    }
+    await serviceaccountsApi.create(ns.selected, {
+      name: saName.value,
+      annotations,
+    });
+    showCreateSa.value = false;
+    await fetchServiceAccounts(ns.selected);
+  } catch (e) {
+    saDialogError.value =
+      e instanceof ApiError ? e.body.message
+        : e instanceof Error ? e.message
+          : "Failed to create service account";
+  } finally {
+    saDialogSubmitting.value = false;
+  }
+};
+
+const deleteSa = async (name: string) => {
+  if (!ns.selected) return;
+  if (!confirm(`Delete service account "${name}"? This cannot be undone.`)) return;
+  try {
+    await serviceaccountsApi.delete(ns.selected, name);
+    await fetchServiceAccounts(ns.selected);
+  } catch (e) {
+    serviceaccountsError.value =
+      e instanceof ApiError ? e.body.message
+        : e instanceof Error ? e.message
+          : "Failed to delete service account";
+  }
+};
 </script>
 
 <template>
@@ -615,6 +672,15 @@ const deleteCm = async (name: string) => {
       >
         Create ConfigMap
       </v-btn>
+      <v-btn
+        v-else-if="tab === 'serviceaccounts'"
+        color="primary"
+        prepend-icon="mdi-plus"
+        :disabled="!ns.selected"
+        @click="openCreateSa"
+      >
+        Create ServiceAccount
+      </v-btn>
     </div>
 
     <v-alert v-if="!ns.selected" type="info" class="mb-4">
@@ -637,6 +703,10 @@ const deleteCm = async (name: string) => {
       <v-tab value="configmaps">
         <v-icon start icon="mdi-file-cog-outline" />
         ConfigMaps
+      </v-tab>
+      <v-tab value="serviceaccounts">
+        <v-icon start icon="mdi-account-key-outline" />
+        ServiceAccounts
       </v-tab>
     </v-tabs>
 
@@ -921,7 +991,107 @@ const deleteCm = async (name: string) => {
           </template>
         </v-data-table>
       </v-window-item>
+
+      <!-- ServiceAccounts tab -->
+      <v-window-item value="serviceaccounts">
+        <v-alert v-if="serviceaccountsError" type="error" class="mb-4" closable>
+          {{ serviceaccountsError }}
+        </v-alert>
+
+        <v-data-table
+          v-if="ns.selected"
+          :items="serviceaccounts"
+          :headers="saHeaders"
+          :loading="serviceaccountsLoading"
+          item-value="name"
+          class="bg-surface rounded"
+        >
+          <template v-slot:item.name="{ item }">
+            <span class="text-body-1 font-weight-medium">{{ item.name }}</span>
+          </template>
+
+          <template v-slot:item.irsa_role_arn="{ item }">
+            <span
+              v-if="item.irsa_role_arn"
+              class="text-body-2 text-secondary font-mono"
+              style="word-break: break-all"
+            >
+              {{ item.irsa_role_arn }}
+            </span>
+            <span v-else class="text-caption text-secondary">—</span>
+          </template>
+
+          <template v-slot:item.created_at="{ item }">
+            <span class="text-body-2 text-secondary">
+              {{ formatAge(item.created_at) }}
+            </span>
+          </template>
+
+          <template v-slot:item.actions="{ item }">
+            <v-btn
+              size="small"
+              variant="text"
+              color="error"
+              icon="mdi-delete"
+              @click="deleteSa(item.name)"
+            />
+          </template>
+
+          <template v-slot:no-data>
+            <div class="text-center py-8 text-secondary">
+              <v-icon icon="mdi-account-key-outline" size="48" class="mb-2" />
+              <div>No service accounts in this namespace</div>
+            </div>
+          </template>
+        </v-data-table>
+      </v-window-item>
     </v-window>
+
+    <!-- Create ServiceAccount Dialog -->
+    <v-dialog v-model="showCreateSa" max-width="560" persistent>
+      <v-card>
+        <v-card-title>Create ServiceAccount</v-card-title>
+        <v-card-text>
+          <v-alert v-if="saDialogError" type="error" class="mb-4" closable>
+            {{ saDialogError }}
+          </v-alert>
+          <v-form @submit.prevent="submitSa">
+            <v-text-field
+              v-model="saName"
+              label="Name"
+              :rules="nameRules"
+              autofocus
+              required
+            />
+            <v-text-field
+              v-model="saIrsaRoleArn"
+              label="IRSA Role ARN (optional)"
+              hint="IAM role ARN for EKS pod identity — sets eks.amazonaws.com/role-arn annotation"
+              persistent-hint
+              placeholder="arn:aws:iam::123456789012:role/my-role"
+            />
+          </v-form>
+        </v-card-text>
+        <v-card-actions>
+          <v-spacer />
+          <v-btn
+            variant="text"
+            :disabled="saDialogSubmitting"
+            @click="showCreateSa = false"
+          >
+            Cancel
+          </v-btn>
+          <v-btn
+            color="primary"
+            variant="flat"
+            :loading="saDialogSubmitting"
+            @click="submitSa"
+          >
+            Create
+          </v-btn>
+        </v-card-actions>
+      </v-card>
+    </v-dialog>
 
     <!-- Create Secret Dialog -->
     <v-dialog v-model="showCreateSecret" max-width="720" persistent>
