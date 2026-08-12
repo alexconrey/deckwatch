@@ -1383,6 +1383,9 @@ async fn tool_list_plugins(state: &AppState) -> Result<String, String> {
                     }
                 }
                 settings::PluginSource::Url { url } => format!("url: {url}"),
+                settings::PluginSource::Upload { filename } => {
+                    format!("upload: {filename}")
+                }
             };
             serde_json::json!({
                 "name": cfg.name,
