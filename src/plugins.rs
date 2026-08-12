@@ -23,7 +23,7 @@ use serde::{Deserialize, Serialize};
 use crate::handlers::settings::{DeckwatchSettings, PluginConfig, PluginSource};
 use crate::state::AppState;
 
-// ── Shared types (mirror of deckwatch-plugin-sdk v0.2.0) ─────────────────────
+// ── Shared types (mirror of deckwatch-plugin-sdk v0.5.0) ─────────────────────
 // These must stay in sync with `deckwatch-plugin-sdk/src/lib.rs`. The SDK is
 // the canonical source; this is the host-side copy for deserializing plugin
 // output without adding a workspace dependency on the SDK crate.
@@ -106,6 +106,54 @@ const PLUGIN_SIDECAR_ANNOTATION_PREFIX: &str = "deckwatch.plugin-sidecar/";
 
 // ── LoadedPlugin ─────────────────────────────────────────────────────────────
 
+/// The data type of a plugin configuration field.
+///
+/// Mirrors `deckwatch_plugin_sdk::ConfigFieldType` — kept in sync manually.
+/// See `deckwatch-plugin-sdk/src/lib.rs` for the canonical definition.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ConfigFieldType {
+    /// Plain text input. Stored in plugin config as-is.
+    #[default]
+    String,
+    /// Masked text input. Stored encrypted in `PluginConfig.config` using the
+    /// same AES-256-GCM envelope as `DeckwatchSettings.credentials`.
+    Secret,
+    /// Checkbox. Stored as `"true"` or `"false"`.
+    Bool,
+    /// Dropdown. The field must have a non-empty `options` list.
+    Select,
+}
+
+/// A single field in a plugin's self-declared configuration schema.
+///
+/// Mirrors `deckwatch_plugin_sdk::ConfigField` — kept in sync manually.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ConfigField {
+    /// Machine-readable key. Matched against keys in `PluginConfig.config` and `inherit_env_keys`.
+    pub key: String,
+    /// Human-readable label for the settings form.
+    pub label: String,
+    /// Help text rendered below the field.
+    #[serde(default)]
+    pub description: String,
+    /// The type of form control to render.
+    pub field_type: ConfigFieldType,
+    /// Default value rendered in the form when no saved value exists.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default: Option<String>,
+    /// Whether the field must be non-empty before deckwatch accepts settings.
+    #[serde(default)]
+    pub required: bool,
+    /// Allowed values for `select` fields. Ignored for other field types.
+    #[serde(default)]
+    pub options: Vec<String>,
+    /// When `Some`, this field is sourced from an environment variable rather
+    /// than direct user input. The UI renders the field as read-only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub env_source: Option<String>,
+}
+
 /// Metadata returned by the plugin's `metadata()` WASM export.
 /// Mirrors `deckwatch_plugin_sdk::PluginMetadata` — kept in sync manually.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -121,6 +169,10 @@ pub struct PluginMetadata {
     pub depends_on: Vec<String>,
     #[serde(default)]
     pub optional_depends_on: Vec<String>,
+    /// Schema for this plugin's operator-supplied configuration.
+    /// Old plugins that do not export this field deserialize to an empty Vec.
+    #[serde(default)]
+    pub config_schema: Vec<ConfigField>,
 }
 
 /// A fetched plugin ready to execute. Stores raw WASM bytes and instantiates
@@ -774,4 +826,93 @@ fn build_resources(cpu: Option<&str>, memory: Option<&str>) -> Option<ResourceRe
         limits: Some(map),
         ..Default::default()
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `PluginMetadata` deserializes with `config_schema: []` when the field is absent.
+    /// This ensures old WASM plugins (compiled before v0.5.0 of the SDK) still load cleanly.
+    #[test]
+    fn plugin_metadata_missing_config_schema_defaults_to_empty() {
+        let json = r#"{
+            "name": "old-plugin",
+            "version": "0.1.0",
+            "description": "a legacy plugin",
+            "provides": [],
+            "depends_on": [],
+            "optional_depends_on": []
+        }"#;
+        let meta: PluginMetadata = serde_json::from_str(json).expect("should deserialize");
+        assert!(
+            meta.config_schema.is_empty(),
+            "config_schema should default to [] when absent"
+        );
+        assert_eq!(meta.name, "old-plugin");
+    }
+
+    /// Round-trip a `PluginMetadata` with a populated `config_schema`.
+    #[test]
+    fn plugin_metadata_with_config_schema_round_trips() {
+        let meta = PluginMetadata {
+            name: "aws".to_string(),
+            version: "0.5.0".to_string(),
+            description: "AWS plugin".to_string(),
+            provides: vec!["aws:iam-role".to_string()],
+            depends_on: vec![],
+            optional_depends_on: vec![],
+            config_schema: vec![
+                ConfigField {
+                    key: "AWS_REGION".to_string(),
+                    label: "AWS Region".to_string(),
+                    description: "The AWS region".to_string(),
+                    field_type: ConfigFieldType::String,
+                    default: Some("us-east-1".to_string()),
+                    required: true,
+                    options: vec![],
+                    env_source: Some("AWS_REGION".to_string()),
+                },
+                ConfigField {
+                    key: "AWS_SECRET_ACCESS_KEY".to_string(),
+                    label: "Secret Access Key".to_string(),
+                    description: String::new(),
+                    field_type: ConfigFieldType::Secret,
+                    default: None,
+                    required: false,
+                    options: vec![],
+                    env_source: None,
+                },
+            ],
+        };
+
+        let json = serde_json::to_string(&meta).expect("should serialize");
+        let back: PluginMetadata = serde_json::from_str(&json).expect("should deserialize");
+
+        assert_eq!(back.config_schema.len(), 2);
+        assert_eq!(back.config_schema[0].key, "AWS_REGION");
+        assert_eq!(back.config_schema[0].field_type, ConfigFieldType::String);
+        assert!(back.config_schema[0].required);
+        assert_eq!(back.config_schema[1].key, "AWS_SECRET_ACCESS_KEY");
+        assert_eq!(back.config_schema[1].field_type, ConfigFieldType::Secret);
+        assert!(!back.config_schema[1].required);
+        assert!(back.config_schema[1].default.is_none());
+    }
+
+    /// `ConfigFieldType` serializes with snake_case names.
+    #[test]
+    fn config_field_type_serde_snake_case() {
+        assert_eq!(
+            serde_json::to_string(&ConfigFieldType::Secret).unwrap(),
+            "\"secret\""
+        );
+        assert_eq!(
+            serde_json::to_string(&ConfigFieldType::Select).unwrap(),
+            "\"select\""
+        );
+        assert_eq!(
+            serde_json::to_string(&ConfigFieldType::Bool).unwrap(),
+            "\"bool\""
+        );
+    }
 }

@@ -544,6 +544,34 @@ fn deckwatch_tool_definitions() -> Vec<serde_json::Value> {
             }
         }),
         serde_json::json!({
+            "name": "associate_plugin",
+            "description": "Associate a loaded plugin with an application. Once associated, the plugin reconciler will re-run the plugin against every deployment in the application every 30 seconds — regardless of whether the change came from deckwatch, kubectl, ArgoCD, or mcp-k8s. Idempotent: re-associating the same plugin is a no-op.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "namespace": { "type": "string" },
+                    "application_name": { "type": "string", "description": "Application name (as created via create_application or the deckwatch UI)" },
+                    "plugin_name": { "type": "string", "description": "Plugin name as configured in Settings (must be currently loaded)" }
+                },
+                "required": ["namespace", "application_name", "plugin_name"],
+                "additionalProperties": false
+            }
+        }),
+        serde_json::json!({
+            "name": "disassociate_plugin",
+            "description": "Remove a plugin association from an application. The plugin will no longer be reconciled against this application's deployments.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "namespace": { "type": "string" },
+                    "application_name": { "type": "string" },
+                    "plugin_name": { "type": "string" }
+                },
+                "required": ["namespace", "application_name", "plugin_name"],
+                "additionalProperties": false
+            }
+        }),
+        serde_json::json!({
             "name": "validate_plugin",
             "description": "Validate a plugin before adding it to settings. Fetches the WASM binary from the given source, confirms it loads and exports an `apply` function, then dry-runs it with a configurable test context and reports exactly what env vars, sidecars, and Kubernetes resources it would inject. Does not modify any state.",
             "inputSchema": {
@@ -638,6 +666,8 @@ async fn handle_tool_call(state: &AppState, request: &JsonRpcRequest) -> JsonRpc
         "disable_plugin" => Some(tool_disable_plugin(state, args).await),
         "update_plugin_config" => Some(tool_update_plugin_config(state, args).await),
         "validate_plugin" => Some(tool_validate_plugin(state, args).await),
+        "associate_plugin" => Some(tool_associate_plugin(state, args).await),
+        "disassociate_plugin" => Some(tool_disassociate_plugin(state, args).await),
         _ => None,
     };
 
@@ -1628,6 +1658,133 @@ async fn tool_validate_plugin(
     });
 
     serde_json::to_string_pretty(&output).map_err(|e| e.to_string())
+}
+
+// ── Application plugin association tools ────────────────────────────────────
+
+async fn tool_associate_plugin(
+    state: &AppState,
+    args: &serde_json::Value,
+) -> Result<String, String> {
+    let ns = args["namespace"].as_str().ok_or("missing namespace")?;
+    let app_name = args["application_name"]
+        .as_str()
+        .ok_or("missing application_name")?;
+    let plugin_name = args["plugin_name"].as_str().ok_or("missing plugin_name")?;
+
+    let app_id = format!("{ns}/{app_name}");
+
+    // Verify application exists.
+    use crate::entities::applications;
+    use sea_orm::EntityTrait;
+    applications::Entity::find_by_id(&app_id)
+        .one(&state.db)
+        .await
+        .map_err(|e| format!("database error: {e}"))?
+        .ok_or_else(|| format!("application '{app_name}' not found in namespace '{ns}'"))?;
+
+    // Verify plugin is loaded.
+    {
+        let plugins = state.plugins.read().await;
+        if !plugins.iter().any(|p| p.name == plugin_name) {
+            return Err(format!(
+                "plugin '{plugin_name}' not loaded — add and enable it in Settings first"
+            ));
+        }
+    }
+
+    use crate::entities::application_plugins;
+    use sea_orm::ActiveValue::Set;
+
+    let now_val = {
+        use std::time::SystemTime;
+        let d = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .expect("system clock before UNIX epoch");
+        sea_orm::entity::prelude::DateTimeUtc::from_timestamp(d.as_secs() as i64, d.subsec_nanos())
+            .expect("timestamp out of range")
+    };
+
+    let model = application_plugins::ActiveModel {
+        id: Set(uuid::Uuid::new_v4().to_string()),
+        application_id: Set(app_id.clone()),
+        plugin_name: Set(plugin_name.to_string()),
+        created_at: Set(now_val),
+    };
+
+    use sea_orm::sea_query::OnConflict;
+    let _ = application_plugins::Entity::insert(model)
+        .on_conflict(
+            OnConflict::columns([
+                application_plugins::Column::ApplicationId,
+                application_plugins::Column::PluginName,
+            ])
+            .do_nothing()
+            .to_owned(),
+        )
+        .exec(&state.db)
+        .await
+        .map_err(|e| format!("database error: {e}"))?;
+
+    crate::audit::log_action(
+        &state.db,
+        "create",
+        "application-plugin",
+        plugin_name,
+        ns,
+        &format!("MCP: associated plugin '{plugin_name}' with application '{app_name}'"),
+    )
+    .await
+    .ok();
+
+    Ok(format!(
+        "Plugin '{plugin_name}' associated with application '{app_name}' in namespace '{ns}'. \
+         The plugin reconciler will begin running it against all deployments within 30 seconds."
+    ))
+}
+
+async fn tool_disassociate_plugin(
+    state: &AppState,
+    args: &serde_json::Value,
+) -> Result<String, String> {
+    let ns = args["namespace"].as_str().ok_or("missing namespace")?;
+    let app_name = args["application_name"]
+        .as_str()
+        .ok_or("missing application_name")?;
+    let plugin_name = args["plugin_name"].as_str().ok_or("missing plugin_name")?;
+
+    let app_id = format!("{ns}/{app_name}");
+
+    use crate::entities::application_plugins;
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+
+    let deleted = application_plugins::Entity::delete_many()
+        .filter(application_plugins::Column::ApplicationId.eq(&app_id))
+        .filter(application_plugins::Column::PluginName.eq(plugin_name))
+        .exec(&state.db)
+        .await
+        .map_err(|e| format!("database error: {e}"))?;
+
+    if deleted.rows_affected == 0 {
+        return Err(format!(
+            "plugin '{plugin_name}' is not associated with application '{app_name}' in namespace '{ns}'"
+        ));
+    }
+
+    crate::audit::log_action(
+        &state.db,
+        "delete",
+        "application-plugin",
+        plugin_name,
+        ns,
+        &format!("MCP: removed plugin '{plugin_name}' from application '{app_name}'"),
+    )
+    .await
+    .ok();
+
+    Ok(format!(
+        "Plugin '{plugin_name}' disassociated from application '{app_name}' in namespace '{ns}'."
+    ))
 }
 
 // ---------------------------------------------------------------------------
