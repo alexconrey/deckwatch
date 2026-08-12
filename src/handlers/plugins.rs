@@ -23,6 +23,7 @@ pub struct PluginSummary {
     pub provides: Vec<String>,
     pub depends_on: Vec<String>,
     pub config_schema: Vec<ConfigField>,
+    pub resources: Vec<crate::plugins::PluginResource>,
     pub wasm_size_bytes: usize,
 }
 
@@ -42,6 +43,7 @@ pub async fn list_plugins(
             provides: p.metadata.provides.clone(),
             depends_on: p.metadata.depends_on.clone(),
             config_schema: p.metadata.config_schema.clone(),
+            resources: p.metadata.resources.clone(),
             wasm_size_bytes: p.wasm_bytes.len(),
         })
         .collect();
