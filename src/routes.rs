@@ -13,7 +13,7 @@ use crate::handlers::registry::RegistryStore;
 use crate::handlers::{
     addons, admission, ai_fix, application_resources, applications, autoscaling, configmaps_ui,
     cronjobs, deployments, deployments_ux, diagnostics, docs, events, exec, git, gitops, health,
-    ingressclasses, ingresses, license, logs, mcp, monitoring, namespaces, nodes, pods,
+    ingressclasses, ingresses, license, logs, mcp, monitoring, namespaces, nodes, plugins, pods,
     portforward, prometheus_query, promote, registry, registry_ui, resource_metrics, secrets,
     serviceaccounts, settings, storageclasses, templates, tracing_handler, webhooks,
 };
@@ -166,6 +166,15 @@ pub fn build_router(
             get(logs::get_logs),
         )
         .route("/api/settings", axum::routing::put(settings::put_settings))
+        .route("/api/plugins", get(plugins::list_plugins))
+        .route(
+            "/api/plugins/{name}/schema",
+            get(plugins::get_plugin_schema),
+        )
+        .route(
+            "/api/plugins/{name}/config",
+            post(plugins::save_plugin_config),
+        )
         .route("/api/namespaces/{ns}/cronjobs", get(cronjobs::list))
         .route("/api/namespaces/{ns}/cronjobs/{name}", get(cronjobs::get))
         .route("/api/nodes", get(nodes::list_nodes))
@@ -231,6 +240,14 @@ pub fn build_router(
             axum::routing::delete(applications::remove_member),
         )
         // Plugin-declared provisioned resources
+        .route(
+            "/api/namespaces/{ns}/applications/{name}/plugins",
+            get(applications::list_plugins_for_app),
+        )
+        .route(
+            "/api/namespaces/{ns}/applications/{name}/plugins/{plugin}",
+            post(applications::add_plugin).delete(applications::remove_plugin),
+        )
         .route(
             "/api/namespaces/{ns}/applications/{name}/resources",
             get(application_resources::list),
