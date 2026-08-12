@@ -540,7 +540,7 @@ async fn apply_one_resource(
 }
 
 fn run_plugin(plugin: &LoadedPlugin, ctx: &PluginContext) -> anyhow::Result<PluginResult> {
-    tracing::debug!(
+    tracing::info!(
         plugin = %plugin.name,
         namespace = %ctx.namespace,
         deployment = %ctx.deployment_name,
@@ -608,7 +608,7 @@ fn run_plugin(plugin: &LoadedPlugin, ctx: &PluginContext) -> anyhow::Result<Plug
         e
     })?;
     let result: PluginResult = serde_json::from_str(output)?;
-    tracing::debug!(
+    tracing::info!(
         plugin = %plugin.name,
         namespace = %ctx.namespace,
         deployment = %ctx.deployment_name,
