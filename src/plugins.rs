@@ -10,7 +10,7 @@
 
 use std::collections::BTreeMap;
 
-use extism::{Manifest, Plugin, Wasm};
+use extism::{Function, Manifest, Plugin, UserData, Val, ValType, Wasm};
 use k8s_openapi::api::core::v1::{
     ConfigMapKeySelector, Container, ContainerPort, EnvVar, EnvVarSource, ResourceRequirements,
     SecretKeySelector,
@@ -353,6 +353,29 @@ pub async fn fetch_and_validate(
 
 // ── Fetching ─────────────────────────────────────────────────────────────────
 
+/// Build the `now` host function exposed to every plugin.
+///
+/// Plugins call `now()` (imported from `extism:host/user`) to get the current
+/// Unix timestamp in seconds. This lets the AWS plugin sign requests without
+/// making a network round-trip and without touching `SystemTime` (unavailable
+/// in `wasm32-unknown-unknown`).
+fn host_now_fn() -> Function {
+    Function::new(
+        "now",
+        [],
+        [ValType::I64],
+        UserData::<()>::default(),
+        |_ctx, _inputs, outputs, _ud| {
+            let secs = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            outputs[0] = Val::I64(secs as i64);
+            Ok(())
+        },
+    )
+}
+
 /// Call the plugin's `metadata()` export and deserialize the result.
 /// Returns an error if the export is missing or the output can't be parsed —
 /// callers should fall back to `PluginMetadata::default()`.
@@ -367,7 +390,7 @@ fn load_metadata_from_bytes(
         manifest.allowed_hosts = Some(allowed_hosts.to_vec());
     }
     manifest.config.extend(config.clone());
-    let mut p = Plugin::new(&manifest, [], false)?;
+    let mut p = Plugin::new(&manifest, [host_now_fn()], false)?;
     let output = p.call::<&str, &str>("metadata", "")?;
     Ok(serde_json::from_str(output)?)
 }
@@ -747,7 +770,7 @@ pub fn run_provision(
         }
     }
 
-    let mut p = Plugin::new(&manifest, [], false)?;
+    let mut p = Plugin::new(&manifest, [host_now_fn()], false)?;
     let input = serde_json::to_string(req)?;
     let output = p.call::<&str, &str>("provision", &input)?;
     let result: ResourceProvisionResult = serde_json::from_str(output)?;
@@ -832,7 +855,7 @@ fn run_plugin(plugin: &LoadedPlugin, ctx: &PluginContext) -> anyhow::Result<Plug
 
     // WASI is disabled; plugins use extism's HTTP host function for outbound
     // network calls, scoped to allowed_hosts above.
-    let mut p = Plugin::new(&manifest, [], false)?;
+    let mut p = Plugin::new(&manifest, [host_now_fn()], false)?;
     let input = serde_json::to_string(ctx)?;
     let output = p.call::<&str, &str>("apply", &input).map_err(|e| {
         tracing::error!(
