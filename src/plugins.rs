@@ -204,7 +204,8 @@ pub struct PluginMetadata {
     /// Old plugins that do not export this field deserialize to an empty Vec.
     #[serde(default)]
     pub config_schema: Vec<ConfigField>,
-    /// Infrastructure resources this plugin can provision.
+    /// Resource types this plugin can provision (e.g. RDS, S3).
+    /// Deckwatch reads this at load time to render Infrastructure buttons on Application pages.
     /// Old plugins that do not export this field deserialize to an empty Vec.
     #[serde(default)]
     pub resources: Vec<PluginResource>,
