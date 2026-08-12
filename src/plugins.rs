@@ -435,12 +435,23 @@ pub async fn fetch_plugins(settings: &DeckwatchSettings, state: &AppState) -> Ve
     loaded
 }
 
+/// Directory where uploaded WASM binaries are stored.
+pub const UPLOADS_DIR: &str = "/data/uploads";
+
 async fn fetch_bytes(
     cfg: &PluginConfig,
     http: &reqwest::Client,
     settings: &DeckwatchSettings,
     state: &AppState,
 ) -> anyhow::Result<Vec<u8>> {
+    // Uploaded WASMs are read from disk — no HTTP needed.
+    if let PluginSource::Upload { filename } = &cfg.source {
+        let path = std::path::Path::new(UPLOADS_DIR).join(filename);
+        return tokio::fs::read(&path)
+            .await
+            .map_err(|e| anyhow::anyhow!("failed to read uploaded plugin {filename}: {e}"));
+    }
+
     let url = resolve_url(&cfg.source);
     let mut builder = http.get(&url);
 
@@ -473,6 +484,10 @@ fn resolve_url(source: &PluginSource) -> String {
             }
         }
         PluginSource::Url { url } => url.clone(),
+        // Upload source has no URL — handled in fetch_bytes before this is called.
+        PluginSource::Upload { filename } => {
+            format!("file://{UPLOADS_DIR}/{filename}")
+        }
     }
 }
 

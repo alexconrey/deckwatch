@@ -446,6 +446,13 @@ pub enum PluginSource {
     },
     /// Arbitrary HTTPS URL — for self-hosted Gitea, Forgejo, S3, etc.
     Url { url: String },
+    /// Locally uploaded WASM binary stored on the deckwatch server.
+    /// Set automatically by `POST /api/plugins/{name}/upload`. Intended for
+    /// local development — upload a locally-built WASM without pushing to GitHub.
+    Upload {
+        /// Filename under the uploads directory (e.g. `"aws.wasm"`).
+        filename: String,
+    },
 }
 
 /// Configuration for a single external plugin.

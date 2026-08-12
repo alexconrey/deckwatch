@@ -175,6 +175,10 @@ pub fn build_router(
             "/api/plugins/{name}/config",
             post(plugins::save_plugin_config),
         )
+        .route(
+            "/api/plugins/{name}/upload",
+            post(plugins::upload_plugin_wasm),
+        )
         .route("/api/namespaces/{ns}/cronjobs", get(cronjobs::list))
         .route("/api/namespaces/{ns}/cronjobs/{name}", get(cronjobs::get))
         .route("/api/nodes", get(nodes::list_nodes))
