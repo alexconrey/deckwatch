@@ -258,7 +258,9 @@ pub fn build_router(
         )
         .route(
             "/api/namespaces/{ns}/applications/{name}/resources/{plugin}/{resource_id}",
-            post(application_resources::provision).delete(application_resources::deprovision),
+            post(application_resources::provision)
+                .patch(application_resources::refresh)
+                .delete(application_resources::deprovision),
         )
         .route("/api/git/branches", get(git::list_branches))
         .route("/api/namespaces/{ns}/events", get(events::list_namespaced))
