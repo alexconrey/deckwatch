@@ -220,15 +220,53 @@ pub async fn deprovision(
             ))
         })?;
 
-    // Note: deprovisioning only removes the DB record. Any cloud resources
-    // (RDS instances, S3 buckets) created by the plugin must be cleaned up
-    // manually or via a future deprovision() plugin export.
+    // Call plugin's deprovision() if it exports one.
+    // We call it before removing the DB record so the plugin still has
+    // access to state/fields. Errors are logged but never block record removal.
+    let state_map: std::collections::HashMap<String, String> =
+        serde_json::from_str(&row.state).unwrap_or_default();
+    let fields_map: std::collections::HashMap<String, String> =
+        serde_json::from_str(&row.fields).unwrap_or_default();
+
+    let dep_req = crate::plugins::ResourceDeprovisionRequest {
+        application_name: app_name.clone(),
+        namespace: ns.clone(),
+        resource_id: resource_id.clone(),
+        state: state_map,
+        fields: fields_map,
+    };
+
+    {
+        let plugins = state.plugins.read().await;
+        if let Some(plugin) = plugins.iter().find(|p| p.name == plugin_name) {
+            match crate::plugins::run_deprovision(plugin, &dep_req) {
+                Ok(result) => {
+                    if !result.message.is_empty() {
+                        tracing::info!(
+                            plugin = %plugin_name,
+                            resource_id = %resource_id,
+                            "deprovision: {}", result.message
+                        );
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        plugin = %plugin_name,
+                        resource_id = %resource_id,
+                        error = %e,
+                        "deprovision() call failed — removing DB record anyway"
+                    );
+                }
+            }
+        }
+    }
+
     tracing::info!(
         namespace = %ns,
         application = %app_name,
         plugin = %plugin_name,
         resource_id = %resource_id,
-        "deprovisioning plugin resource — DB record removed; cloud resources must be cleaned up manually"
+        "plugin resource deprovisioned — DB record removed"
     );
 
     application_plugin_resources::Entity::delete_by_id(row.id)

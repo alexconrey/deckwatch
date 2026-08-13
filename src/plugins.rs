@@ -255,6 +255,29 @@ pub struct ResourceProvisionResult {
     pub errors: Vec<String>,
 }
 
+/// Input to a plugin's `deprovision()` WASM export.
+/// Mirrors `deckwatch_plugin_sdk::ResourceDeprovisionRequest` — kept in sync manually.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ResourceDeprovisionRequest {
+    pub application_name: String,
+    pub namespace: String,
+    pub resource_id: String,
+    #[serde(default)]
+    pub state: std::collections::HashMap<String, String>,
+    #[serde(default)]
+    pub fields: std::collections::HashMap<String, String>,
+}
+
+/// What the plugin returns from `deprovision()`.
+/// Mirrors `deckwatch_plugin_sdk::ResourceDeprovisionResult` — kept in sync manually.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ResourceDeprovisionResult {
+    #[serde(default)]
+    pub errors: Vec<String>,
+    #[serde(default)]
+    pub message: String,
+}
+
 /// A fetched plugin ready to execute. Stores raw WASM bytes and instantiates
 /// a fresh `extism::Plugin` per call to avoid thread-safety concerns.
 #[derive(Clone)]
@@ -829,6 +852,91 @@ pub fn run_provision(
     );
 
     Ok(result)
+}
+
+/// Call the plugin's `deprovision()` WASM export with the given request.
+///
+/// Returns `Ok(ResourceDeprovisionResult)` even if the plugin reports errors —
+/// errors are surfaced to the caller for logging, but do not block DB record removal.
+/// Returns `Err` only if the WASM call itself fails (e.g. export not found).
+pub fn run_deprovision(
+    plugin: &LoadedPlugin,
+    req: &ResourceDeprovisionRequest,
+) -> anyhow::Result<ResourceDeprovisionResult> {
+    tracing::info!(
+        plugin = %plugin.name,
+        namespace = %req.namespace,
+        application = %req.application_name,
+        resource_id = %req.resource_id,
+        "calling plugin deprovision()"
+    );
+
+    let wasm = Wasm::data(plugin.wasm_bytes.clone());
+    let mut manifest = Manifest::new([wasm]);
+    if !plugin.allowed_hosts.is_empty() {
+        manifest.allowed_hosts = Some(plugin.allowed_hosts.clone());
+    }
+    manifest.config.extend(plugin.config.clone());
+
+    let now_ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    manifest
+        .config
+        .insert("CURRENT_TIMESTAMP".to_string(), now_ts.to_string());
+
+    for key in &plugin.inherit_env_keys {
+        if let Ok(val) = std::env::var(key) {
+            manifest.config.insert(key.clone(), val);
+        }
+    }
+    for (config_key, env_var) in &plugin.inherit_env_file_keys {
+        if let Ok(path) = std::env::var(env_var) {
+            if let Ok(content) = std::fs::read_to_string(&path) {
+                manifest
+                    .config
+                    .insert(config_key.clone(), content.trim().to_string());
+            }
+        }
+    }
+
+    let mut p = Plugin::new(&manifest, [host_now_fn()], false)?;
+    let input = serde_json::to_string(req)?;
+
+    let output = p.call::<&str, &str>("deprovision", &input).map_err(|e| {
+        // deprovision() is optional — if the export doesn't exist, return a default result
+        if e.to_string().contains("not found") || e.to_string().contains("export") {
+            return anyhow::anyhow!("__no_deprovision_export__");
+        }
+        e
+    });
+
+    match output {
+        Ok(out) => {
+            let result: ResourceDeprovisionResult = serde_json::from_str(out)?;
+            for err in &result.errors {
+                tracing::error!(
+                    plugin = %plugin.name,
+                    resource_id = %req.resource_id,
+                    "plugin deprovision() reported error: {err}"
+                );
+            }
+            tracing::info!(
+                plugin = %plugin.name,
+                resource_id = %req.resource_id,
+                errors = result.errors.len(),
+                message = %result.message,
+                "plugin deprovision() completed"
+            );
+            Ok(result)
+        }
+        Err(e) if e.to_string().contains("__no_deprovision_export__") => {
+            tracing::debug!(plugin = %plugin.name, "plugin has no deprovision() export — skipping");
+            Ok(ResourceDeprovisionResult::default())
+        }
+        Err(e) => Err(e),
+    }
 }
 
 fn run_plugin(plugin: &LoadedPlugin, ctx: &PluginContext) -> anyhow::Result<PluginResult> {
