@@ -21,6 +21,7 @@ use crate::entities::builds;
 use crate::entities::gitops_configs;
 use crate::kube_ext::deployment_phase;
 use crate::metrics;
+use crate::plugins::SidecarSpec;
 use crate::state::AppState;
 
 /// Return the current UTC time as a `DateTimeUtc` without requiring a direct
@@ -1420,6 +1421,45 @@ async fn update_build_status(
     }
 }
 
+/// Build a JSON container object for a sidecar spec. Used when assembling the
+/// SSA patch for deployments and cronjobs.
+fn sidecar_to_json(s: &SidecarSpec) -> serde_json::Value {
+    let mut c = serde_json::json!({
+        "name": s.name,
+        "image": s.image,
+    });
+    if let Some(port) = s.port {
+        c["ports"] = serde_json::json!([{"containerPort": port}]);
+    }
+    if !s.env.is_empty() {
+        c["env"] = serde_json::json!(s
+            .env
+            .iter()
+            .map(|e| serde_json::json!({
+                "name": e.name,
+                "value": e.value,
+            }))
+            .collect::<Vec<_>>());
+    }
+    if s.cpu.is_some() || s.memory.is_some() {
+        let mut req = serde_json::Map::new();
+        let mut lim = serde_json::Map::new();
+        if let Some(ref cpu) = s.cpu {
+            req.insert("cpu".to_string(), serde_json::json!(cpu));
+            lim.insert("cpu".to_string(), serde_json::json!(cpu));
+        }
+        if let Some(ref mem) = s.memory {
+            req.insert("memory".to_string(), serde_json::json!(mem));
+            lim.insert("memory".to_string(), serde_json::json!(mem));
+        }
+        c["resources"] = serde_json::json!({
+            "requests": req,
+            "limits": lim,
+        });
+    }
+    c
+}
+
 async fn reconcile_application_plugins(state: &AppState) {
     let rows = match application_plugin_resources::Entity::find()
         .all(&state.db)
@@ -1438,21 +1478,31 @@ async fn reconcile_application_plugins(state: &AppState) {
 
     let mut app_state: HashMap<String, HashMap<String, String>> = HashMap::new();
     let mut app_annotations: HashMap<String, HashMap<String, String>> = HashMap::new();
+    let mut app_sidecars: HashMap<String, Vec<SidecarSpec>> = HashMap::new();
     for row in rows {
         let state_map: HashMap<String, String> =
             serde_json::from_str(&row.state).unwrap_or_default();
         let ann_map: HashMap<String, String> =
             serde_json::from_str(&row.annotations).unwrap_or_default();
+        let sidecars_raw: Vec<SidecarSpec> =
+            serde_json::from_str(&row.sidecars).unwrap_or_default();
         let state_entry = app_state.entry(row.application_id.clone()).or_default();
         state_entry.extend(state_map);
         if !ann_map.is_empty() {
-            let ann_entry = app_annotations.entry(row.application_id).or_default();
+            let ann_entry = app_annotations
+                .entry(row.application_id.clone())
+                .or_default();
             ann_entry.extend(ann_map);
+        }
+        if !sidecars_raw.is_empty() {
+            let sidecar_entry = app_sidecars.entry(row.application_id).or_default();
+            sidecar_entry.extend(sidecars_raw);
         }
     }
 
     for (app_id, env_map) in &app_state {
-        if env_map.is_empty() {
+        let sidecars = app_sidecars.get(app_id).cloned().unwrap_or_default();
+        if env_map.is_empty() && sidecars.is_empty() {
             continue;
         }
 
@@ -1488,6 +1538,24 @@ async fn reconcile_application_plugins(state: &AppState) {
                     };
 
                     let ann_map = app_annotations.get(app_id).cloned().unwrap_or_default();
+
+                    let primary_name = dep
+                        .spec
+                        .as_ref()
+                        .and_then(|s| s.template.spec.as_ref())
+                        .and_then(|ps| ps.containers.first())
+                        .map(|c| c.name.clone())
+                        .unwrap_or_default();
+
+                    let mut containers_patch = vec![serde_json::json!({
+                        "name": primary_name,
+                        "env": env_vars.iter().map(|e| serde_json::json!({
+                            "name": e.name,
+                            "value": e.value.as_deref().unwrap_or(""),
+                        })).collect::<Vec<_>>(),
+                    })];
+                    containers_patch.extend(sidecars.iter().map(sidecar_to_json));
+
                     let patch = serde_json::json!({
                         "apiVersion": "apps/v1",
                         "kind": "Deployment",
@@ -1499,17 +1567,7 @@ async fn reconcile_application_plugins(state: &AppState) {
                         "spec": {
                             "template": {
                                 "spec": {
-                                    "containers": [{
-                                        "name": dep.spec.as_ref()
-                                            .and_then(|s| s.template.spec.as_ref())
-                                            .and_then(|ps| ps.containers.first())
-                                            .map(|c| c.name.clone())
-                                            .unwrap_or_default(),
-                                        "env": env_vars.iter().map(|e| serde_json::json!({
-                                            "name": e.name,
-                                            "value": e.value.as_deref().unwrap_or(""),
-                                        })).collect::<Vec<_>>(),
-                                    }]
+                                    "containers": containers_patch,
                                 }
                             }
                         }
@@ -1556,6 +1614,15 @@ async fn reconcile_application_plugins(state: &AppState) {
                         .map(|c| c.name.clone())
                         .unwrap_or_default();
 
+                    let mut cj_containers_patch = vec![serde_json::json!({
+                        "name": container_name,
+                        "env": env_vars.iter().map(|e| serde_json::json!({
+                            "name": e.name,
+                            "value": e.value.as_deref().unwrap_or(""),
+                        })).collect::<Vec<_>>(),
+                    })];
+                    cj_containers_patch.extend(sidecars.iter().map(sidecar_to_json));
+
                     let patch = serde_json::json!({
                         "apiVersion": "batch/v1",
                         "kind": "CronJob",
@@ -1568,13 +1635,7 @@ async fn reconcile_application_plugins(state: &AppState) {
                                 "spec": {
                                     "template": {
                                         "spec": {
-                                            "containers": [{
-                                                "name": container_name,
-                                                "env": env_vars.iter().map(|e| serde_json::json!({
-                                                    "name": e.name,
-                                                    "value": e.value.as_deref().unwrap_or(""),
-                                                })).collect::<Vec<_>>(),
-                                            }]
+                                            "containers": cj_containers_patch,
                                         }
                                     }
                                 }
