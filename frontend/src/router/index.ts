@@ -86,6 +86,12 @@ const router = createRouter({
           props: true,
         },
         {
+          path: "marketplace",
+          name: "Marketplace",
+          component: () =>
+            import("@/components/pages/MarketplacePage.vue"),
+        },
+        {
           path: "settings",
           name: "Settings",
           component: () =>

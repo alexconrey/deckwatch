@@ -99,11 +99,20 @@ pub struct DeckwatchSettings {
     /// plugin is a compiled WASM binary fetched from a Git repository.
     #[serde(default)]
     pub plugins: Vec<PluginConfig>,
+    /// URL of the plugin marketplace catalog JSON.
+    /// Fetched client-side by the Marketplace page to browse and install plugins.
+    /// Set to "" to disable the marketplace. Defaults to the official catalog.
+    #[serde(default = "default_marketplace_url")]
+    pub marketplace_url: String,
     /// Resource-scoped hints injected into MCP tool descriptions at `tools/list`
     /// time. Each hint is appended to the description of every tool in that
     /// resource group so the AI only sees it when the relevant tools are in scope.
     #[serde(default)]
     pub mcp_tuning: McpTuning,
+}
+
+fn default_marketplace_url() -> String {
+    "http://market.deckwatch.io/catalog.json".to_string()
 }
 
 /// Per-resource-group instruction hints for MCP tools.
@@ -752,6 +761,7 @@ fn default_settings(state: &AppState) -> DeckwatchSettings {
         build_architectures: default_build_architectures(),
         build_settings: default_build_settings(),
         plugins: Vec::new(),
+        marketplace_url: default_marketplace_url(),
         mcp_tuning: McpTuning::default(),
     }
 }

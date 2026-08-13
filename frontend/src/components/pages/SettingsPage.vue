@@ -10,6 +10,7 @@ import { templatesApi } from "@/api/templates";
 import { useAiSettings } from "@/composables/useAiSettings";
 import { useClusterAlertSettings } from "@/composables/useClusterAlertSettings";
 import AuditLogPage from "@/components/pages/AuditLogPage.vue";
+import MarketplacePage from "@/components/pages/MarketplacePage.vue";
 import ConfirmDialog from "@/components/common/ConfirmDialog.vue";
 import type {
   AiProviderConfig,
@@ -63,6 +64,7 @@ type SectionId =
   | "container_registries"
   | "plugins"
   | "mcp_tuning"
+  | "advanced"
   | "audit";
 
 const navItems: { id: SectionId; title: string; icon: string }[] = [
@@ -77,6 +79,7 @@ const navItems: { id: SectionId; title: string; icon: string }[] = [
   { id: "container_registries", title: "Container Registries", icon: "mdi-package-variant" },
   { id: "plugins", title: "Plugins", icon: "mdi-puzzle" },
   { id: "mcp_tuning", title: "MCP Tuning", icon: "mdi-brain" },
+  { id: "advanced", title: "Advanced", icon: "mdi-cog-outline" },
   { id: "audit", title: "Audit Log", icon: "mdi-clipboard-text-clock" },
 ];
 
@@ -397,6 +400,8 @@ const plugins = ref<PluginConfig[]>([]);
 const loadedPlugins = ref<PluginSummary[]>([]);
 const loadedPluginsError = ref<string | null>(null);
 const mcpTuning = ref<McpTuning>({});
+const marketplaceUrl = ref('http://market.deckwatch.io/catalog.json');
+const marketplaceOpen = ref<string | null>(null);
 
 const mcpTuningGroups = [
   {
@@ -519,6 +524,7 @@ function applySettings(s: DeckwatchSettings) {
   gitRepositories.value = s.git_repositories ?? [];
   plugins.value = s.plugins ?? [];
   mcpTuning.value = s.mcp_tuning ?? {};
+  marketplaceUrl.value = s.marketplace_url ?? 'http://market.deckwatch.io/catalog.json';
   ociRegistries.value = s.oci_registries ?? [];
   gitTokenSecrets.value = s.git_token_secrets ?? [];
   ingressTemplates.value = (s.ingress_templates ?? []).map((t) => ({
@@ -614,6 +620,7 @@ function buildPayload(): DeckwatchSettings {
     ingress_templates: ingressTemplates.value,
     plugins: plugins.value,
     mcp_tuning: mcpTuning.value,
+    marketplace_url: marketplaceUrl.value,
   };
 }
 
@@ -727,6 +734,20 @@ async function testNotification() {
     snackbar.value = true;
   } finally {
     testingNotification.value = false;
+  }
+}
+
+async function saveAdvanced() {
+  try {
+    const updated = await settingsApi.update(buildPayload());
+    applySettings(updated);
+    snackbarMessage.value = "Advanced settings saved";
+    snackbarColor.value = "success";
+    snackbar.value = true;
+  } catch (e: any) {
+    snackbarMessage.value = e.message ?? "Failed to save";
+    snackbarColor.value = "error";
+    snackbar.value = true;
   }
 }
 
@@ -2703,9 +2724,26 @@ onMounted(load);
 
         <!-- Plugins -->
         <div v-else-if="section === 'plugins'">
+
+          <!-- Marketplace browser (collapsible) -->
+          <v-expansion-panels v-model="marketplaceOpen" class="mb-6">
+            <v-expansion-panel value="marketplace">
+              <v-expansion-panel-title>
+                <v-icon class="mr-2" color="primary">mdi-store</v-icon>
+                <span class="font-weight-medium">Browse Marketplace</span>
+                <span class="text-caption text-medium-emphasis ml-2">
+                  Discover and install plugins from the deckwatch catalog
+                </span>
+              </v-expansion-panel-title>
+              <v-expansion-panel-text class="pa-0">
+                <MarketplacePage />
+              </v-expansion-panel-text>
+            </v-expansion-panel>
+          </v-expansion-panels>
+
           <div class="d-flex align-center justify-space-between mb-4">
             <div>
-              <div class="text-h6">Plugins</div>
+              <div class="text-h6">Installed Plugins</div>
               <div class="text-caption text-medium-emphasis">
                 External WASM plugins fetched from Git repositories. Each plugin runs on every
                 deployment create/update and can inject env vars, sidecars, and Kubernetes
@@ -3156,6 +3194,30 @@ onMounted(load);
                   hide-details
                 />
               </v-card>
+            </v-col>
+          </v-row>
+        </div>
+
+        <!-- Advanced -->
+        <div v-else-if="section === 'advanced'">
+          <div class="text-h6 font-weight-bold mb-4">Advanced</div>
+          <v-row>
+            <v-col cols="12" md="8">
+              <v-text-field
+                v-model="marketplaceUrl"
+                label="Marketplace URL"
+                :placeholder="'http://market.deckwatch.io/catalog.json'"
+                variant="outlined"
+                density="compact"
+                hint="URL of the plugin marketplace catalog JSON. Leave blank to disable. Point to an internal mirror for air-gapped environments."
+                persistent-hint
+                clearable
+              />
+            </v-col>
+          </v-row>
+          <v-row class="mt-4">
+            <v-col>
+              <v-btn color="primary" @click="saveAdvanced">Save</v-btn>
             </v-col>
           </v-row>
         </div>
