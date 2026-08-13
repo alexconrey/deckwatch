@@ -249,6 +249,10 @@ pub struct ResourceProvisionResult {
     /// Old plugins without this field deserialize to an empty map.
     #[serde(default)]
     pub deployment_annotations: std::collections::HashMap<String, String>,
+    /// Sidecars to inject into all application deployments and cronjobs.
+    /// Old plugins that do not return this field deserialize to an empty vec.
+    #[serde(default)]
+    pub sidecars: Vec<SidecarSpec>,
     #[serde(default)]
     pub kubernetes_resources: Vec<serde_json::Value>,
     #[serde(default)]

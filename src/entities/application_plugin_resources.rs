@@ -17,6 +17,9 @@ pub struct Model {
     /// JSON blob of deployment annotations to stamp on all application deployments.
     #[sea_orm(column_type = "Text")]
     pub annotations: String,
+    /// JSON array of SidecarSpec objects to inject into all application deployments.
+    #[sea_orm(column_type = "Text")]
+    pub sidecars: String,
     pub created_at: DateTimeUtc,
     pub updated_at: DateTimeUtc,
 }
