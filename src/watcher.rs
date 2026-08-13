@@ -1437,11 +1437,18 @@ async fn reconcile_application_plugins(state: &AppState) {
     }
 
     let mut app_state: HashMap<String, HashMap<String, String>> = HashMap::new();
+    let mut app_annotations: HashMap<String, HashMap<String, String>> = HashMap::new();
     for row in rows {
         let state_map: HashMap<String, String> =
             serde_json::from_str(&row.state).unwrap_or_default();
-        let entry = app_state.entry(row.application_id).or_default();
-        entry.extend(state_map);
+        let ann_map: HashMap<String, String> =
+            serde_json::from_str(&row.annotations).unwrap_or_default();
+        let state_entry = app_state.entry(row.application_id.clone()).or_default();
+        state_entry.extend(state_map);
+        if !ann_map.is_empty() {
+            let ann_entry = app_annotations.entry(row.application_id).or_default();
+            ann_entry.extend(ann_map);
+        }
     }
 
     for (app_id, env_map) in &app_state {
@@ -1480,12 +1487,14 @@ async fn reconcile_application_plugins(state: &AppState) {
                         None => continue,
                     };
 
+                    let ann_map = app_annotations.get(app_id).cloned().unwrap_or_default();
                     let patch = serde_json::json!({
                         "apiVersion": "apps/v1",
                         "kind": "Deployment",
                         "metadata": {
                             "name": dep_name,
                             "namespace": ns,
+                            "annotations": ann_map,
                         },
                         "spec": {
                             "template": {

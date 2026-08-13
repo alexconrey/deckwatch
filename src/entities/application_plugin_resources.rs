@@ -14,6 +14,9 @@ pub struct Model {
     /// JSON blob of plugin-returned state outputs (DB_HOST, S3_BUCKET, etc.).
     #[sea_orm(column_type = "Text")]
     pub state: String,
+    /// JSON blob of deployment annotations to stamp on all application deployments.
+    #[sea_orm(column_type = "Text")]
+    pub annotations: String,
     pub created_at: DateTimeUtc,
     pub updated_at: DateTimeUtc,
 }
