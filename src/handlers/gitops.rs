@@ -8,6 +8,7 @@ use sea_orm::entity::prelude::DateTimeUtc;
 use sea_orm::{ActiveModelTrait, ColumnTrait, EntityTrait, QueryFilter, QueryOrder, QuerySelect};
 use serde::{Deserialize, Serialize};
 
+use crate::audit;
 use crate::entities::builds;
 use crate::entities::gitops_configs;
 use crate::error::AppError;
@@ -421,6 +422,20 @@ pub async fn set_config(
     // Remove legacy annotations from the deployment (clean migration).
     remove_legacy_annotations(&state, &ns, &name).await?;
 
+    if let Err(e) = audit::log_action(
+        &state.db,
+        "upsert",
+        "gitops",
+        &format!("{ns}/{name}"),
+        &ns,
+        "set gitops config",
+        "",
+    )
+    .await
+    {
+        tracing::warn!(error = %e, "failed to write audit log");
+    }
+
     get_config(State(state), Path((ns, name))).await
 }
 
@@ -562,6 +577,20 @@ pub async fn delete_config(
         .delete(&webhook_secret_name(&name), &Default::default())
         .await;
 
+    if let Err(e) = audit::log_action(
+        &state.db,
+        "delete",
+        "gitops",
+        &format!("{ns}/{name}"),
+        &ns,
+        "deleted gitops config",
+        "",
+    )
+    .await
+    {
+        tracing::warn!(error = %e, "failed to write audit log");
+    }
+
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -666,6 +695,20 @@ pub async fn trigger_build(
         if let Err(e) = builds::Entity::insert(build_row).exec(&state.db).await {
             tracing::warn!(error = %e, "failed to insert build row into database");
         }
+    }
+
+    if let Err(e) = audit::log_action(
+        &state.db,
+        "trigger",
+        "gitops",
+        &format!("{ns}/{name}"),
+        &ns,
+        &format!("triggered build for commit {short_sha}"),
+        "",
+    )
+    .await
+    {
+        tracing::warn!(error = %e, "failed to write audit log");
     }
 
     Ok(Json(serde_json::json!({

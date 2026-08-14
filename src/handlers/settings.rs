@@ -658,6 +658,7 @@ pub async fn put_settings(
         "main",
         "",
         "updated application settings",
+        "",
     )
     .await
     {
@@ -848,6 +849,7 @@ pub async fn set_credentials(
         "credentials",
         "",
         "updated encrypted credentials",
+        "",
     )
     .await
     {
@@ -961,6 +963,7 @@ pub async fn put_git_token_secret(
         &req.name,
         "",
         &format!("created/updated git token '{}'", req.name),
+        "",
     )
     .await
     {
@@ -997,6 +1000,7 @@ pub async fn delete_git_token_secret(
         &token_name,
         "",
         &format!("deleted git token '{token_name}'"),
+        "",
     )
     .await
     {
