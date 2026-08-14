@@ -20,6 +20,7 @@ use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
 use kube::api::{DynamicObject, Patch, PatchParams};
 use kube::Api;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use crate::handlers::settings::{DeckwatchSettings, PluginConfig, PluginSource};
 use crate::metrics;
@@ -666,7 +667,36 @@ async fn fetch_bytes(
     if !status.is_success() {
         return Err(anyhow::anyhow!("HTTP {status} fetching plugin from {url}"));
     }
-    Ok(resp.bytes().await?.to_vec())
+    let bytes = resp.bytes().await?.to_vec();
+
+    // Verify SHA-256 checksum when the catalog entry provides one.
+    // Reject mismatches to prevent tampered or corrupted WASM from loading.
+    // Log a warning (but allow load) when no checksum is configured, so
+    // development workflows aren't blocked while still surfacing the gap.
+    match &cfg.sha256 {
+        Some(expected_hex) => {
+            let mut hasher = Sha256::new();
+            hasher.update(&bytes);
+            let actual_hex = format!("{:x}", hasher.finalize());
+            if actual_hex != *expected_hex {
+                return Err(anyhow::anyhow!(
+                    "SHA-256 mismatch for plugin '{}': expected {expected_hex}, got {actual_hex}",
+                    cfg.name
+                ));
+            }
+            tracing::debug!(plugin = %cfg.name, "SHA-256 checksum verified");
+        }
+        None => {
+            tracing::warn!(
+                plugin = %cfg.name,
+                url = %url,
+                "no sha256 checksum configured for plugin — \
+                 consider pinning a checksum in settings to prevent supply-chain tampering"
+            );
+        }
+    }
+
+    Ok(bytes)
 }
 
 fn resolve_url(source: &PluginSource) -> String {

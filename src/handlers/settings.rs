@@ -530,6 +530,13 @@ pub struct PluginConfig {
     /// of the same name.
     #[serde(default)]
     pub inherit_env_file_keys: std::collections::BTreeMap<String, String>,
+    /// Expected SHA-256 hex digest of the fetched WASM binary. When set,
+    /// deckwatch verifies the digest after download and rejects the binary if
+    /// it doesn't match. When absent, a warning is logged and the binary is
+    /// loaded anyway (useful for development; production deployments should
+    /// always pin a checksum).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sha256: Option<String>,
 }
 
 pub async fn get_settings(

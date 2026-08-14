@@ -15,12 +15,16 @@ use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder, QuerySelect};
 use serde::{Deserialize, Serialize};
 
 use crate::audit;
-use crate::entities::{agent_feedback, builds, gitops_configs};
+use crate::entities::applications as apps_entity;
+use crate::entities::{
+    agent_feedback, application_plugin_resources, application_plugins, builds, gitops_configs,
+};
 use crate::handlers::applications;
 use crate::handlers::{
     addons, application_resources, gitops, ingresses, monitoring, settings, templates,
 };
 use crate::state::AppState;
+use sea_orm::sea_query::{Expr, Func};
 
 // ---------------------------------------------------------------------------
 // JSON-RPC 2.0 types
@@ -156,7 +160,15 @@ fn mcp_resource_group(name: &str) -> Option<&'static str> {
     // Check specific deckwatch tools first to avoid ambiguous pattern matches.
     if matches!(
         name,
-        "create_application" | "list_addons" | "attach_addon" | "detach_addon" | "list_templates"
+        "create_application"
+            | "list_applications"
+            | "get_application"
+            | "restart_application"
+            | "scale_application"
+            | "list_addons"
+            | "attach_addon"
+            | "detach_addon"
+            | "list_templates"
     ) {
         return Some("applications");
     }
@@ -257,6 +269,58 @@ fn deckwatch_tool_definitions() -> Vec<serde_json::Value> {
             }
         }),
         serde_json::json!({
+            "name": "list_applications",
+            "description": "List all deckwatch applications in a namespace. Returns name, namespace, and member deployment names.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "namespace": { "type": "string" }
+                },
+                "required": ["namespace"],
+                "additionalProperties": false
+            }
+        }),
+        serde_json::json!({
+            "name": "get_application",
+            "description": "Get detailed information about a deckwatch application: member deployments, associated plugin names, and provisioned infrastructure resource states.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "namespace": { "type": "string" },
+                    "name": { "type": "string" }
+                },
+                "required": ["namespace", "name"],
+                "additionalProperties": false
+            }
+        }),
+        serde_json::json!({
+            "name": "restart_application",
+            "description": "Rollout-restart all member deployments of a deckwatch application concurrently by stamping a restartedAt annotation.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "namespace": { "type": "string" },
+                    "name": { "type": "string" }
+                },
+                "required": ["namespace", "name"],
+                "additionalProperties": false
+            }
+        }),
+        serde_json::json!({
+            "name": "scale_application",
+            "description": "Scale all member deployments of a deckwatch application to the given replica count concurrently.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "namespace": { "type": "string" },
+                    "name": { "type": "string" },
+                    "replicas": { "type": "integer", "minimum": 0 }
+                },
+                "required": ["namespace", "name", "replicas"],
+                "additionalProperties": false
+            }
+        }),
+        serde_json::json!({
             "name": "list_addons",
             "description": "List available deployment addons (Redis, PostgreSQL, Memcached, etc.).",
             "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false }
@@ -312,7 +376,9 @@ fn deckwatch_tool_definitions() -> Vec<serde_json::Value> {
                     "token_secret": { "type": "string", "description": "Name of a shared token from Settings (looked up by display name)" },
                     "token": { "type": "string", "description": "Per-app git token (encrypted and stored on this gitops config). Use instead of token_secret for project-scoped tokens." },
                     "git_auth_user": { "type": "string", "description": "Auto-detected: oauth2 for GitLab, x-access-token for GitHub" },
-                    "poll_interval_seconds": { "type": "integer" }
+                    "poll_interval_seconds": { "type": "integer" },
+                    "webhook_enabled": { "type": "boolean", "description": "Enable or disable webhook-based build triggering for this deployment" },
+                    "webhook_secret": { "type": "string", "description": "Shared secret for signing/verifying webhook payloads. Stored in a per-deployment Kubernetes Secret; never returned on GET." }
                 },
                 "required": ["namespace", "deployment_name", "repo_url"],
                 "additionalProperties": false
@@ -816,6 +882,10 @@ async fn handle_tool_call(state: &AppState, request: &JsonRpcRequest) -> JsonRpc
 
     let deckwatch_result = match tool_name {
         "create_application" => Some(tool_create_application(state, args).await),
+        "list_applications" => Some(tool_list_applications(state, args).await),
+        "get_application" => Some(tool_get_application(state, args).await),
+        "restart_application" => Some(tool_restart_application(state, args).await),
+        "scale_application" => Some(tool_scale_application(state, args).await),
         "list_addons" => Some(tool_list_addons().await),
         "attach_addon" => Some(tool_attach_addon(state, args).await),
         "detach_addon" => Some(tool_detach_addon(state, args).await),
@@ -872,6 +942,16 @@ async fn handle_tool_call(state: &AppState, request: &JsonRpcRequest) -> JsonRpc
         mcp_k8s::mcp::handle_tool(&k8s_client, tool_name, args)
             .await
             .unwrap_or_else(|| Err(format!("Unknown tool: {tool_name}")))
+    };
+
+    // Apply prompt-injection sanitization to pod log content before it is
+    // embedded in the MCP response and potentially fed into an LLM context.
+    // Pod stdout is untrusted input — anyone who can deploy a workload can
+    // print adversarial text into it. See src/log_sanitize.rs for details.
+    let result = if tool_name == "get_pod_logs" {
+        result.map(|text| crate::log_sanitize::sanitize_logs(&text))
+    } else {
+        result
     };
 
     match result {
@@ -937,6 +1017,254 @@ async fn tool_get_gitops_status(
         }
         None => Ok(format!("GitOps is not configured for {ns}/{name}.")),
     }
+}
+
+// ---------------------------------------------------------------------------
+// Application-level MCP tools
+// ---------------------------------------------------------------------------
+
+async fn tool_list_applications(
+    state: &AppState,
+    args: &serde_json::Value,
+) -> Result<String, String> {
+    let ns = args["namespace"].as_str().ok_or("namespace is required")?;
+
+    let rows = apps_entity::Entity::find()
+        .filter(apps_entity::Column::Namespace.eq(ns))
+        .all(&state.db)
+        .await
+        .map_err(|e| format!("database error: {e}"))?;
+
+    let dep_api = state.deployments_api(ns).map_err(|e| e.to_string())?;
+
+    let mut list = Vec::with_capacity(rows.len());
+    for row in &rows {
+        let lp = kube::api::ListParams::default()
+            .labels(&format!("deckwatch.io/application={}", row.name));
+        let deps = dep_api.list(&lp).await.map_err(|e| e.to_string())?;
+        let members: Vec<String> = deps
+            .items
+            .iter()
+            .filter_map(|d| d.metadata.name.clone())
+            .collect();
+        list.push(serde_json::json!({
+            "name": row.name,
+            "namespace": row.namespace,
+            "members": members,
+        }));
+    }
+
+    serde_json::to_string_pretty(&serde_json::json!({ "applications": list }))
+        .map_err(|e| e.to_string())
+}
+
+async fn tool_get_application(
+    state: &AppState,
+    args: &serde_json::Value,
+) -> Result<String, String> {
+    let ns = args["namespace"].as_str().ok_or("namespace is required")?;
+    let name = args["name"].as_str().ok_or("name is required")?;
+
+    let app_id = format!("{ns}/{name}");
+
+    let _row = apps_entity::Entity::find_by_id(&app_id)
+        .one(&state.db)
+        .await
+        .map_err(|e| format!("database error: {e}"))?
+        .ok_or_else(|| format!("application '{name}' not found in namespace '{ns}'"))?;
+
+    // Member deployments.
+    let dep_api = state.deployments_api(ns).map_err(|e| e.to_string())?;
+    let lp = kube::api::ListParams::default().labels(&format!("deckwatch.io/application={name}"));
+    let deps = dep_api.list(&lp).await.map_err(|e| e.to_string())?;
+    let members: Vec<String> = deps
+        .items
+        .iter()
+        .filter_map(|d| d.metadata.name.clone())
+        .collect();
+
+    // Associated plugin names.
+    let plugin_rows = application_plugins::Entity::find()
+        .filter(application_plugins::Column::ApplicationId.eq(&app_id))
+        .all(&state.db)
+        .await
+        .unwrap_or_default();
+    let plugin_names: Vec<String> = plugin_rows.into_iter().map(|r| r.plugin_name).collect();
+
+    // Provisioned resource states from application_plugin_resources.
+    let resource_rows = application_plugin_resources::Entity::find()
+        .filter(application_plugin_resources::Column::ApplicationId.eq(&app_id))
+        .all(&state.db)
+        .await
+        .unwrap_or_default();
+    let resources: Vec<serde_json::Value> = resource_rows
+        .into_iter()
+        .map(|r| {
+            let state_json: serde_json::Value =
+                serde_json::from_str(&r.state).unwrap_or(serde_json::Value::Null);
+            let fields_json: serde_json::Value =
+                serde_json::from_str(&r.fields).unwrap_or(serde_json::Value::Null);
+            serde_json::json!({
+                "plugin_name": r.plugin_name,
+                "resource_id": r.resource_id,
+                "fields": fields_json,
+                "state": state_json,
+            })
+        })
+        .collect();
+
+    let result = serde_json::json!({
+        "name": name,
+        "namespace": ns,
+        "members": members,
+        "plugins": plugin_names,
+        "provisioned_resources": resources,
+    });
+
+    serde_json::to_string_pretty(&result).map_err(|e| e.to_string())
+}
+
+async fn tool_restart_application(
+    state: &AppState,
+    args: &serde_json::Value,
+) -> Result<String, String> {
+    let ns = args["namespace"].as_str().ok_or("namespace is required")?;
+    let name = args["name"].as_str().ok_or("name is required")?;
+
+    let dep_api = state.deployments_api(ns).map_err(|e| e.to_string())?;
+    let lp = kube::api::ListParams::default().labels(&format!("deckwatch.io/application={name}"));
+    let deps = dep_api.list(&lp).await.map_err(|e| e.to_string())?;
+
+    let dep_names: Vec<String> = deps
+        .items
+        .iter()
+        .filter_map(|d| d.metadata.name.clone())
+        .collect();
+
+    let restart_ts = {
+        use std::time::SystemTime;
+        let d = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap_or_default();
+        format!("{}", d.as_secs())
+    };
+
+    let futures: Vec<_> = dep_names
+        .iter()
+        .map(|dep_name| {
+            let dep_api = dep_api.clone();
+            let dep_name = dep_name.clone();
+            let ts = restart_ts.clone();
+            async move {
+                let patch = serde_json::json!({
+                    "spec": {
+                        "template": {
+                            "metadata": {
+                                "annotations": {
+                                    "kubectl.kubernetes.io/restartedAt": ts
+                                }
+                            }
+                        }
+                    }
+                });
+                dep_api
+                    .patch(
+                        &dep_name,
+                        &kube::api::PatchParams::default(),
+                        &kube::api::Patch::Merge(&patch),
+                    )
+                    .await
+                    .map(|_| dep_name.clone())
+                    .map_err(|e| format!("{dep_name}: {e}"))
+            }
+        })
+        .collect();
+
+    let results = futures::future::join_all(futures).await;
+
+    let mut restarted = Vec::new();
+    let mut errors = Vec::new();
+    for r in results {
+        match r {
+            Ok(dep_name) => restarted.push(dep_name),
+            Err(e) => errors.push(e),
+        }
+    }
+
+    if !errors.is_empty() {
+        return Err(format!(
+            "partial restart — succeeded: {:?}, failed: {:?}",
+            restarted, errors
+        ));
+    }
+
+    serde_json::to_string_pretty(&serde_json::json!({ "restarted": restarted }))
+        .map_err(|e| e.to_string())
+}
+
+async fn tool_scale_application(
+    state: &AppState,
+    args: &serde_json::Value,
+) -> Result<String, String> {
+    let ns = args["namespace"].as_str().ok_or("namespace is required")?;
+    let name = args["name"].as_str().ok_or("name is required")?;
+    let replicas = args["replicas"]
+        .as_i64()
+        .ok_or("replicas is required and must be an integer")?
+        .max(0) as i32;
+
+    let dep_api = state.deployments_api(ns).map_err(|e| e.to_string())?;
+    let lp = kube::api::ListParams::default().labels(&format!("deckwatch.io/application={name}"));
+    let deps = dep_api.list(&lp).await.map_err(|e| e.to_string())?;
+
+    let dep_names: Vec<String> = deps
+        .items
+        .iter()
+        .filter_map(|d| d.metadata.name.clone())
+        .collect();
+
+    let futures: Vec<_> = dep_names
+        .iter()
+        .map(|dep_name| {
+            let dep_api = dep_api.clone();
+            let dep_name = dep_name.clone();
+            async move {
+                let patch = serde_json::json!({
+                    "spec": { "replicas": replicas }
+                });
+                dep_api
+                    .patch(
+                        &dep_name,
+                        &kube::api::PatchParams::default(),
+                        &kube::api::Patch::Merge(&patch),
+                    )
+                    .await
+                    .map(|_| dep_name.clone())
+                    .map_err(|e| format!("{dep_name}: {e}"))
+            }
+        })
+        .collect();
+
+    let results = futures::future::join_all(futures).await;
+
+    let mut scaled = Vec::new();
+    let mut errors = Vec::new();
+    for r in results {
+        match r {
+            Ok(dep_name) => scaled.push(dep_name),
+            Err(e) => errors.push(e),
+        }
+    }
+
+    if !errors.is_empty() {
+        return Err(format!(
+            "partial scale — succeeded: {:?}, failed: {:?}",
+            scaled, errors
+        ));
+    }
+
+    serde_json::to_string_pretty(&serde_json::json!({ "scaled": scaled, "replicas": replicas }))
+        .map_err(|e| e.to_string())
 }
 
 async fn tool_list_addons() -> Result<String, String> {
@@ -1095,8 +1423,8 @@ async fn tool_configure_gitops(
         include_paths: None,
         exclude_paths: None,
         poll_interval_seconds: args["poll_interval_seconds"].as_i64(),
-        webhook_enabled: None,
-        webhook_secret: None,
+        webhook_enabled: args["webhook_enabled"].as_bool(),
+        webhook_secret: args["webhook_secret"].as_str().map(|s| s.to_string()),
     };
 
     let result = gitops::set_config(
@@ -2002,6 +2330,9 @@ async fn tool_validate_plugin(
             .get("inherit_env_file_keys")
             .and_then(|v| serde_json::from_value(v.clone()).ok())
             .unwrap_or_default(),
+        // Validation runs do not enforce a checksum — the caller is explicitly
+        // testing an arbitrary source before committing it to settings.
+        sha256: None,
     };
 
     let test_ctx = crate::plugins::PluginContext {
@@ -2315,9 +2646,7 @@ async fn tool_associate_plugin(
     let app_id = format!("{ns}/{app_name}");
 
     // Verify application exists.
-    use crate::entities::applications;
-    use sea_orm::EntityTrait;
-    applications::Entity::find_by_id(&app_id)
+    apps_entity::Entity::find_by_id(&app_id)
         .one(&state.db)
         .await
         .map_err(|e| format!("database error: {e}"))?
@@ -2336,13 +2665,9 @@ async fn tool_associate_plugin(
             })?
     };
 
-    use crate::entities::application_plugins;
-    use sea_orm::{ColumnTrait, QueryFilter};
-
     // Bug 1: idempotency — check if the association already exists before
     // attempting an insert.  Use a case-insensitive comparison so that
     // "AWS" and "aws" are treated as the same plugin (Bug 2).
-    use sea_orm::sea_query::{Expr, Func};
     let existing = application_plugins::Entity::find()
         .filter(application_plugins::Column::ApplicationId.eq(&app_id))
         .filter(
@@ -2415,11 +2740,8 @@ async fn tool_disassociate_plugin(
 
     let app_id = format!("{ns}/{app_name}");
 
-    use crate::entities::application_plugins;
-    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
     // Bug 2: use case-insensitive comparison so that "AWS" and "aws" match the
     // same stored row regardless of how the name was originally cased.
-    use sea_orm::sea_query::{Expr, Func};
 
     let deleted = application_plugins::Entity::delete_many()
         .filter(application_plugins::Column::ApplicationId.eq(&app_id))
