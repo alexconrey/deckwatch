@@ -116,6 +116,12 @@ const router = createRouter({
           component: () =>
             import("@/components/pages/AuditLogPage.vue"),
         },
+        {
+          path: "agent-feedback",
+          name: "AgentFeedback",
+          component: () =>
+            import("@/components/pages/AgentFeedbackPage.vue"),
+        },
       ],
     },
     {

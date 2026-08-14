@@ -7,6 +7,7 @@ mod m20260812_000001_application_plugins;
 mod m20260812_000002_plugin_resources;
 mod m20260812_000003_plugin_resource_annotations;
 mod m20260813_000001_plugin_resource_sidecars;
+mod m20260814_000001_agent_feedback;
 
 use sea_orm_migration::prelude::*;
 
@@ -25,6 +26,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20260812_000002_plugin_resources::Migration),
             Box::new(m20260812_000003_plugin_resource_annotations::Migration),
             Box::new(m20260813_000001_plugin_resource_sidecars::Migration),
+            Box::new(m20260814_000001_agent_feedback::Migration),
         ]
     }
 }

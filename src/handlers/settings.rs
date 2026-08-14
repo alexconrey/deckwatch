@@ -76,6 +76,12 @@ pub struct DeckwatchSettings {
     /// once the backend wiring ships.
     #[serde(default = "default_true")]
     pub ai_codex_enabled: bool,
+    /// Runtime toggle for the Agent Feedback feature. When true, an MCP
+    /// tool (`submit_agent_feedback`) is exposed so agents can record
+    /// observations about missing tooling or suboptimal workflows.
+    /// Defaults to false so the feature is opt-in.
+    #[serde(default)]
+    pub agent_feedback_enabled: bool,
     /// Selects which AI backend provider to use for Claude API calls.
     /// Supports native Anthropic API, Google Vertex AI, and AWS Bedrock.
     /// Defaults to `native` with the standard API key secret.
@@ -755,6 +761,7 @@ fn default_settings(state: &AppState) -> DeckwatchSettings {
         prometheus_enabled: true,
         ai_claude_enabled: true,
         ai_codex_enabled: true,
+        agent_feedback_enabled: false,
         ai_provider: AiProviderConfig::default(),
         credentials: None,
         ingress_templates: Vec::new(),

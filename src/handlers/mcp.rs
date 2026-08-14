@@ -14,7 +14,7 @@ use axum::Json;
 use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder, QuerySelect};
 use serde::{Deserialize, Serialize};
 
-use crate::entities::{builds, gitops_configs};
+use crate::entities::{agent_feedback, builds, gitops_configs};
 use crate::handlers::applications;
 use crate::handlers::{addons, gitops, ingresses, monitoring, settings, templates};
 use crate::state::AppState;
@@ -90,15 +90,36 @@ pub async fn handle_mcp(
 // ---------------------------------------------------------------------------
 
 async fn handle_initialize(state: &AppState, request: &JsonRpcRequest) -> JsonRpcResponse {
-    let tuning = settings::load_settings_from_db(state).await.mcp_tuning;
+    let loaded = settings::load_settings_from_db(state).await;
+    let tuning = loaded.mcp_tuning;
+    let agent_feedback_enabled = loaded.agent_feedback_enabled;
+
     let mut result = serde_json::json!({
         "protocolVersion": "2025-11-25",
         "capabilities": { "tools": {}, "prompts": {} },
         "serverInfo": { "name": "deckwatch", "version": env!("CARGO_PKG_VERSION") }
     });
+
+    let mut instructions_parts: Vec<String> = Vec::new();
+
     if let Some(global) = tuning.global.filter(|s| !s.is_empty()) {
-        result["instructions"] = serde_json::Value::String(global);
+        instructions_parts.push(global);
     }
+
+    if agent_feedback_enabled {
+        instructions_parts.push(
+            "Agent feedback is enabled. If at any point you encounter missing tooling, \
+             a suboptimal workflow, or a situation where better guidance would have led to a \
+             better outcome — record it using `submit_agent_feedback`. Be specific: what were \
+             you trying to do, what was missing, and what would have helped."
+                .to_string(),
+        );
+    }
+
+    if !instructions_parts.is_empty() {
+        result["instructions"] = serde_json::Value::String(instructions_parts.join("\n\n"));
+    }
+
     success_response(request, result)
 }
 
@@ -107,11 +128,19 @@ async fn handle_initialize(state: &AppState, request: &JsonRpcRequest) -> JsonRp
 // ---------------------------------------------------------------------------
 
 async fn handle_tools_list(state: &AppState, request: &JsonRpcRequest) -> JsonRpcResponse {
-    let tuning = settings::load_settings_from_db(state).await.mcp_tuning;
+    let loaded = settings::load_settings_from_db(state).await;
+    let tuning = loaded.mcp_tuning;
+    let agent_feedback_enabled = loaded.agent_feedback_enabled;
+
     let perms = mcp_k8s::permissions::ActionPermissions::default();
     let mut tools = mcp_k8s::mcp::tool_definitions(&perms);
     tools.extend(mcp_k8s::resources::all_tool_definitions());
     tools.extend(deckwatch_tool_definitions());
+
+    if agent_feedback_enabled {
+        tools.push(agent_feedback_tool_definition());
+    }
+
     let tools = tools
         .into_iter()
         .map(|t| inject_mcp_hint(t, &tuning))
@@ -656,6 +685,43 @@ fn deckwatch_tool_definitions() -> Vec<serde_json::Value> {
     ]
 }
 
+/// Tool definition for `submit_agent_feedback`. Only included in `tools/list`
+/// when `agent_feedback_enabled == true` in settings.
+fn agent_feedback_tool_definition() -> serde_json::Value {
+    serde_json::json!({
+        "name": "submit_agent_feedback",
+        "description": "Record feedback about missing tooling, suboptimal workflows, or situations where better guidance would have led to a better outcome. Use this whenever you encounter a gap in the available tools or documentation.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "category": {
+                    "type": "string",
+                    "enum": ["missing_tool", "mcp_tuning", "workflow", "documentation", "other"],
+                    "description": "Category of the feedback"
+                },
+                "summary": {
+                    "type": "string",
+                    "description": "Short one-line description of the issue"
+                },
+                "detail": {
+                    "type": "string",
+                    "description": "Full description: what you were trying to do, what was missing, and what would have helped"
+                },
+                "suggested_tool_name": {
+                    "type": "string",
+                    "description": "If category is missing_tool: what the tool could be named"
+                },
+                "suggested_prompt": {
+                    "type": "string",
+                    "description": "If applicable: a suggested system prompt or guidance text that would have improved the outcome"
+                }
+            },
+            "required": ["category", "summary", "detail"],
+            "additionalProperties": false
+        }
+    })
+}
+
 // ---------------------------------------------------------------------------
 // tools/call dispatch
 // ---------------------------------------------------------------------------
@@ -696,6 +762,7 @@ async fn handle_tool_call(state: &AppState, request: &JsonRpcRequest) -> JsonRpc
         "validate_plugin" => Some(tool_validate_plugin(state, args).await),
         "associate_plugin" => Some(tool_associate_plugin(state, args).await),
         "disassociate_plugin" => Some(tool_disassociate_plugin(state, args).await),
+        "submit_agent_feedback" => Some(tool_submit_agent_feedback(state, args).await),
         _ => None,
     };
 
@@ -1971,6 +2038,69 @@ async fn tool_disassociate_plugin(
 
     Ok(format!(
         "Plugin '{plugin_name}' disassociated from application '{app_name}' in namespace '{ns}'."
+    ))
+}
+
+// ---------------------------------------------------------------------------
+// Agent Feedback tool implementation
+// ---------------------------------------------------------------------------
+
+async fn tool_submit_agent_feedback(
+    state: &AppState,
+    args: &serde_json::Value,
+) -> Result<String, String> {
+    let category = args["category"].as_str().ok_or("category is required")?;
+    let summary = args["summary"].as_str().ok_or("summary is required")?;
+    let detail = args["detail"].as_str().ok_or("detail is required")?;
+
+    let valid_categories = [
+        "missing_tool",
+        "mcp_tuning",
+        "workflow",
+        "documentation",
+        "other",
+    ];
+    if !valid_categories.contains(&category) {
+        return Err(format!(
+            "invalid category '{}'; must be one of: {}",
+            category,
+            valid_categories.join(", ")
+        ));
+    }
+
+    let suggested_tool_name = args["suggested_tool_name"].as_str().map(|s| s.to_string());
+    let suggested_prompt = args["suggested_prompt"].as_str().map(|s| s.to_string());
+
+    let now = {
+        use std::time::SystemTime;
+        let d = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .expect("system clock before UNIX epoch");
+        sea_orm::entity::prelude::DateTimeUtc::from_timestamp(d.as_secs() as i64, d.subsec_nanos())
+            .expect("timestamp out of range")
+    };
+
+    use sea_orm::ActiveValue::Set;
+    let model = agent_feedback::ActiveModel {
+        id: Set(uuid::Uuid::new_v4().to_string()),
+        created_at: Set(now),
+        category: Set(category.to_string()),
+        summary: Set(summary.to_string()),
+        detail: Set(detail.to_string()),
+        suggested_tool_name: Set(suggested_tool_name),
+        suggested_prompt: Set(suggested_prompt),
+        status: Set("pending".to_string()),
+        reviewed_at: Set(None),
+    };
+
+    use sea_orm::EntityTrait as _;
+    agent_feedback::Entity::insert(model)
+        .exec(&state.db)
+        .await
+        .map_err(|e| format!("db error: {e}"))?;
+
+    Ok(format!(
+        "Feedback recorded (category: {category}): {summary}"
     ))
 }
 

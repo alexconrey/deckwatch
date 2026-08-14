@@ -1,3 +1,4 @@
+pub mod agent_feedback;
 pub mod application_plugin_resources;
 pub mod application_plugins;
 pub mod applications;
