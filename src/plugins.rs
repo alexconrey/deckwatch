@@ -871,7 +871,7 @@ pub fn run_provision(
             let elapsed = start.elapsed().as_secs_f64();
             metrics::record_plugin_execution(&plugin.name, "provision", "error", elapsed);
             metrics::record_plugin_error(&plugin.name, "provision_failed");
-            return Err(e.into());
+            return Err(e);
         }
     };
     let input = serde_json::to_string(req)?;
@@ -881,7 +881,7 @@ pub fn run_provision(
             let elapsed = start.elapsed().as_secs_f64();
             metrics::record_plugin_execution(&plugin.name, "provision", "error", elapsed);
             metrics::record_plugin_error(&plugin.name, "provision_failed");
-            return Err(e.into());
+            return Err(e);
         }
     };
     let result: ResourceProvisionResult = serde_json::from_str(output)?;
@@ -969,7 +969,7 @@ pub fn run_deprovision(
             let elapsed = start.elapsed().as_secs_f64();
             metrics::record_plugin_execution(&plugin.name, "deprovision", "error", elapsed);
             metrics::record_plugin_error(&plugin.name, "deprovision_failed");
-            return Err(e.into());
+            return Err(e);
         }
     };
     let input = serde_json::to_string(req)?;
