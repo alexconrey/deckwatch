@@ -120,9 +120,7 @@ async fn handle_initialize(state: &AppState, request: &JsonRpcRequest) -> JsonRp
             if !plugin_cfg.enabled || plugin_cfg.mcp_tuning.is_empty() {
                 continue;
             }
-            if let Some(loaded_plugin) =
-                plugins_guard.iter().find(|p| p.name == plugin_cfg.name)
-            {
+            if let Some(loaded_plugin) = plugins_guard.iter().find(|p| p.name == plugin_cfg.name) {
                 let mut lines: Vec<String> = Vec::new();
                 for field in &loaded_plugin.metadata.mcp_tuning_fields {
                     if let Some(value) = plugin_cfg
@@ -139,8 +137,11 @@ async fn handle_initialize(state: &AppState, request: &JsonRpcRequest) -> JsonRp
                     } else {
                         &loaded_plugin.metadata.name
                     };
-                    instructions_parts
-                        .push(format!("[Plugin: {}]\n{}", display_name, lines.join("\n")));
+                    instructions_parts.push(format!(
+                        "[Plugin: {}]\n{}",
+                        display_name,
+                        lines.join("\n")
+                    ));
                 }
             }
         }
