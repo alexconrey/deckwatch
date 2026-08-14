@@ -186,6 +186,25 @@ pub struct ConfigField {
     pub env_source: Option<String>,
 }
 
+/// A field that an operator fills in to tune MCP guidance for a specific plugin.
+/// Mirrors `deckwatch_plugin_sdk::McpTuningField` — kept in sync manually.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct McpTuningField {
+    /// Machine-readable key. Matched against keys in `PluginConfig.mcp_tuning`.
+    pub key: String,
+    /// Human-readable label for the MCP Tuning settings form.
+    pub label: String,
+    /// Help text rendered below the field.
+    #[serde(default)]
+    pub description: String,
+    /// Example value shown as the input placeholder.
+    #[serde(default)]
+    pub placeholder: String,
+    /// Default value pre-filled in the form.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default: Option<String>,
+}
+
 /// Metadata returned by the plugin's `metadata()` WASM export.
 /// Mirrors `deckwatch_plugin_sdk::PluginMetadata` — kept in sync manually.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -214,6 +233,12 @@ pub struct PluginMetadata {
     /// Old plugins that do not export this field default to None (no constraint).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub min_deckwatch_version: Option<String>,
+    /// Operator-facing fields for MCP-level guidance tuning.
+    /// Saved values are injected into every MCP `initialize` response as a
+    /// `[Plugin: {name}]` block so the AI agent sees current conventions.
+    /// Old plugins that do not export this field deserialize to an empty Vec.
+    #[serde(default)]
+    pub mcp_tuning_fields: Vec<McpTuningField>,
 }
 
 /// A provisionable infrastructure resource declared by a plugin.
@@ -1422,6 +1447,8 @@ mod tests {
             depends_on: vec![],
             optional_depends_on: vec![],
             resources: vec![],
+            mcp_tuning_fields: vec![],
+            min_deckwatch_version: None,
             config_schema: vec![
                 ConfigField {
                     key: "AWS_REGION".to_string(),
@@ -1576,7 +1603,11 @@ mod tests {
             make_plugin("consumer", vec![], vec!["capability-a"]),
         ];
         let sorted = sort_by_dependencies(&plugins);
-        assert_eq!(sorted.len(), 2, "both plugins should survive when dep is met");
+        assert_eq!(
+            sorted.len(),
+            2,
+            "both plugins should survive when dep is met"
+        );
         let names: Vec<&str> = sorted.iter().map(|p| p.name.as_str()).collect();
         assert_eq!(names, vec!["provider", "consumer"]);
     }
@@ -1593,8 +1624,14 @@ mod tests {
 
     #[test]
     fn version_gte_handles_missing_components() {
-        assert!(version_gte("1", "0.9.9"), "single-component version treated as 1.0.0");
-        assert!(version_gte("1.2", "1.1.9"), "two-component version treated as 1.2.0");
+        assert!(
+            version_gte("1", "0.9.9"),
+            "single-component version treated as 1.0.0"
+        );
+        assert!(
+            version_gte("1.2", "1.1.9"),
+            "two-component version treated as 1.2.0"
+        );
     }
 
     #[test]
