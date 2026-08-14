@@ -60,6 +60,7 @@ pub fn get_oci_repository(dep: &Deployment) -> Option<&str> {
 pub async fn run_poller(state: AppState) {
     let mut interval = tokio::time::interval(std::time::Duration::from_secs(10));
     let mut pending_interval = tokio::time::interval(std::time::Duration::from_secs(30));
+    let mut gauge_interval = tokio::time::interval(std::time::Duration::from_secs(60));
     let http_client = reqwest::Client::new();
 
     loop {
@@ -77,13 +78,16 @@ pub async fn run_poller(state: AppState) {
 
                 reconcile_application_plugins(&state).await;
 
-                // Update resource gauges (best-effort; errors are logged, not fatal).
-                update_resource_gauges(&state).await;
-
                 metrics::record_gitops_poll_duration(cycle_start.elapsed().as_secs_f64());
             }
             _ = pending_interval.tick() => {
                 reconcile_pending_resources(&state).await;
+            }
+            _ = gauge_interval.tick() => {
+                // Update resource gauges on a slower cadence (best-effort; errors are
+                // logged, not fatal). Running this every 60 s instead of every 10 s
+                // cuts cluster-wide LIST calls by 6×.
+                update_resource_gauges(&state).await;
             }
         }
     }
@@ -93,6 +97,9 @@ async fn poll_cycle(state: &AppState, http: &reqwest::Client) -> anyhow::Result<
     // Query all gitops configs from the database instead of scanning
     // deployment annotations.
     let configs = gitops_configs::Entity::find().all(&state.db).await?;
+    // Load settings once for the entire poll cycle to avoid a per-config DB
+    // round-trip inside check_and_build / trigger_build.
+    let settings = crate::handlers::settings::load_settings_from_db(state).await;
 
     for config in configs.iter() {
         // Parse application_id as "{ns}/{name}".
@@ -117,7 +124,7 @@ async fn poll_cycle(state: &AppState, http: &reqwest::Client) -> anyhow::Result<
             continue;
         }
 
-        if let Err(e) = check_and_build(state, http, ns, dep_name, config).await {
+        if let Err(e) = check_and_build(state, http, ns, dep_name, config, &settings).await {
             tracing::warn!(
                 deployment = %dep_name,
                 namespace = %ns,
@@ -136,6 +143,7 @@ async fn check_and_build(
     ns: &str,
     dep_name: &str,
     config: &gitops_configs::Model,
+    settings: &crate::handlers::settings::DeckwatchSettings,
 ) -> anyhow::Result<()> {
     let repo_url = &config.repo_url;
     let branch = &config.branch;
@@ -143,11 +151,11 @@ async fn check_and_build(
     // per-app encrypted_token so that switching from per-app to shared
     // tokens works even if a stale encrypted_token row remains.
     let token = if !config.token_secret.is_empty() {
-        // Shared token from settings (looked up by name)
-        let settings = crate::handlers::settings::load_settings_from_db(state).await;
+        // Shared token from settings (looked up by name). Settings were already
+        // loaded once by poll_cycle so no additional DB round-trip is needed.
         // resolve_token tries encrypted_token first, then falls back to
         // reading the k8s secret (secret_name/namespace) — same as plugins.rs.
-        crate::plugins::resolve_git_token(&config.token_secret, &settings, state)
+        crate::plugins::resolve_git_token(&config.token_secret, settings, state)
             .await
             .unwrap_or_default()
     } else if let Some(encrypted) = config.encrypted_token.as_deref() {
@@ -218,7 +226,7 @@ async fn check_and_build(
     let dep_api = state.deployments_api(ns)?;
     let dep = dep_api.get(dep_name).await?;
 
-    let job_name: String = trigger_build(state, ns, &dep, &remote_sha, &token, &auth_user).await?;
+    let job_name: String = trigger_build(state, ns, &dep, &remote_sha, &token, &auth_user, settings).await?;
     // Counter incremented once per build kickoff; success/failure is recorded
     // later in monitor_builds when the Job completes.
     metrics::record_gitops_build(ns, "started");
@@ -391,7 +399,8 @@ pub async fn trigger_build_public(
             .ok_or_else(|| anyhow::anyhow!("no gitops config found for {app_id}"))?
     };
     let auth_user = resolve_git_auth_user(&config.git_auth_user, &config.repo_url);
-    trigger_build(state, ns, dep, commit_sha, token, &auth_user).await
+    let settings = crate::handlers::settings::load_settings_from_db(state).await;
+    trigger_build(state, ns, dep, commit_sha, token, &auth_user, &settings).await
 }
 
 /// Compiled-in fallback used when no `build_architectures` are configured
@@ -535,6 +544,7 @@ async fn trigger_build(
     commit_sha: &str,
     token: &str,
     auth_user: &str,
+    settings: &crate::handlers::settings::DeckwatchSettings,
 ) -> anyhow::Result<String> {
     let dep_name = dep.name_any();
     let short_sha = &commit_sha[..7.min(commit_sha.len())];
@@ -572,9 +582,8 @@ async fn trigger_build(
 
     let jobs_api = state.jobs_api(ns)?;
 
-    // Load settings to determine which architectures and build config to use.
-    let settings = crate::handlers::settings::load_settings_from_db(state).await;
-    let build_arches = resolve_build_arches(&settings);
+    // Resolve architectures and build config from the pre-loaded settings.
+    let build_arches = resolve_build_arches(settings);
     let bs = &settings.build_settings;
     let single_arch = build_arches.len() == 1;
 
@@ -690,6 +699,7 @@ async fn create_manifest_job(
     dep_name: &str,
     build_group: &str,
     short_sha: &str,
+    settings: &crate::handlers::settings::DeckwatchSettings,
 ) -> anyhow::Result<String> {
     let app_id = format!("{ns}/{dep_name}");
     let config = gitops_configs::Entity::find()
@@ -704,9 +714,9 @@ async fn create_manifest_job(
 
     let manifest_job_name = format!("{build_group}-manifest");
 
-    // Build the list of arch-specific image refs to combine.
-    let settings = crate::handlers::settings::load_settings_from_db(state).await;
-    let build_arches = resolve_build_arches(&settings);
+    // Build the list of arch-specific image refs to combine using the
+    // pre-loaded settings passed in by the caller.
+    let build_arches = resolve_build_arches(settings);
     let bs = &settings.build_settings;
     let arch_refs: Vec<String> = build_arches
         .iter()
@@ -1040,6 +1050,9 @@ async fn monitor_builds(state: &AppState, http: &reqwest::Client) -> anyhow::Res
         .filter(gitops_configs::Column::LastBuildStatus.eq("building"))
         .all(&state.db)
         .await?;
+    // Load settings once up-front so that per-config branches (ArchesComplete,
+    // create_manifest_job) do not each pay an extra DB round-trip.
+    let settings = crate::handlers::settings::load_settings_from_db(state).await;
 
     for config in building_configs.iter() {
         let (ns, dep_name) = match config.application_id.split_once('/') {
@@ -1080,7 +1093,6 @@ async fn monitor_builds(state: &AppState, http: &reqwest::Client) -> anyhow::Res
                 continue;
             }
             BuildGroupStatus::ArchesComplete => {
-                let settings = crate::handlers::settings::load_settings_from_db(state).await;
                 let build_arches = resolve_build_arches(&settings);
 
                 if build_arches.len() == 1 {
@@ -1165,7 +1177,7 @@ async fn monitor_builds(state: &AppState, http: &reqwest::Client) -> anyhow::Res
                         "all arch builds complete, creating manifest assembly job"
                     );
                     if let Err(e) =
-                        create_manifest_job(state, ns, dep_name, build_group, short_sha).await
+                        create_manifest_job(state, ns, dep_name, build_group, short_sha, &settings).await
                     {
                         tracing::error!(
                             deployment = %dep_name,
