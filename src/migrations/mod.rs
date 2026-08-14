@@ -8,6 +8,7 @@ mod m20260812_000002_plugin_resources;
 mod m20260812_000003_plugin_resource_annotations;
 mod m20260813_000001_plugin_resource_sidecars;
 mod m20260814_000001_agent_feedback;
+mod m20260814_000002_perf_indices;
 
 use sea_orm_migration::prelude::*;
 
@@ -27,6 +28,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20260812_000003_plugin_resource_annotations::Migration),
             Box::new(m20260813_000001_plugin_resource_sidecars::Migration),
             Box::new(m20260814_000001_agent_feedback::Migration),
+            Box::new(m20260814_000002_perf_indices::Migration),
         ]
     }
 }
