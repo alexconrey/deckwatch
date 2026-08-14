@@ -265,6 +265,71 @@ pub fn record_mcp_request(method: &str, status: &str, duration_s: f64) {
     .record(duration_s);
 }
 
+// -----------------------------------------------------------------------------
+// Plugin metrics
+// -----------------------------------------------------------------------------
+
+/// Record a plugin load attempt. Call once per plugin from `fetch_plugins`.
+/// - `status`: `loaded`, `fetch_failed`, `disabled`
+pub fn record_plugin_load(plugin: &str, status: &str) {
+    counter!(
+        "deckwatch_plugin_loads_total",
+        "plugin" => plugin.to_owned(),
+        "status" => status.to_owned(),
+    )
+    .increment(1);
+}
+
+/// Record a plugin execution (apply, provision, or deprovision).
+/// - `operation`: `apply`, `provision`, `deprovision`, `validate`
+/// - `status`: `ok` or `error`
+pub fn record_plugin_execution(plugin: &str, operation: &str, status: &str, duration_s: f64) {
+    counter!(
+        "deckwatch_plugin_executions_total",
+        "plugin" => plugin.to_owned(),
+        "operation" => operation.to_owned(),
+        "status" => status.to_owned(),
+    )
+    .increment(1);
+
+    histogram!(
+        "deckwatch_plugin_execution_duration_seconds",
+        "plugin" => plugin.to_owned(),
+        "operation" => operation.to_owned(),
+    )
+    .record(duration_s);
+}
+
+/// Record a plugin error. Covers both WASM-level failures and errors the
+/// plugin itself reported via `result.errors`.
+/// - `error_type`: `fetch_failed`, `metadata_failed`, `apply_failed`,
+///   `provision_failed`, `deprovision_failed`, `reported_error`,
+///   `k8s_resource_failed`, `dependency_cycle`, `sa_conflict`
+pub fn record_plugin_error(plugin: &str, error_type: &str) {
+    counter!(
+        "deckwatch_plugin_errors_total",
+        "plugin" => plugin.to_owned(),
+        "error_type" => error_type.to_owned(),
+    )
+    .increment(1);
+}
+
+/// Set the gauge of currently loaded (active) plugins.
+pub fn set_plugins_loaded(count: f64) {
+    gauge!("deckwatch_plugins_loaded").set(count);
+}
+
+/// Record application of a plugin-emitted Kubernetes resource.
+/// - `status`: `ok` or `error`
+pub fn record_plugin_k8s_resource(kind: &str, status: &str) {
+    counter!(
+        "deckwatch_plugin_k8s_resources_total",
+        "kind" => kind.to_owned(),
+        "status" => status.to_owned(),
+    )
+    .increment(1);
+}
+
 /// Record a deckwatch-native MCP tool invocation (e.g. `create_application`).
 /// K8s-passthrough tools are instrumented by the mcp-k8s library itself via
 /// `mcp_k8s_tool_calls_total` / `mcp_k8s_tool_call_duration_seconds`.

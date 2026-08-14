@@ -21,6 +21,7 @@ use kube::Api;
 use serde::{Deserialize, Serialize};
 
 use crate::handlers::settings::{DeckwatchSettings, PluginConfig, PluginSource};
+use crate::metrics;
 use crate::state::AppState;
 
 // ── Shared types (mirror of deckwatch-plugin-sdk v0.5.0) ─────────────────────
@@ -338,9 +339,13 @@ pub async fn fetch_and_validate(
         .build()
         .unwrap_or_default();
 
+    let start = std::time::Instant::now();
+
     let bytes = match fetch_bytes(cfg, &http, &settings, state).await {
         Ok(b) => b,
         Err(e) => {
+            metrics::record_plugin_execution(&cfg.name, "validate", "error", start.elapsed().as_secs_f64());
+            metrics::record_plugin_error(&cfg.name, "fetch_failed");
             return ValidationResult {
                 wasm_size_bytes: 0,
                 apply_export_found: false,
@@ -353,7 +358,7 @@ pub async fn fetch_and_validate(
 
     let size = bytes.len();
     let plugin = LoadedPlugin {
-        name: "__validation__".to_string(),
+        name: cfg.name.clone(),
         wasm_bytes: bytes,
         allowed_hosts: cfg.allowed_hosts.clone(),
         config: cfg.config.clone(),
@@ -363,22 +368,27 @@ pub async fn fetch_and_validate(
     };
 
     match run_plugin(&plugin, &test_ctx) {
-        Ok(result) => ValidationResult {
-            wasm_size_bytes: size,
-            apply_export_found: true,
-            test_context: test_ctx,
-            result: Some(result),
-            error: None,
-        },
-        Err(e) => ValidationResult {
-            wasm_size_bytes: size,
-            // If we got past the fetch but extism failed, distinguish between
-            // "apply not found" and "apply threw an error".
-            apply_export_found: !e.to_string().contains("not found"),
-            test_context: test_ctx,
-            result: None,
-            error: Some(format!("apply() failed: {e}")),
-        },
+        Ok(result) => {
+            metrics::record_plugin_execution(&cfg.name, "validate", "ok", start.elapsed().as_secs_f64());
+            ValidationResult {
+                wasm_size_bytes: size,
+                apply_export_found: true,
+                test_context: test_ctx,
+                result: Some(result),
+                error: None,
+            }
+        }
+        Err(e) => {
+            metrics::record_plugin_execution(&cfg.name, "validate", "error", start.elapsed().as_secs_f64());
+            metrics::record_plugin_error(&cfg.name, "apply_failed");
+            ValidationResult {
+                wasm_size_bytes: size,
+                apply_export_found: !e.to_string().contains("not found"),
+                test_context: test_ctx,
+                result: None,
+                error: Some(format!("apply() failed: {e}")),
+            }
+        }
     }
 }
 
@@ -439,14 +449,17 @@ pub async fn fetch_plugins(settings: &DeckwatchSettings, state: &AppState) -> Ve
     for cfg in &settings.plugins {
         if !cfg.enabled {
             tracing::debug!(plugin = %cfg.name, "plugin disabled, skipping");
+            metrics::record_plugin_load(&cfg.name, "disabled");
             continue;
         }
+        let fetch_start = std::time::Instant::now();
         match fetch_bytes(cfg, &http, settings, state).await {
             Ok(bytes) => {
                 tracing::info!(plugin = %cfg.name, bytes = bytes.len(), "loaded plugin");
                 let metadata = load_metadata_from_bytes(&bytes, &cfg.allowed_hosts, &cfg.config)
                     .unwrap_or_else(|e| {
                         tracing::debug!(plugin = %cfg.name, error = %e, "metadata() not exported or failed; using defaults");
+                        metrics::record_plugin_error(&cfg.name, "metadata_failed");
                         PluginMetadata { name: cfg.name.clone(), ..Default::default() }
                     });
                 loaded.push(LoadedPlugin {
@@ -458,12 +471,17 @@ pub async fn fetch_plugins(settings: &DeckwatchSettings, state: &AppState) -> Ve
                     inherit_env_file_keys: cfg.inherit_env_file_keys.clone(),
                     metadata,
                 });
+                metrics::record_plugin_load(&cfg.name, "loaded");
             }
             Err(e) => {
                 tracing::error!(plugin = %cfg.name, error = %e, "failed to fetch plugin WASM");
+                metrics::record_plugin_load(&cfg.name, "fetch_failed");
+                metrics::record_plugin_error(&cfg.name, "fetch_failed");
             }
         }
+        let _ = fetch_start;
     }
+    metrics::set_plugins_loaded(loaded.len() as f64);
     loaded
 }
 
@@ -613,10 +631,14 @@ pub fn sort_by_dependencies(plugins: &[LoadedPlugin]) -> Vec<&LoadedPlugin> {
     if sorted.len() < n {
         let in_sorted: std::collections::HashSet<usize> = sorted.iter().copied().collect();
         let remaining: Vec<usize> = (0..n).filter(|i| !in_sorted.contains(i)).collect();
+        let cycle_plugins: Vec<_> = remaining.iter().map(|&i| &plugins[i].name).collect();
         tracing::warn!(
-            plugins = ?remaining.iter().map(|&i| &plugins[i].name).collect::<Vec<_>>(),
+            plugins = ?cycle_plugins,
             "plugin dependency cycle detected; running in original order"
         );
+        for name in &cycle_plugins {
+            metrics::record_plugin_error(name, "dependency_cycle");
+        }
         sorted.extend(remaining);
     }
 
@@ -652,8 +674,16 @@ pub fn apply_plugins(
         let mut enriched_ctx = ctx.clone();
         enriched_ctx.plugin_outputs = accumulated_outputs.clone();
 
+        let start = std::time::Instant::now();
         match run_plugin(plugin, &enriched_ctx) {
             Ok(result) => {
+                let elapsed = start.elapsed().as_secs_f64();
+                metrics::record_plugin_execution(&plugin.name, "apply", "ok", elapsed);
+
+                for _err in &result.errors {
+                    metrics::record_plugin_error(&plugin.name, "reported_error");
+                }
+
                 apply_env_vars(plugin, &result.env_vars, pod_spec, dep_annotations);
                 apply_sidecars(plugin, &result.sidecars, pod_spec, dep_annotations);
                 all_k8s_resources.extend(result.kubernetes_resources.clone());
@@ -676,6 +706,9 @@ pub fn apply_plugins(
                 }
             }
             Err(e) => {
+                let elapsed = start.elapsed().as_secs_f64();
+                metrics::record_plugin_execution(&plugin.name, "apply", "error", elapsed);
+                metrics::record_plugin_error(&plugin.name, "apply_failed");
                 tracing::error!(plugin = %plugin.name, error = %e, "plugin apply() failed; skipping");
             }
         }
@@ -713,16 +746,19 @@ pub async fn apply_kubernetes_resources(
     kube_client: &kube::Client,
 ) {
     for resource in resources {
+        let kind = resource
+            .get("kind")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown");
+        let name = resource
+            .pointer("/metadata/name")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown");
         if let Err(e) = apply_one_resource(resource, kube_client).await {
-            let kind = resource
-                .get("kind")
-                .and_then(|v| v.as_str())
-                .unwrap_or("unknown");
-            let name = resource
-                .pointer("/metadata/name")
-                .and_then(|v| v.as_str())
-                .unwrap_or("unknown");
+            metrics::record_plugin_k8s_resource(kind, "error");
             tracing::error!(kind, name, error = %e, "plugin kubernetes_resource apply failed");
+        } else {
+            metrics::record_plugin_k8s_resource(kind, "ok");
         }
     }
 }
@@ -784,6 +820,8 @@ pub fn run_provision(
         "calling plugin provision()"
     );
 
+    let start = std::time::Instant::now();
+
     let wasm = Wasm::data(plugin.wasm_bytes.clone());
     let mut manifest = Manifest::new([wasm]);
 
@@ -792,10 +830,6 @@ pub fn run_provision(
     }
     manifest.config.extend(plugin.config.clone());
 
-    // Inject the current timestamp so plugins can sign AWS requests without
-    // needing a system clock (unavailable in wasm32-unknown-unknown).
-    // Injected at call time so it is always fresh — plugins read it via
-    // extism_pdk::config::get("CURRENT_TIMESTAMP").
     let now_ts = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
@@ -831,12 +865,32 @@ pub fn run_provision(
         }
     }
 
-    let mut p = Plugin::new(&manifest, [host_now_fn()], false)?;
+    let mut p = match Plugin::new(&manifest, [host_now_fn()], false) {
+        Ok(p) => p,
+        Err(e) => {
+            let elapsed = start.elapsed().as_secs_f64();
+            metrics::record_plugin_execution(&plugin.name, "provision", "error", elapsed);
+            metrics::record_plugin_error(&plugin.name, "provision_failed");
+            return Err(e.into());
+        }
+    };
     let input = serde_json::to_string(req)?;
-    let output = p.call::<&str, &str>("provision", &input)?;
+    let output = match p.call::<&str, &str>("provision", &input) {
+        Ok(o) => o,
+        Err(e) => {
+            let elapsed = start.elapsed().as_secs_f64();
+            metrics::record_plugin_execution(&plugin.name, "provision", "error", elapsed);
+            metrics::record_plugin_error(&plugin.name, "provision_failed");
+            return Err(e.into());
+        }
+    };
     let result: ResourceProvisionResult = serde_json::from_str(output)?;
 
+    let elapsed = start.elapsed().as_secs_f64();
+    metrics::record_plugin_execution(&plugin.name, "provision", "ok", elapsed);
+
     for err in &result.errors {
+        metrics::record_plugin_error(&plugin.name, "reported_error");
         tracing::error!(
             plugin = %plugin.name,
             namespace = %req.namespace,
@@ -877,6 +931,8 @@ pub fn run_deprovision(
         "calling plugin deprovision()"
     );
 
+    let start = std::time::Instant::now();
+
     let wasm = Wasm::data(plugin.wasm_bytes.clone());
     let mut manifest = Manifest::new([wasm]);
     if !plugin.allowed_hosts.is_empty() {
@@ -907,11 +963,18 @@ pub fn run_deprovision(
         }
     }
 
-    let mut p = Plugin::new(&manifest, [host_now_fn()], false)?;
+    let mut p = match Plugin::new(&manifest, [host_now_fn()], false) {
+        Ok(p) => p,
+        Err(e) => {
+            let elapsed = start.elapsed().as_secs_f64();
+            metrics::record_plugin_execution(&plugin.name, "deprovision", "error", elapsed);
+            metrics::record_plugin_error(&plugin.name, "deprovision_failed");
+            return Err(e.into());
+        }
+    };
     let input = serde_json::to_string(req)?;
 
     let output = p.call::<&str, &str>("deprovision", &input).map_err(|e| {
-        // deprovision() is optional — if the export doesn't exist, return a default result
         if e.to_string().contains("not found") || e.to_string().contains("export") {
             return anyhow::anyhow!("__no_deprovision_export__");
         }
@@ -920,8 +983,11 @@ pub fn run_deprovision(
 
     match output {
         Ok(out) => {
+            let elapsed = start.elapsed().as_secs_f64();
             let result: ResourceDeprovisionResult = serde_json::from_str(out)?;
+            metrics::record_plugin_execution(&plugin.name, "deprovision", "ok", elapsed);
             for err in &result.errors {
+                metrics::record_plugin_error(&plugin.name, "reported_error");
                 tracing::error!(
                     plugin = %plugin.name,
                     resource_id = %req.resource_id,
@@ -941,7 +1007,12 @@ pub fn run_deprovision(
             tracing::debug!(plugin = %plugin.name, "plugin has no deprovision() export — skipping");
             Ok(ResourceDeprovisionResult::default())
         }
-        Err(e) => Err(e),
+        Err(e) => {
+            let elapsed = start.elapsed().as_secs_f64();
+            metrics::record_plugin_execution(&plugin.name, "deprovision", "error", elapsed);
+            metrics::record_plugin_error(&plugin.name, "deprovision_failed");
+            Err(e)
+        }
     }
 }
 
@@ -1180,6 +1251,7 @@ fn apply_service_account(
             requested_sa = %sa_name,
             "skipping service_account_name — pod already has a non-default service account"
         );
+        metrics::record_plugin_error(&plugin.name, "sa_conflict");
         return;
     }
     pod_spec.service_account_name = Some(sa_name.clone());
