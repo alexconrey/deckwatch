@@ -1418,7 +1418,9 @@ async fn update_build_status(
     let started_at = row.started_at;
     if let Some(started) = started_at {
         let duration_s = (now_utc - started).num_milliseconds().max(0) as f64 / 1000.0;
-        let (ns, dep_name) = application_id.split_once("/").unwrap_or(("unknown", "unknown"));
+        let (ns, dep_name) = application_id
+            .split_once("/")
+            .unwrap_or(("unknown", "unknown"));
         metrics::record_build_duration(ns, dep_name, status, duration_s);
     }
 
