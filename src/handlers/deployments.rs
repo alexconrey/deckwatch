@@ -424,6 +424,7 @@ pub async fn create(
                     .into_iter()
                     .collect(),
                 plugin_outputs: Default::default(),
+                provisioned_resources: Default::default(),
             };
             let dep_annotations = deployment
                 .metadata
@@ -642,6 +643,7 @@ pub async fn update(
                     .into_iter()
                     .collect(),
                 plugin_outputs: Default::default(),
+                provisioned_resources: Default::default(),
             };
             let dep_annotations = dep.metadata.annotations.get_or_insert_with(BTreeMap::new);
             if let Some(spec) = dep.spec.as_mut() {
