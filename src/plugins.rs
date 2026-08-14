@@ -210,6 +210,10 @@ pub struct PluginMetadata {
     /// Old plugins that do not export this field deserialize to an empty Vec.
     #[serde(default)]
     pub resources: Vec<PluginResource>,
+    /// Minimum deckwatch version required to run this plugin.
+    /// Old plugins that do not export this field default to None (no constraint).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_deckwatch_version: Option<String>,
 }
 
 /// A provisionable infrastructure resource declared by a plugin.
@@ -407,6 +411,26 @@ pub async fn fetch_and_validate(
     }
 }
 
+// ── Version helpers ───────────────────────────────────────────────────────────
+
+/// Compare two semver strings of the form `MAJOR.MINOR.PATCH`.
+///
+/// Returns `true` when `a >= b`. Extra components beyond the third and
+/// non-numeric parts are silently ignored — missing components default to 0.
+/// No external crate dependency is needed for the simple comparison deckwatch
+/// requires at plugin load time.
+fn version_gte(a: &str, b: &str) -> bool {
+    let parse = |s: &str| -> (u32, u32, u32) {
+        let mut parts = s.split('.').filter_map(|p| p.parse::<u32>().ok());
+        (
+            parts.next().unwrap_or(0),
+            parts.next().unwrap_or(0),
+            parts.next().unwrap_or(0),
+        )
+    };
+    parse(a) >= parse(b)
+}
+
 // ── Fetching ─────────────────────────────────────────────────────────────────
 
 /// Build the `now` host function exposed to every plugin.
@@ -477,6 +501,23 @@ pub async fn fetch_plugins(settings: &DeckwatchSettings, state: &AppState) -> Ve
                         metrics::record_plugin_error(&cfg.name, "metadata_failed");
                         PluginMetadata { name: cfg.name.clone(), ..Default::default() }
                     });
+
+                // Enforce min_deckwatch_version before accepting the plugin.
+                if let Some(ref min_ver) = metadata.min_deckwatch_version {
+                    let host_ver = env!("CARGO_PKG_VERSION");
+                    if !version_gte(host_ver, min_ver) {
+                        tracing::error!(
+                            plugin = %cfg.name,
+                            required = %min_ver,
+                            running = %host_ver,
+                            "plugin requires newer deckwatch — skipping"
+                        );
+                        metrics::record_plugin_load(&cfg.name, "version_incompatible");
+                        metrics::record_plugin_error(&cfg.name, "version_incompatible");
+                        continue;
+                    }
+                }
+
                 loaded.push(LoadedPlugin {
                     name: cfg.name.clone(),
                     wasm_bytes: bytes,
@@ -657,7 +698,41 @@ pub fn sort_by_dependencies(plugins: &[LoadedPlugin]) -> Vec<&LoadedPlugin> {
         sorted.extend(remaining);
     }
 
-    sorted.iter().map(|&i| &plugins[i]).collect()
+    // Build the full capability set from every plugin that survived loading.
+    // A plugin that was already filtered (e.g. version-incompatible) is not in
+    // `plugins` at all, so its capabilities are correctly absent here.
+    let all_provided: std::collections::HashSet<&str> = plugins
+        .iter()
+        .flat_map(|p| p.metadata.provides.iter().map(String::as_str))
+        .collect();
+
+    // Validate hard dependencies and remove plugins with unmet capabilities.
+    sorted
+        .iter()
+        .map(|&i| &plugins[i])
+        .filter(|p| {
+            let unmet: Vec<&str> = p
+                .metadata
+                .depends_on
+                .iter()
+                .map(String::as_str)
+                .filter(|cap| !all_provided.contains(cap))
+                .collect();
+
+            if unmet.is_empty() {
+                return true;
+            }
+            for cap in &unmet {
+                tracing::error!(
+                    plugin = %p.name,
+                    capability = %cap,
+                    "plugin requires capability but no loaded plugin provides it — disabling"
+                );
+            }
+            metrics::record_plugin_error(&p.name, "unmet_dependency");
+            false
+        })
+        .collect()
 }
 
 // ── Applying ─────────────────────────────────────────────────────────────────
@@ -1472,6 +1547,76 @@ mod tests {
             names,
             vec!["alpha", "beta", "gamma"],
             "plugins with no deps keep original order"
+        );
+    }
+
+    #[test]
+    fn sort_by_dependencies_disables_plugin_with_unmet_dep() {
+        // "consumer" depends on "capability-x" which no plugin provides.
+        let plugins = vec![
+            make_plugin("provider", vec!["capability-a"], vec![]),
+            make_plugin("consumer", vec![], vec!["capability-x"]),
+        ];
+        let sorted = sort_by_dependencies(&plugins);
+        let names: Vec<&str> = sorted.iter().map(|p| p.name.as_str()).collect();
+        assert!(
+            names.contains(&"provider"),
+            "provider should still be included"
+        );
+        assert!(
+            !names.contains(&"consumer"),
+            "consumer must be excluded when its dep is unmet"
+        );
+    }
+
+    #[test]
+    fn sort_by_dependencies_keeps_plugin_with_met_dep() {
+        let plugins = vec![
+            make_plugin("provider", vec!["capability-a"], vec![]),
+            make_plugin("consumer", vec![], vec!["capability-a"]),
+        ];
+        let sorted = sort_by_dependencies(&plugins);
+        assert_eq!(sorted.len(), 2, "both plugins should survive when dep is met");
+        let names: Vec<&str> = sorted.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(names, vec!["provider", "consumer"]);
+    }
+
+    #[test]
+    fn version_gte_basic_comparisons() {
+        assert!(version_gte("0.7.0", "0.6.3"), "0.7.0 >= 0.6.3");
+        assert!(version_gte("1.0.0", "0.9.9"), "1.0.0 >= 0.9.9");
+        assert!(version_gte("0.6.3", "0.6.3"), "equal versions are >=");
+        assert!(!version_gte("0.5.9", "0.6.0"), "0.5.9 < 0.6.0");
+        assert!(!version_gte("0.6.2", "0.6.3"), "0.6.2 < 0.6.3");
+        assert!(version_gte("0.6.4", "0.6.3"), "patch bump is sufficient");
+    }
+
+    #[test]
+    fn version_gte_handles_missing_components() {
+        assert!(version_gte("1", "0.9.9"), "single-component version treated as 1.0.0");
+        assert!(version_gte("1.2", "1.1.9"), "two-component version treated as 1.2.0");
+    }
+
+    #[test]
+    fn plugin_metadata_min_deckwatch_version_round_trips() {
+        let meta = PluginMetadata {
+            name: "test".to_string(),
+            min_deckwatch_version: Some("0.7.0".to_string()),
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&meta).unwrap();
+        assert!(json.contains("min_deckwatch_version"));
+        let back: PluginMetadata = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.min_deckwatch_version.as_deref(), Some("0.7.0"));
+    }
+
+    #[test]
+    fn plugin_metadata_min_deckwatch_version_absent_defaults_to_none() {
+        let json = r#"{"name":"old","version":"0.1.0","description":"","provides":[],"depends_on":[],"optional_depends_on":[]}"#;
+        let m: PluginMetadata = serde_json::from_str(json).unwrap();
+        assert!(
+            m.min_deckwatch_version.is_none(),
+            "absent field must default to None"
         );
     }
 
