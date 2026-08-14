@@ -232,8 +232,7 @@ pub async fn refresh(
             ))
         })?;
 
-    let fields: HashMap<String, String> =
-        serde_json::from_str(&row.fields).unwrap_or_default();
+    let fields: HashMap<String, String> = serde_json::from_str(&row.fields).unwrap_or_default();
 
     let plugins = state.plugins.read().await;
     let plugin = plugins
