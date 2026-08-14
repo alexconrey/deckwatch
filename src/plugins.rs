@@ -9,6 +9,7 @@
 //! See `deckwatch-plugin-sdk` for the shared types crate that plugin authors depend on.
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use extism::{Function, Manifest, Plugin, UserData, Val, ValType, Wasm};
 use k8s_openapi::api::core::v1::{
@@ -285,10 +286,16 @@ pub struct ResourceDeprovisionResult {
 
 /// A fetched plugin ready to execute. Stores raw WASM bytes and instantiates
 /// a fresh `extism::Plugin` per call to avoid thread-safety concerns.
+///
+/// `wasm_bytes` is wrapped in `Arc` so that cloning a `LoadedPlugin` (which
+/// happens whenever the watcher snapshots the plugin list) is O(1) instead of
+/// copying the full WASM binary. The bytes are still passed by value to
+/// `Wasm::data` at invocation time, but that is unavoidable given the extism
+/// API; only the snapshot-clone cost is eliminated here.
 #[derive(Clone)]
 pub struct LoadedPlugin {
     pub name: String,
-    pub wasm_bytes: Vec<u8>,
+    pub wasm_bytes: Arc<Vec<u8>>,
     /// Hosts the plugin is allowed to reach via extism's HTTP host function.
     pub allowed_hosts: Vec<String>,
     /// Operator-supplied key-value config injected into the extism manifest.
@@ -364,7 +371,7 @@ pub async fn fetch_and_validate(
     let size = bytes.len();
     let plugin = LoadedPlugin {
         name: cfg.name.clone(),
-        wasm_bytes: bytes,
+        wasm_bytes: Arc::new(bytes),
         allowed_hosts: cfg.allowed_hosts.clone(),
         config: cfg.config.clone(),
         inherit_env_keys: cfg.inherit_env_keys.clone(),
@@ -479,7 +486,7 @@ pub async fn fetch_plugins(settings: &DeckwatchSettings, state: &AppState) -> Ve
                     });
                 loaded.push(LoadedPlugin {
                     name: cfg.name.clone(),
-                    wasm_bytes: bytes,
+                    wasm_bytes: Arc::new(bytes),
                     allowed_hosts: cfg.allowed_hosts.clone(),
                     config: cfg.config.clone(),
                     inherit_env_keys: cfg.inherit_env_keys.clone(),
@@ -837,7 +844,10 @@ pub fn run_provision(
 
     let start = std::time::Instant::now();
 
-    let wasm = Wasm::data(plugin.wasm_bytes.clone());
+    // Use as_slice() to borrow the Arc<Vec<u8>> as &[u8]; Wasm::data copies the
+    // bytes into its own Vec<u8> internally. The Arc avoids copying the full
+    // binary when LoadedPlugin itself is cloned.
+    let wasm = Wasm::data(plugin.wasm_bytes.as_slice());
     let mut manifest = Manifest::new([wasm]);
 
     if !plugin.allowed_hosts.is_empty() {
@@ -948,7 +958,7 @@ pub fn run_deprovision(
 
     let start = std::time::Instant::now();
 
-    let wasm = Wasm::data(plugin.wasm_bytes.clone());
+    let wasm = Wasm::data(plugin.wasm_bytes.as_slice());
     let mut manifest = Manifest::new([wasm]);
     if !plugin.allowed_hosts.is_empty() {
         manifest.allowed_hosts = Some(plugin.allowed_hosts.clone());
@@ -1039,7 +1049,7 @@ fn run_plugin(plugin: &LoadedPlugin, ctx: &PluginContext) -> anyhow::Result<Plug
         "calling plugin apply()"
     );
 
-    let wasm = Wasm::data(plugin.wasm_bytes.clone());
+    let wasm = Wasm::data(plugin.wasm_bytes.as_slice());
     let mut manifest = Manifest::new([wasm]);
 
     // Allow the plugin to reach configured hosts via extism's HTTP host function.
@@ -1404,7 +1414,7 @@ mod tests {
     fn make_plugin(name: &str, provides: Vec<&str>, depends_on: Vec<&str>) -> LoadedPlugin {
         LoadedPlugin {
             name: name.to_string(),
-            wasm_bytes: vec![],
+            wasm_bytes: Arc::new(vec![]),
             allowed_hosts: vec![],
             config: BTreeMap::new(),
             inherit_env_keys: vec![],

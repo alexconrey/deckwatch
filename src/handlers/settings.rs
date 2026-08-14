@@ -647,6 +647,7 @@ pub async fn put_settings(
             let loaded = crate::plugins::fetch_plugins(&s, &state_clone).await;
             tracing::info!(count = loaded.len(), "plugin refresh complete");
             *state_clone.plugins.write().await = loaded;
+            state_clone.plugin_patch_fingerprints.lock().await.clear();
         });
     }
 

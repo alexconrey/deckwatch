@@ -1,5 +1,6 @@
+use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, RwLock};
 
 use k8s_openapi::api::apps::v1::Deployment;
 use k8s_openapi::api::autoscaling::v2::HorizontalPodAutoscaler;
@@ -48,6 +49,13 @@ pub struct AppState {
     /// acquire a read lock; the settings PUT handler acquires a write lock
     /// after re-fetching.
     pub plugins: Arc<RwLock<Vec<crate::plugins::LoadedPlugin>>>,
+    /// Fingerprints of the last patch JSON applied to each deployment/cronjob
+    /// by the plugin reconciler, keyed by `"namespace/name"`. Skips the
+    /// Kubernetes SSA patch when the computed patch hasn't changed since the
+    /// last reconcile cycle, preventing spurious API-server traffic.
+    /// Cleared whenever the plugin list is refreshed so stale fingerprints
+    /// do not block a fresh config from being applied.
+    pub plugin_patch_fingerprints: Arc<Mutex<HashMap<String, u64>>>,
 }
 
 impl AppState {
