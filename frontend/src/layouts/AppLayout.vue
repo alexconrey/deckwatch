@@ -108,7 +108,7 @@ const onNsCreated = (name: string) => {
           @update:model-value="onNsSelected"
         >
           <template #item="{ props: itemProps, item }">
-            <v-divider v-if="(item.raw as { divider?: boolean }).divider" />
+            <v-divider v-if="(item.raw as any).divider" />
             <v-list-item v-else v-bind="itemProps" />
           </template>
         </v-autocomplete>

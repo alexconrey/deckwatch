@@ -153,7 +153,7 @@
 
           <v-table density="compact" class="mb-2">
             <tbody>
-              <tr><td class="text-medium-emphasis">Source</td><td>{{ installing.source.repo }} @ {{ installing.source.ref }}</td></tr>
+              <tr><td class="text-medium-emphasis">Source</td><td>{{ pluginSourceLabel(installing) }}</td></tr>
               <tr><td class="text-medium-emphasis">Version</td><td>{{ installing.latest_version }}</td></tr>
               <tr v-if="installing.allowed_hosts_hint?.length"><td class="text-medium-emphasis">Allowed hosts</td><td>{{ installing.allowed_hosts_hint.join(', ') }}</td></tr>
             </tbody>
@@ -171,7 +171,7 @@
 
 <script setup lang="ts">
 import { ref, computed, onMounted } from 'vue'
-import type { MarketplaceCatalog, MarketplaceEntry, PluginSummary } from '@/types/api'
+import type { MarketplaceCatalog, MarketplaceEntry, PluginSummary, PluginSourceGithub } from '@/types/api'
 
 const loading = ref(false)
 const error = ref<string | null>(null)
@@ -239,6 +239,14 @@ function isInstalled(plugin: MarketplaceEntry) {
 function openInstall(plugin: MarketplaceEntry) {
   installing.value = plugin
   installDialog.value = true
+}
+
+function pluginSourceLabel(entry: MarketplaceEntry): string {
+  if (entry.source.type === 'github') {
+    const s = entry.source as PluginSourceGithub;
+    return `${s.repo} @ ${s.ref}`;
+  }
+  return entry.source.url;
 }
 
 async function confirmInstall() {

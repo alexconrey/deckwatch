@@ -16,6 +16,7 @@ export interface Sample {
   t: number;
   cpuMillicores: number;
   memBytes: number;
+  restartCount?: number;
 }
 
 export interface Series {

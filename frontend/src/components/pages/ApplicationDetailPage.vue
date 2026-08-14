@@ -922,10 +922,10 @@ watch(activeTab, async (tab) => {
                 </template>
               </div>
               <div v-if="resource.description" class="text-caption text-secondary mb-1">{{ resource.description }}</div>
-              <template v-if="infraProvisionedMap.get(`${plugin.name}:${resource.id}`) as prov">
+              <template v-if="infraProvisionedMap.has(`${plugin.name}:${resource.id}`)">
                 <v-table density="compact" class="mt-1">
                   <tbody>
-                    <tr v-for="(val, key) in prov.state" :key="key">
+                    <tr v-for="(val, key) in infraProvisionedMap.get(`${plugin.name}:${resource.id}`)!.state" :key="key">
                       <td class="text-caption font-weight-medium" style="width:200px">{{ key }}</td>
                       <td class="text-caption text-mono">{{ val }}</td>
                     </tr>

@@ -212,7 +212,7 @@ const involvedLabel = (e: EventSummary): string => {
               {{ involvedLabel(ev) }}
             </span>
             <v-chip
-              v-if="ev.count > 1"
+              v-if="ev.count != null && ev.count > 1"
               size="x-small"
               variant="tonal"
               color="secondary"

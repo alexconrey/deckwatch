@@ -232,7 +232,7 @@ const cronjobHeaders = [
 
 const secretHeaders = [
   { title: "Name", key: "name" },
-  { title: "Type", key: "type", width: "160px" },
+  { title: "Type", key: "secret_type", width: "160px" },
   { title: "Keys", key: "keys" },
   { title: "Age", key: "created_at", width: "120px" },
   { title: "", key: "actions", width: "180px", sortable: false },
@@ -404,7 +404,7 @@ const submitSecret = async () => {
   try {
     await secretsApi.create(ns.selected, {
       name: secretName.value,
-      type: secretType.value || "Opaque",
+      secret_type: secretType.value || "Opaque",
       data,
     });
     showCreateSecret.value = false;
@@ -870,9 +870,9 @@ const deleteSa = async (name: string) => {
             <span class="text-body-1 font-weight-medium">{{ item.name }}</span>
           </template>
 
-          <template v-slot:item.type="{ item }">
+          <template v-slot:item.secret_type="{ item }">
             <v-chip size="small" variant="tonal" color="secondary">
-              {{ item.type }}
+              {{ item.secret_type }}
             </v-chip>
           </template>
 
@@ -1183,7 +1183,7 @@ const deleteSa = async (name: string) => {
         <v-card-title class="d-flex align-center">
           <span>{{ viewingSecret.name }}</span>
           <v-chip size="small" variant="tonal" color="secondary" class="ml-3">
-            {{ viewingSecret.type }}
+            {{ viewingSecret.secret_type }}
           </v-chip>
           <v-spacer />
           <v-btn

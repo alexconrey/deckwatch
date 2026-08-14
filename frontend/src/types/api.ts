@@ -6,6 +6,7 @@ export interface DeploymentSummary {
   status: DeploymentPhase;
   created_at: string | null;
   labels: Record<string, string>;
+  resource_requests?: ResourceSpec | null;
 }
 
 export interface NodeSelectorRequirement {
@@ -110,6 +111,7 @@ export interface PodSummary {
   started_at: string | null;
   conditions: PodCondition[];
   container_statuses: ContainerStatusSummary[];
+  oom_killed?: boolean;
 }
 
 export interface ContainerStatusSummary {
@@ -119,6 +121,7 @@ export interface ContainerStatusSummary {
   state: string;
   state_reason: string | null;
   image: string;
+  oom_killed?: boolean;
 }
 
 export interface ProbeInput {
@@ -613,11 +616,15 @@ export interface AuthSettings {
   enabled: boolean;
   tenant_id: string;
   client_id: string;
+  redirect_uri?: string;
+  scopes?: string;
 }
 
 export interface NotificationSettings {
   enabled: boolean;
   webhook_url: string;
+  event_types?: string[];
+  namespaces?: string[];
 }
 
 export interface EncryptedCredentials {
@@ -1073,4 +1080,51 @@ export interface ProvisionedResource {
 
 export interface ProvisionRequest {
   fields: Record<string, string>;
+}
+
+// --- Preview environments ---
+
+export interface CreatePreviewRequest {
+  branch: string;
+  pr_number?: number;
+  host_suffix?: string;
+  ttl_hours?: number;
+}
+
+export interface PreviewSummary {
+  name: string;
+  branch: string;
+  pr_number: number | null;
+  host: string | null;
+  replicas_ready: number;
+  replicas_desired: number;
+  created_at: string | null;
+  expires_at: string;
+}
+
+export interface PreviewListResponse {
+  previews: PreviewSummary[];
+}
+
+// --- Promote ---
+
+export interface PromoteRequest {
+  target_namespace: string;
+  target_name?: string;
+  change_cause?: string;
+}
+
+export interface PromoteFieldChange {
+  field: string;
+  from: string | null | undefined;
+  to: string | null | undefined;
+}
+
+export interface PromoteResponse {
+  source_namespace: string;
+  source_name: string;
+  target_namespace: string;
+  target_name: string;
+  no_op: boolean;
+  changes: PromoteFieldChange[];
 }

@@ -42,4 +42,9 @@ export const deploymentsUxApi = {
       `/namespaces/${ns}/deployments/${name}/clone`,
       { method: "POST", body: JSON.stringify(body) },
     ),
+
+  revisionYaml: (ns: string, name: string, revision: number) =>
+    apiFetch<string>(
+      `/namespaces/${ns}/deployments/${name}/history/${revision}/yaml`,
+    ),
 };
