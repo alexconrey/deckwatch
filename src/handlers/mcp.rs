@@ -1799,6 +1799,7 @@ async fn tool_validate_plugin(
             .and_then(|v| serde_json::from_value(v.clone()).ok())
             .unwrap_or_default(),
         plugin_outputs: Default::default(),
+        provisioned_resources: Default::default(),
     };
 
     let vr = crate::plugins::fetch_and_validate(&cfg, test_ctx, state).await;

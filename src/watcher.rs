@@ -1477,9 +1477,19 @@ async fn reconcile_application_plugins(state: &AppState) {
         return;
     }
 
+    // Snapshot the plugin list once.
+    let plugins = {
+        let guard = state.plugins.read().await;
+        guard.clone()
+    };
+
     let mut app_state: HashMap<String, HashMap<String, String>> = HashMap::new();
     let mut app_annotations: HashMap<String, HashMap<String, String>> = HashMap::new();
     let mut app_sidecars: HashMap<String, Vec<SidecarSpec>> = HashMap::new();
+    // Provisioned resources keyed by app_id → "{plugin_name}/{resource_id}" → state map.
+    let mut app_provisioned: HashMap<String, HashMap<String, HashMap<String, String>>> =
+        HashMap::new();
+
     for row in rows {
         let state_map: HashMap<String, String> =
             serde_json::from_str(&row.state).unwrap_or_default();
@@ -1487,6 +1497,14 @@ async fn reconcile_application_plugins(state: &AppState) {
             serde_json::from_str(&row.annotations).unwrap_or_default();
         let sidecars_raw: Vec<SidecarSpec> =
             serde_json::from_str(&row.sidecars).unwrap_or_default();
+
+        // Build the provisioned_resources key used by PluginContext.
+        let resource_key = format!("{}/{}", row.plugin_name, row.resource_id);
+        app_provisioned
+            .entry(row.application_id.clone())
+            .or_default()
+            .insert(resource_key, state_map.clone());
+
         let state_entry = app_state.entry(row.application_id.clone()).or_default();
         state_entry.extend(state_map);
         if !ann_map.is_empty() {
@@ -1539,7 +1557,59 @@ async fn reconcile_application_plugins(state: &AppState) {
                         None => continue,
                     };
 
-                    let ann_map = app_annotations.get(app_id).cloned().unwrap_or_default();
+                    // Start with DB-persisted annotations (from ResourceProvisionResult).
+                    let mut final_annotations =
+                        app_annotations.get(app_id).cloned().unwrap_or_default();
+                    let mut final_labels: HashMap<String, String> = HashMap::new();
+
+                    // Call each loaded plugin to collect deployment_annotations,
+                    // deployment_labels, and warnings from PluginResult.
+                    if !plugins.is_empty() {
+                        let provisioned_resources =
+                            app_provisioned.get(app_id).cloned().unwrap_or_default();
+                        let ctx = crate::plugins::PluginContext {
+                            namespace: ns.to_string(),
+                            deployment_name: dep_name.clone(),
+                            annotations: dep
+                                .metadata
+                                .annotations
+                                .clone()
+                                .unwrap_or_default()
+                                .into_iter()
+                                .collect(),
+                            labels: dep
+                                .spec
+                                .as_ref()
+                                .and_then(|s| s.template.metadata.as_ref())
+                                .and_then(|m| m.labels.as_ref())
+                                .cloned()
+                                .unwrap_or_default()
+                                .into_iter()
+                                .collect(),
+                            plugin_outputs: Default::default(),
+                            provisioned_resources,
+                        };
+
+                        for plugin in crate::plugins::sort_by_dependencies(&plugins) {
+                            match crate::plugins::run_plugin(plugin, &ctx) {
+                                Ok(result) => {
+                                    // Warnings are already logged inside run_plugin.
+                                    final_annotations
+                                        .extend(result.deployment_annotations.clone());
+                                    final_labels.extend(result.deployment_labels.clone());
+                                }
+                                Err(e) => {
+                                    tracing::warn!(
+                                        plugin = %plugin.name,
+                                        namespace = %ns,
+                                        deployment = %dep_name,
+                                        error = %e,
+                                        "reconcile_application_plugins: plugin apply() failed"
+                                    );
+                                }
+                            }
+                        }
+                    }
 
                     let primary_name = dep
                         .spec
@@ -1558,14 +1628,21 @@ async fn reconcile_application_plugins(state: &AppState) {
                     })];
                     containers_patch.extend(sidecars.iter().map(sidecar_to_json));
 
+                    let mut metadata_patch = serde_json::json!({
+                        "name": dep_name,
+                        "namespace": ns,
+                    });
+                    if !final_annotations.is_empty() {
+                        metadata_patch["annotations"] = serde_json::json!(final_annotations);
+                    }
+                    if !final_labels.is_empty() {
+                        metadata_patch["labels"] = serde_json::json!(final_labels);
+                    }
+
                     let patch = serde_json::json!({
                         "apiVersion": "apps/v1",
                         "kind": "Deployment",
-                        "metadata": {
-                            "name": dep_name,
-                            "namespace": ns,
-                            "annotations": ann_map,
-                        },
+                        "metadata": metadata_patch,
                         "spec": {
                             "template": {
                                 "spec": {
@@ -1745,6 +1822,31 @@ async fn reconcile_pending_resources(state: &AppState) {
             None => continue,
         };
 
+        // Check retry_after_secs stored in annotations from a prior provision() call.
+        // If updated_at + retry_after_secs > now, skip re-polling this cycle.
+        {
+            let ann: HashMap<String, String> =
+                serde_json::from_str(&row.annotations).unwrap_or_default();
+            if let Some(retry_secs) = ann
+                .get("deckwatch.io/retry-after-secs")
+                .and_then(|s| s.parse::<u64>().ok())
+            {
+                let now_secs = now_utc().timestamp() as u64;
+                let updated_secs = row.updated_at.timestamp() as u64;
+                if updated_secs + retry_secs > now_secs {
+                    tracing::debug!(
+                        plugin = %plugin_name,
+                        namespace = %ns,
+                        application = %app_name,
+                        resource_id = %resource_id,
+                        retry_after_secs = retry_secs,
+                        "reconcile_pending_resources: skipping re-poll (retry_after_secs not elapsed)"
+                    );
+                    continue;
+                }
+            }
+        }
+
         // Skip if the plugin is not currently loaded.
         let plugin = match plugins.iter().find(|p| p.name == plugin_name) {
             Some(p) => p,
@@ -1791,15 +1893,38 @@ async fn reconcile_pending_resources(state: &AppState) {
         let new_state_json =
             serde_json::to_string(&result.state).unwrap_or_else(|_| "{}".to_string());
 
-        // Only write to the DB if the state grew or is no longer pending.
-        let state_changed = keys_after > keys_before || !is_pending(&new_state_json);
-        if !state_changed {
+        // Use typed ProvisioningStatus to decide whether to write to DB.
+        // Available/Failed are always written; Pending falls back to the
+        // heuristic key-growth check for backward compat with old plugins.
+        let should_update = match result.status {
+            crate::plugins::ProvisioningStatus::Available
+            | crate::plugins::ProvisioningStatus::Failed => true,
+            crate::plugins::ProvisioningStatus::Pending => {
+                keys_after > keys_before || !is_pending(&new_state_json)
+            }
+        };
+        if !should_update {
             continue;
         }
 
         let db_host = result.state.get("DB_HOST").cloned().unwrap_or_default();
-        let new_annotations_json = serde_json::to_string(&result.deployment_annotations)
-            .unwrap_or_else(|_| "{}".to_string());
+
+        // Merge plugin annotations with the existing DB annotations.
+        // Also persist retry_after_secs so the next cycle can honour it.
+        let mut merged_annotations: HashMap<String, String> =
+            serde_json::from_str(&row.annotations).unwrap_or_default();
+        merged_annotations.extend(result.deployment_annotations.clone());
+        if let Some(retry_secs) = result.retry_after_secs {
+            merged_annotations.insert(
+                "deckwatch.io/retry-after-secs".to_string(),
+                retry_secs.to_string(),
+            );
+        } else {
+            merged_annotations.remove("deckwatch.io/retry-after-secs");
+        }
+
+        let new_annotations_json =
+            serde_json::to_string(&merged_annotations).unwrap_or_else(|_| "{}".to_string());
         let new_sidecars_json =
             serde_json::to_string(&result.sidecars).unwrap_or_else(|_| "[]".to_string());
         let now = now_utc();
@@ -1830,6 +1955,7 @@ async fn reconcile_pending_resources(state: &AppState) {
             state_keys_before = keys_before,
             state_keys_after = keys_after,
             db_host = %db_host,
+            status = ?result.status,
             "resource status updated"
         );
     }

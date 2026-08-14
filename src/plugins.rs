@@ -24,7 +24,7 @@ use crate::handlers::settings::{DeckwatchSettings, PluginConfig, PluginSource};
 use crate::metrics;
 use crate::state::AppState;
 
-// ── Shared types (mirror of deckwatch-plugin-sdk v0.5.0) ─────────────────────
+// ── Shared types (mirror of deckwatch-plugin-sdk v0.9.0) ─────────────────────
 // These must stay in sync with `deckwatch-plugin-sdk/src/lib.rs`. The SDK is
 // the canonical source; this is the host-side copy for deserializing plugin
 // output without adding a workspace dependency on the SDK crate.
@@ -39,6 +39,17 @@ pub struct PluginContext {
     /// Populated by `apply_plugins` before each plugin call.
     #[serde(default)]
     pub plugin_outputs:
+        std::collections::HashMap<String, std::collections::HashMap<String, String>>,
+
+    /// Provisioned infrastructure resources for this application, keyed by
+    /// `"{plugin_name}/{resource_id}"`. Each value is the state map persisted
+    /// when the resource was provisioned (e.g. `{"DB_HOST": "...", "DB_PORT": "5432"}`).
+    ///
+    /// Populated by `reconcile_application_plugins` before each `run_plugin` call.
+    /// Plugins use this to avoid redundant cloud API calls on every reconcile cycle.
+    /// Old hosts that do not populate this field deserialize to an empty map.
+    #[serde(default)]
+    pub provisioned_resources:
         std::collections::HashMap<String, std::collections::HashMap<String, String>>,
 }
 
@@ -78,6 +89,22 @@ pub struct PluginResult {
     #[serde(default)]
     pub outputs: std::collections::HashMap<String, String>,
 
+    /// Annotations to stamp on the deployment's `metadata.annotations`.
+    ///
+    /// Keys should be namespaced (e.g. `"myorg.io/vault-injected": "true"`).
+    /// Deckwatch merges these into the SSA patch `metadata.annotations`.
+    /// Old plugins deserialize to an empty map.
+    #[serde(default)]
+    pub deployment_annotations: std::collections::HashMap<String, String>,
+
+    /// Labels to stamp on the deployment's `metadata.labels`.
+    ///
+    /// Keys should be namespaced (e.g. `"myorg.io/managed-by-vault": "true"`).
+    /// Deckwatch includes these in the SSA patch `metadata.labels`.
+    /// Old plugins deserialize to an empty map.
+    #[serde(default)]
+    pub deployment_labels: std::collections::HashMap<String, String>,
+
     /// Errors the plugin wants surfaced in deckwatch's structured logs.
     ///
     /// Plugins populate this instead of calling `extism_pdk::log!()` — the
@@ -86,6 +113,13 @@ pub struct PluginResult {
     /// after `apply()` returns; the deployment is not blocked.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub errors: Vec<String>,
+
+    /// Non-fatal warnings the plugin wants deckwatch to surface in its logs.
+    ///
+    /// Logged at `WARN` level after `apply()` returns; the deployment is not
+    /// blocked. Old plugins deserialize to an empty vec.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -258,6 +292,17 @@ pub struct ResourceProvisionResult {
     pub kubernetes_resources: Vec<serde_json::Value>,
     #[serde(default)]
     pub errors: Vec<String>,
+    /// Non-fatal warnings to surface in deckwatch logs at WARN level.
+    /// Old plugins deserialize to an empty vec.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
+    /// Provisioning lifecycle status. Defaults to `Pending` for old plugins.
+    #[serde(default)]
+    pub status: ProvisioningStatus,
+    /// Minimum seconds before deckwatch should re-poll this resource.
+    /// `None` means poll every cycle (the existing behaviour).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry_after_secs: Option<u64>,
 }
 
 /// Input to a plugin's `deprovision()` WASM export.
@@ -271,6 +316,23 @@ pub struct ResourceDeprovisionRequest {
     pub state: std::collections::HashMap<String, String>,
     #[serde(default)]
     pub fields: std::collections::HashMap<String, String>,
+}
+
+/// Provisioning lifecycle status of a plugin-managed infrastructure resource.
+///
+/// Returned by the plugin's `provision()` export. Deckwatch uses this to drive
+/// the polling loop in `reconcile_pending_resources`.
+///
+/// Mirrors `deckwatch_plugin_sdk::ProvisioningStatus` — kept in sync manually.
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub enum ProvisioningStatus {
+    /// Resource creation is still in progress — re-poll next cycle.
+    #[default]
+    Pending,
+    /// Resource is fully provisioned and available — stop polling.
+    Available,
+    /// Resource provisioning failed — surface in UI and stop polling.
+    Failed,
 }
 
 /// What the plugin returns from `deprovision()`.
@@ -915,6 +977,16 @@ pub fn run_provision(
         );
     }
 
+    for warning in &result.warnings {
+        tracing::warn!(
+            plugin = %plugin.name,
+            namespace = %req.namespace,
+            application = %req.application_name,
+            resource_id = %req.resource_id,
+            "plugin provision() reported warning: {warning}"
+        );
+    }
+
     tracing::info!(
         plugin = %plugin.name,
         namespace = %req.namespace,
@@ -923,6 +995,7 @@ pub fn run_provision(
         state_keys = result.state.len(),
         k8s_resources = result.kubernetes_resources.len(),
         errors = result.errors.len(),
+        warnings = result.warnings.len(),
         "plugin provision() completed"
     );
 
@@ -1031,7 +1104,7 @@ pub fn run_deprovision(
     }
 }
 
-fn run_plugin(plugin: &LoadedPlugin, ctx: &PluginContext) -> anyhow::Result<PluginResult> {
+pub fn run_plugin(plugin: &LoadedPlugin, ctx: &PluginContext) -> anyhow::Result<PluginResult> {
     tracing::info!(
         plugin = %plugin.name,
         namespace = %ctx.namespace,
@@ -1121,6 +1194,16 @@ fn run_plugin(plugin: &LoadedPlugin, ctx: &PluginContext) -> anyhow::Result<Plug
         );
     }
 
+    // Drain warnings logged by the plugin.
+    for warning in &result.warnings {
+        tracing::warn!(
+            plugin = %plugin.name,
+            namespace = %ctx.namespace,
+            deployment = %ctx.deployment_name,
+            "plugin reported warning: {warning}"
+        );
+    }
+
     tracing::info!(
         plugin = %plugin.name,
         namespace = %ctx.namespace,
@@ -1130,6 +1213,7 @@ fn run_plugin(plugin: &LoadedPlugin, ctx: &PluginContext) -> anyhow::Result<Plug
         k8s_resources = result.kubernetes_resources.len(),
         service_account = ?result.service_account_name,
         errors = result.errors.len(),
+        warnings = result.warnings.len(),
         "plugin apply() completed"
     );
     Ok(result)
