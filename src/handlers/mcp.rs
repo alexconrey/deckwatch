@@ -15,8 +15,10 @@ use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder, QuerySelect};
 use serde::{Deserialize, Serialize};
 
 use crate::audit;
-use crate::entities::{agent_feedback, application_plugin_resources, application_plugins, builds, gitops_configs};
 use crate::entities::applications as apps_entity;
+use crate::entities::{
+    agent_feedback, application_plugin_resources, application_plugins, builds, gitops_configs,
+};
 use sea_orm::sea_query::{Expr, Func};
 use crate::handlers::applications;
 use crate::handlers::{
@@ -1073,8 +1075,7 @@ async fn tool_get_application(
 
     // Member deployments.
     let dep_api = state.deployments_api(ns).map_err(|e| e.to_string())?;
-    let lp =
-        kube::api::ListParams::default().labels(&format!("deckwatch.io/application={name}"));
+    let lp = kube::api::ListParams::default().labels(&format!("deckwatch.io/application={name}"));
     let deps = dep_api.list(&lp).await.map_err(|e| e.to_string())?;
     let members: Vec<String> = deps
         .items
@@ -1131,8 +1132,7 @@ async fn tool_restart_application(
     let name = args["name"].as_str().ok_or("name is required")?;
 
     let dep_api = state.deployments_api(ns).map_err(|e| e.to_string())?;
-    let lp =
-        kube::api::ListParams::default().labels(&format!("deckwatch.io/application={name}"));
+    let lp = kube::api::ListParams::default().labels(&format!("deckwatch.io/application={name}"));
     let deps = dep_api.list(&lp).await.map_err(|e| e.to_string())?;
 
     let dep_names: Vec<String> = deps
@@ -1214,8 +1214,7 @@ async fn tool_scale_application(
         .max(0) as i32;
 
     let dep_api = state.deployments_api(ns).map_err(|e| e.to_string())?;
-    let lp =
-        kube::api::ListParams::default().labels(&format!("deckwatch.io/application={name}"));
+    let lp = kube::api::ListParams::default().labels(&format!("deckwatch.io/application={name}"));
     let deps = dep_api.list(&lp).await.map_err(|e| e.to_string())?;
 
     let dep_names: Vec<String> = deps
