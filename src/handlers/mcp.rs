@@ -19,12 +19,12 @@ use crate::entities::applications as apps_entity;
 use crate::entities::{
     agent_feedback, application_plugin_resources, application_plugins, builds, gitops_configs,
 };
-use sea_orm::sea_query::{Expr, Func};
 use crate::handlers::applications;
 use crate::handlers::{
     addons, application_resources, gitops, ingresses, monitoring, settings, templates,
 };
 use crate::state::AppState;
+use sea_orm::sea_query::{Expr, Func};
 
 // ---------------------------------------------------------------------------
 // JSON-RPC 2.0 types
@@ -2686,7 +2686,6 @@ async fn tool_associate_plugin(
              in namespace '{ns}' (no-op)."
         ));
     }
-
 
     use sea_orm::ActiveValue::Set;
 
