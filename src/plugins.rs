@@ -21,6 +21,7 @@ use kube::Api;
 use serde::{Deserialize, Serialize};
 
 use crate::handlers::settings::{DeckwatchSettings, PluginConfig, PluginSource};
+use crate::metrics;
 use crate::state::AppState;
 
 // ── Shared types (mirror of deckwatch-plugin-sdk v0.5.0) ─────────────────────
@@ -338,9 +339,18 @@ pub async fn fetch_and_validate(
         .build()
         .unwrap_or_default();
 
+    let start = std::time::Instant::now();
+
     let bytes = match fetch_bytes(cfg, &http, &settings, state).await {
         Ok(b) => b,
         Err(e) => {
+            metrics::record_plugin_execution(
+                &cfg.name,
+                "validate",
+                "error",
+                start.elapsed().as_secs_f64(),
+            );
+            metrics::record_plugin_error(&cfg.name, "fetch_failed");
             return ValidationResult {
                 wasm_size_bytes: 0,
                 apply_export_found: false,
@@ -353,7 +363,7 @@ pub async fn fetch_and_validate(
 
     let size = bytes.len();
     let plugin = LoadedPlugin {
-        name: "__validation__".to_string(),
+        name: cfg.name.clone(),
         wasm_bytes: bytes,
         allowed_hosts: cfg.allowed_hosts.clone(),
         config: cfg.config.clone(),
@@ -363,22 +373,37 @@ pub async fn fetch_and_validate(
     };
 
     match run_plugin(&plugin, &test_ctx) {
-        Ok(result) => ValidationResult {
-            wasm_size_bytes: size,
-            apply_export_found: true,
-            test_context: test_ctx,
-            result: Some(result),
-            error: None,
-        },
-        Err(e) => ValidationResult {
-            wasm_size_bytes: size,
-            // If we got past the fetch but extism failed, distinguish between
-            // "apply not found" and "apply threw an error".
-            apply_export_found: !e.to_string().contains("not found"),
-            test_context: test_ctx,
-            result: None,
-            error: Some(format!("apply() failed: {e}")),
-        },
+        Ok(result) => {
+            metrics::record_plugin_execution(
+                &cfg.name,
+                "validate",
+                "ok",
+                start.elapsed().as_secs_f64(),
+            );
+            ValidationResult {
+                wasm_size_bytes: size,
+                apply_export_found: true,
+                test_context: test_ctx,
+                result: Some(result),
+                error: None,
+            }
+        }
+        Err(e) => {
+            metrics::record_plugin_execution(
+                &cfg.name,
+                "validate",
+                "error",
+                start.elapsed().as_secs_f64(),
+            );
+            metrics::record_plugin_error(&cfg.name, "apply_failed");
+            ValidationResult {
+                wasm_size_bytes: size,
+                apply_export_found: !e.to_string().contains("not found"),
+                test_context: test_ctx,
+                result: None,
+                error: Some(format!("apply() failed: {e}")),
+            }
+        }
     }
 }
 
@@ -439,14 +464,17 @@ pub async fn fetch_plugins(settings: &DeckwatchSettings, state: &AppState) -> Ve
     for cfg in &settings.plugins {
         if !cfg.enabled {
             tracing::debug!(plugin = %cfg.name, "plugin disabled, skipping");
+            metrics::record_plugin_load(&cfg.name, "disabled");
             continue;
         }
+        let fetch_start = std::time::Instant::now();
         match fetch_bytes(cfg, &http, settings, state).await {
             Ok(bytes) => {
                 tracing::info!(plugin = %cfg.name, bytes = bytes.len(), "loaded plugin");
                 let metadata = load_metadata_from_bytes(&bytes, &cfg.allowed_hosts, &cfg.config)
                     .unwrap_or_else(|e| {
                         tracing::debug!(plugin = %cfg.name, error = %e, "metadata() not exported or failed; using defaults");
+                        metrics::record_plugin_error(&cfg.name, "metadata_failed");
                         PluginMetadata { name: cfg.name.clone(), ..Default::default() }
                     });
                 loaded.push(LoadedPlugin {
@@ -458,12 +486,17 @@ pub async fn fetch_plugins(settings: &DeckwatchSettings, state: &AppState) -> Ve
                     inherit_env_file_keys: cfg.inherit_env_file_keys.clone(),
                     metadata,
                 });
+                metrics::record_plugin_load(&cfg.name, "loaded");
             }
             Err(e) => {
                 tracing::error!(plugin = %cfg.name, error = %e, "failed to fetch plugin WASM");
+                metrics::record_plugin_load(&cfg.name, "fetch_failed");
+                metrics::record_plugin_error(&cfg.name, "fetch_failed");
             }
         }
+        let _ = fetch_start;
     }
+    metrics::set_plugins_loaded(loaded.len() as f64);
     loaded
 }
 
@@ -613,10 +646,14 @@ pub fn sort_by_dependencies(plugins: &[LoadedPlugin]) -> Vec<&LoadedPlugin> {
     if sorted.len() < n {
         let in_sorted: std::collections::HashSet<usize> = sorted.iter().copied().collect();
         let remaining: Vec<usize> = (0..n).filter(|i| !in_sorted.contains(i)).collect();
+        let cycle_plugins: Vec<_> = remaining.iter().map(|&i| &plugins[i].name).collect();
         tracing::warn!(
-            plugins = ?remaining.iter().map(|&i| &plugins[i].name).collect::<Vec<_>>(),
+            plugins = ?cycle_plugins,
             "plugin dependency cycle detected; running in original order"
         );
+        for name in &cycle_plugins {
+            metrics::record_plugin_error(name, "dependency_cycle");
+        }
         sorted.extend(remaining);
     }
 
@@ -652,8 +689,16 @@ pub fn apply_plugins(
         let mut enriched_ctx = ctx.clone();
         enriched_ctx.plugin_outputs = accumulated_outputs.clone();
 
+        let start = std::time::Instant::now();
         match run_plugin(plugin, &enriched_ctx) {
             Ok(result) => {
+                let elapsed = start.elapsed().as_secs_f64();
+                metrics::record_plugin_execution(&plugin.name, "apply", "ok", elapsed);
+
+                for _err in &result.errors {
+                    metrics::record_plugin_error(&plugin.name, "reported_error");
+                }
+
                 apply_env_vars(plugin, &result.env_vars, pod_spec, dep_annotations);
                 apply_sidecars(plugin, &result.sidecars, pod_spec, dep_annotations);
                 all_k8s_resources.extend(result.kubernetes_resources.clone());
@@ -676,6 +721,9 @@ pub fn apply_plugins(
                 }
             }
             Err(e) => {
+                let elapsed = start.elapsed().as_secs_f64();
+                metrics::record_plugin_execution(&plugin.name, "apply", "error", elapsed);
+                metrics::record_plugin_error(&plugin.name, "apply_failed");
                 tracing::error!(plugin = %plugin.name, error = %e, "plugin apply() failed; skipping");
             }
         }
@@ -713,16 +761,19 @@ pub async fn apply_kubernetes_resources(
     kube_client: &kube::Client,
 ) {
     for resource in resources {
+        let kind = resource
+            .get("kind")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown");
+        let name = resource
+            .pointer("/metadata/name")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown");
         if let Err(e) = apply_one_resource(resource, kube_client).await {
-            let kind = resource
-                .get("kind")
-                .and_then(|v| v.as_str())
-                .unwrap_or("unknown");
-            let name = resource
-                .pointer("/metadata/name")
-                .and_then(|v| v.as_str())
-                .unwrap_or("unknown");
+            metrics::record_plugin_k8s_resource(kind, "error");
             tracing::error!(kind, name, error = %e, "plugin kubernetes_resource apply failed");
+        } else {
+            metrics::record_plugin_k8s_resource(kind, "ok");
         }
     }
 }
@@ -784,6 +835,8 @@ pub fn run_provision(
         "calling plugin provision()"
     );
 
+    let start = std::time::Instant::now();
+
     let wasm = Wasm::data(plugin.wasm_bytes.clone());
     let mut manifest = Manifest::new([wasm]);
 
@@ -792,10 +845,6 @@ pub fn run_provision(
     }
     manifest.config.extend(plugin.config.clone());
 
-    // Inject the current timestamp so plugins can sign AWS requests without
-    // needing a system clock (unavailable in wasm32-unknown-unknown).
-    // Injected at call time so it is always fresh — plugins read it via
-    // extism_pdk::config::get("CURRENT_TIMESTAMP").
     let now_ts = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
@@ -831,12 +880,32 @@ pub fn run_provision(
         }
     }
 
-    let mut p = Plugin::new(&manifest, [host_now_fn()], false)?;
+    let mut p = match Plugin::new(&manifest, [host_now_fn()], false) {
+        Ok(p) => p,
+        Err(e) => {
+            let elapsed = start.elapsed().as_secs_f64();
+            metrics::record_plugin_execution(&plugin.name, "provision", "error", elapsed);
+            metrics::record_plugin_error(&plugin.name, "provision_failed");
+            return Err(e);
+        }
+    };
     let input = serde_json::to_string(req)?;
-    let output = p.call::<&str, &str>("provision", &input)?;
+    let output = match p.call::<&str, &str>("provision", &input) {
+        Ok(o) => o,
+        Err(e) => {
+            let elapsed = start.elapsed().as_secs_f64();
+            metrics::record_plugin_execution(&plugin.name, "provision", "error", elapsed);
+            metrics::record_plugin_error(&plugin.name, "provision_failed");
+            return Err(e);
+        }
+    };
     let result: ResourceProvisionResult = serde_json::from_str(output)?;
 
+    let elapsed = start.elapsed().as_secs_f64();
+    metrics::record_plugin_execution(&plugin.name, "provision", "ok", elapsed);
+
     for err in &result.errors {
+        metrics::record_plugin_error(&plugin.name, "reported_error");
         tracing::error!(
             plugin = %plugin.name,
             namespace = %req.namespace,
@@ -877,6 +946,8 @@ pub fn run_deprovision(
         "calling plugin deprovision()"
     );
 
+    let start = std::time::Instant::now();
+
     let wasm = Wasm::data(plugin.wasm_bytes.clone());
     let mut manifest = Manifest::new([wasm]);
     if !plugin.allowed_hosts.is_empty() {
@@ -907,11 +978,18 @@ pub fn run_deprovision(
         }
     }
 
-    let mut p = Plugin::new(&manifest, [host_now_fn()], false)?;
+    let mut p = match Plugin::new(&manifest, [host_now_fn()], false) {
+        Ok(p) => p,
+        Err(e) => {
+            let elapsed = start.elapsed().as_secs_f64();
+            metrics::record_plugin_execution(&plugin.name, "deprovision", "error", elapsed);
+            metrics::record_plugin_error(&plugin.name, "deprovision_failed");
+            return Err(e);
+        }
+    };
     let input = serde_json::to_string(req)?;
 
     let output = p.call::<&str, &str>("deprovision", &input).map_err(|e| {
-        // deprovision() is optional — if the export doesn't exist, return a default result
         if e.to_string().contains("not found") || e.to_string().contains("export") {
             return anyhow::anyhow!("__no_deprovision_export__");
         }
@@ -920,8 +998,11 @@ pub fn run_deprovision(
 
     match output {
         Ok(out) => {
+            let elapsed = start.elapsed().as_secs_f64();
             let result: ResourceDeprovisionResult = serde_json::from_str(out)?;
+            metrics::record_plugin_execution(&plugin.name, "deprovision", "ok", elapsed);
             for err in &result.errors {
+                metrics::record_plugin_error(&plugin.name, "reported_error");
                 tracing::error!(
                     plugin = %plugin.name,
                     resource_id = %req.resource_id,
@@ -941,7 +1022,12 @@ pub fn run_deprovision(
             tracing::debug!(plugin = %plugin.name, "plugin has no deprovision() export — skipping");
             Ok(ResourceDeprovisionResult::default())
         }
-        Err(e) => Err(e),
+        Err(e) => {
+            let elapsed = start.elapsed().as_secs_f64();
+            metrics::record_plugin_execution(&plugin.name, "deprovision", "error", elapsed);
+            metrics::record_plugin_error(&plugin.name, "deprovision_failed");
+            Err(e)
+        }
     }
 }
 
@@ -1180,6 +1266,7 @@ fn apply_service_account(
             requested_sa = %sa_name,
             "skipping service_account_name — pod already has a non-default service account"
         );
+        metrics::record_plugin_error(&plugin.name, "sa_conflict");
         return;
     }
     pod_spec.service_account_name = Some(sa_name.clone());
@@ -1312,5 +1399,223 @@ mod tests {
             serde_json::to_string(&ConfigFieldType::Bool).unwrap(),
             "\"bool\""
         );
+    }
+
+    fn make_plugin(name: &str, provides: Vec<&str>, depends_on: Vec<&str>) -> LoadedPlugin {
+        LoadedPlugin {
+            name: name.to_string(),
+            wasm_bytes: vec![],
+            allowed_hosts: vec![],
+            config: BTreeMap::new(),
+            inherit_env_keys: vec![],
+            inherit_env_file_keys: BTreeMap::new(),
+            metadata: PluginMetadata {
+                name: name.to_string(),
+                provides: provides.into_iter().map(String::from).collect(),
+                depends_on: depends_on.into_iter().map(String::from).collect(),
+                ..Default::default()
+            },
+        }
+    }
+
+    #[test]
+    fn sort_by_dependencies_respects_ordering() {
+        let plugins = vec![
+            make_plugin("consumer", vec![], vec!["capability-a"]),
+            make_plugin("provider", vec!["capability-a"], vec![]),
+        ];
+        let sorted = sort_by_dependencies(&plugins);
+        let names: Vec<&str> = sorted.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(
+            names,
+            vec!["provider", "consumer"],
+            "provider must run before consumer"
+        );
+    }
+
+    #[test]
+    fn sort_by_dependencies_handles_cycle_without_panic() {
+        let plugins = vec![
+            make_plugin("a", vec!["cap-a"], vec!["cap-b"]),
+            make_plugin("b", vec!["cap-b"], vec!["cap-a"]),
+        ];
+        let sorted = sort_by_dependencies(&plugins);
+        assert_eq!(
+            sorted.len(),
+            2,
+            "all plugins must be returned even with a cycle"
+        );
+        let names: std::collections::HashSet<&str> =
+            sorted.iter().map(|p| p.name.as_str()).collect();
+        assert!(names.contains("a"));
+        assert!(names.contains("b"));
+    }
+
+    #[test]
+    fn sort_by_dependencies_single_plugin() {
+        let plugins = vec![make_plugin("solo", vec![], vec![])];
+        let sorted = sort_by_dependencies(&plugins);
+        assert_eq!(sorted.len(), 1);
+        assert_eq!(sorted[0].name, "solo");
+    }
+
+    #[test]
+    fn sort_by_dependencies_preserves_order_without_edges() {
+        let plugins = vec![
+            make_plugin("alpha", vec![], vec![]),
+            make_plugin("beta", vec![], vec![]),
+            make_plugin("gamma", vec![], vec![]),
+        ];
+        let sorted = sort_by_dependencies(&plugins);
+        let names: Vec<&str> = sorted.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(
+            names,
+            vec!["alpha", "beta", "gamma"],
+            "plugins with no deps keep original order"
+        );
+    }
+
+    #[test]
+    fn apply_service_account_sets_sa_on_default() {
+        let plugin = make_plugin("test-plugin", vec![], vec![]);
+        let mut pod_spec = k8s_openapi::api::core::v1::PodSpec {
+            containers: vec![],
+            ..Default::default()
+        };
+        let mut annotations = BTreeMap::new();
+
+        apply_service_account(
+            &plugin,
+            "my-sa".to_string(),
+            &mut pod_spec,
+            &mut annotations,
+        );
+
+        assert_eq!(
+            pod_spec.service_account_name.as_deref(),
+            Some("my-sa"),
+            "SA should be set when pod has default SA"
+        );
+        assert_eq!(
+            annotations.get("deckwatch.plugin-sa/test-plugin"),
+            Some(&"my-sa".to_string())
+        );
+    }
+
+    #[test]
+    fn apply_service_account_skips_non_default() {
+        let plugin = make_plugin("test-plugin", vec![], vec![]);
+        let mut pod_spec = k8s_openapi::api::core::v1::PodSpec {
+            containers: vec![],
+            service_account_name: Some("existing-sa".to_string()),
+            ..Default::default()
+        };
+        let mut annotations = BTreeMap::new();
+
+        apply_service_account(
+            &plugin,
+            "new-sa".to_string(),
+            &mut pod_spec,
+            &mut annotations,
+        );
+
+        assert_eq!(
+            pod_spec.service_account_name.as_deref(),
+            Some("existing-sa"),
+            "existing non-default SA must not be overwritten"
+        );
+        assert!(
+            !annotations.contains_key("deckwatch.plugin-sa/test-plugin"),
+            "no annotation should be set when SA is skipped"
+        );
+    }
+
+    #[test]
+    fn apply_env_vars_skips_duplicates() {
+        let plugin = make_plugin("test-plugin", vec![], vec![]);
+        let mut pod_spec = k8s_openapi::api::core::v1::PodSpec {
+            containers: vec![k8s_openapi::api::core::v1::Container {
+                name: "app".to_string(),
+                env: Some(vec![k8s_openapi::api::core::v1::EnvVar {
+                    name: "EXISTING".to_string(),
+                    value: Some("old-value".to_string()),
+                    ..Default::default()
+                }]),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let mut annotations = BTreeMap::new();
+
+        let env_vars = vec![
+            EnvVarSpec {
+                name: "EXISTING".to_string(),
+                value: "new-value".to_string(),
+                value_from: None,
+            },
+            EnvVarSpec {
+                name: "NEW_VAR".to_string(),
+                value: "added".to_string(),
+                value_from: None,
+            },
+        ];
+
+        apply_env_vars(&plugin, &env_vars, &mut pod_spec, &mut annotations);
+
+        let env = pod_spec.containers[0].env.as_ref().unwrap();
+        assert_eq!(env.len(), 2, "duplicate should not be added");
+        assert_eq!(
+            env[0].value.as_deref(),
+            Some("old-value"),
+            "existing var should keep original value"
+        );
+        assert_eq!(env[1].name, "NEW_VAR");
+    }
+
+    #[test]
+    fn apply_sidecars_skips_duplicate_container_names() {
+        let plugin = make_plugin("test-plugin", vec![], vec![]);
+        let mut pod_spec = k8s_openapi::api::core::v1::PodSpec {
+            containers: vec![k8s_openapi::api::core::v1::Container {
+                name: "existing-sidecar".to_string(),
+                image: Some("old:latest".to_string()),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let mut annotations = BTreeMap::new();
+
+        let sidecars = vec![
+            SidecarSpec {
+                name: "existing-sidecar".to_string(),
+                image: "new:latest".to_string(),
+                env: vec![],
+                port: None,
+                cpu: None,
+                memory: None,
+            },
+            SidecarSpec {
+                name: "new-sidecar".to_string(),
+                image: "sidecar:v1".to_string(),
+                env: vec![],
+                port: Some(8080),
+                cpu: None,
+                memory: None,
+            },
+        ];
+
+        apply_sidecars(&plugin, &sidecars, &mut pod_spec, &mut annotations);
+
+        assert_eq!(
+            pod_spec.containers.len(),
+            2,
+            "duplicate sidecar should not be added"
+        );
+        assert_eq!(
+            pod_spec.containers[0].image.as_deref(),
+            Some("old:latest"),
+            "existing container image should not be overwritten"
+        );
+        assert_eq!(pod_spec.containers[1].name, "new-sidecar");
     }
 }
