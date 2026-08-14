@@ -155,6 +155,10 @@ function pickTag(tag: TagSummary) {
   emit("update:modelValue", false);
 }
 
+function onClickRow(_e: unknown, ctx: unknown) {
+  pickTag((ctx as { item: TagSummary }).item);
+}
+
 function close() {
   emit("update:modelValue", false);
 }
@@ -360,7 +364,7 @@ const tagHeaders = [
                   density="comfortable"
                   items-per-page="50"
                   hover
-                  @click:row="(_e: unknown, ctx: { item: TagSummary }) => pickTag(ctx.item)"
+                  @click:row="onClickRow"
                 >
                   <template #[`item.tag`]="{ item }">
                     <span class="font-weight-medium">{{ item.tag }}</span>
