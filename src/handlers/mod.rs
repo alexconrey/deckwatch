@@ -1,5 +1,6 @@
 pub mod addons;
 pub mod admission;
+pub mod agent_feedback;
 pub mod ai_fix;
 pub mod application_resources;
 pub mod applications;

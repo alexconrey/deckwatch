@@ -11,11 +11,11 @@ use crate::audit;
 use crate::auth::{self, AuthConfig};
 use crate::handlers::registry::RegistryStore;
 use crate::handlers::{
-    addons, admission, ai_fix, application_resources, applications, autoscaling, configmaps_ui,
-    cronjobs, deployments, deployments_ux, diagnostics, docs, events, exec, git, gitops, health,
-    ingressclasses, ingresses, license, logs, mcp, monitoring, namespaces, nodes, plugins, pods,
-    portforward, prometheus_query, promote, registry, registry_ui, resource_metrics, secrets,
-    serviceaccounts, settings, storageclasses, templates, tracing_handler, webhooks,
+    addons, admission, agent_feedback, ai_fix, application_resources, applications, autoscaling,
+    configmaps_ui, cronjobs, deployments, deployments_ux, diagnostics, docs, events, exec, git,
+    gitops, health, ingressclasses, ingresses, license, logs, mcp, monitoring, namespaces, nodes,
+    plugins, pods, portforward, prometheus_query, promote, registry, registry_ui, resource_metrics,
+    secrets, serviceaccounts, settings, storageclasses, templates, tracing_handler, webhooks,
 };
 use crate::metrics;
 use crate::state::AppState;
@@ -390,6 +390,15 @@ pub fn build_router(
         )
         // Audit log
         .route("/api/audit", get(audit::list_audit_logs))
+        // Agent Feedback
+        .route(
+            "/api/agent-feedback",
+            get(agent_feedback::list_agent_feedback),
+        )
+        .route(
+            "/api/agent-feedback/{id}",
+            axum::routing::patch(agent_feedback::update_agent_feedback_status),
+        )
         .with_state(state)
         .layer(auth_layer.clone());
 

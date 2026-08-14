@@ -9,6 +9,7 @@ import { storageclassesApi } from "@/api/storageclasses";
 import { templatesApi } from "@/api/templates";
 import { useAiSettings } from "@/composables/useAiSettings";
 import { useClusterAlertSettings } from "@/composables/useClusterAlertSettings";
+import AgentFeedbackPage from "@/components/pages/AgentFeedbackPage.vue";
 import AuditLogPage from "@/components/pages/AuditLogPage.vue";
 import MarketplacePage from "@/components/pages/MarketplacePage.vue";
 import ConfirmDialog from "@/components/common/ConfirmDialog.vue";
@@ -65,9 +66,10 @@ type SectionId =
   | "plugins"
   | "mcp_tuning"
   | "advanced"
-  | "audit";
+  | "audit"
+  | "agent_feedback";
 
-const navItems: { id: SectionId; title: string; icon: string }[] = [
+const navItemsBase: { id: SectionId; title: string; icon: string }[] = [
   { id: "general", title: "General", icon: "mdi-tune" },
   { id: "storage", title: "Storage", icon: "mdi-database" },
   { id: "networking", title: "Networking", icon: "mdi-lan" },
@@ -82,6 +84,14 @@ const navItems: { id: SectionId; title: string; icon: string }[] = [
   { id: "advanced", title: "Advanced", icon: "mdi-cog-outline" },
   { id: "audit", title: "Audit Log", icon: "mdi-clipboard-text-clock" },
 ];
+
+const navItems = computed(() => {
+  if (!agentFeedbackEnabled.value) return navItemsBase;
+  return [
+    ...navItemsBase,
+    { id: "agent_feedback" as SectionId, title: "Agent Feedback", icon: "mdi-message-text-outline" },
+  ];
+});
 
 const section = ref<SectionId>("general");
 
@@ -130,6 +140,7 @@ const { refresh: refreshAiSettings } = useAiSettings();
 
 // Managed lists.
 const prometheusEnabled = ref(true);
+const agentFeedbackEnabled = ref(false);
 
 // AI provider toggles are now server-side settings, persisted alongside the
 // rest of DeckwatchSettings so an admin toggle applies to all users.
@@ -534,6 +545,7 @@ function applySettings(s: DeckwatchSettings) {
   prometheusEnabled.value = s.prometheus_enabled ?? true;
   aiClaudeEnabled.value = s.ai_claude_enabled ?? true;
   aiCodexEnabled.value = s.ai_codex_enabled ?? true;
+  agentFeedbackEnabled.value = s.agent_feedback_enabled ?? false;
   aiProvider.value = s.ai_provider ?? {
     type: "native",
     api_key_secret: "deckwatch-anthropic-api-key",
@@ -615,6 +627,7 @@ function buildPayload(): DeckwatchSettings {
     prometheus_enabled: prometheusEnabled.value,
     ai_claude_enabled: aiClaudeEnabled.value,
     ai_codex_enabled: aiCodexEnabled.value,
+    agent_feedback_enabled: agentFeedbackEnabled.value,
     ai_provider: aiProvider.value,
     default_storage_class: defaultStorageClass.value || null,
     ingress_templates: ingressTemplates.value,
@@ -2076,6 +2089,31 @@ onMounted(load);
             inset
             density="compact"
           />
+
+          <v-divider class="my-6" />
+
+          <h3 class="text-h6 mb-2">Agent Feedback</h3>
+          <p class="text-body-2 text-secondary mb-3">
+            When enabled, an MCP tool (<code>submit_agent_feedback</code>) is
+            exposed to connected agents so they can record observations about
+            missing tooling, suboptimal workflows, or situations where better
+            guidance would have helped. Feedback is reviewed in the
+            <strong>Agent Feedback</strong> settings section. Defaults to
+            disabled.
+          </p>
+          <v-switch
+            v-model="agentFeedbackEnabled"
+            color="primary"
+            label="Enable Agent Feedback"
+            hide-details
+            inset
+            density="compact"
+          />
+        </div>
+
+        <!-- Agent Feedback -->
+        <div v-else-if="section === 'agent_feedback'">
+          <AgentFeedbackPage />
         </div>
 
         <!-- Templates -->

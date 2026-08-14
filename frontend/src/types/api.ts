@@ -690,6 +690,7 @@ export interface DeckwatchSettings {
   prometheus_enabled?: boolean;
   ai_claude_enabled?: boolean;
   ai_codex_enabled?: boolean;
+  agent_feedback_enabled?: boolean;
   ai_provider?: AiProviderConfig;
   cost?: CostSettings | null;
   tracing?: TracingSettings | null;
@@ -699,6 +700,41 @@ export interface DeckwatchSettings {
   plugins?: PluginConfig[];
   mcp_tuning?: McpTuning;
   marketplace_url?: string;
+}
+
+// --- Agent Feedback types ---
+
+export type AgentFeedbackCategory =
+  | "missing_tool"
+  | "mcp_tuning"
+  | "workflow"
+  | "documentation"
+  | "other";
+
+export type AgentFeedbackStatus =
+  | "pending"
+  | "reviewed"
+  | "actioned"
+  | "dismissed";
+
+export interface AgentFeedbackItem {
+  id: string;
+  created_at: string;
+  category: AgentFeedbackCategory;
+  summary: string;
+  detail: string;
+  suggested_tool_name: string | null;
+  suggested_prompt: string | null;
+  status: AgentFeedbackStatus;
+  reviewed_at: string | null;
+}
+
+export interface AgentFeedbackListResponse {
+  items: AgentFeedbackItem[];
+}
+
+export interface UpdateAgentFeedbackStatusRequest {
+  status: AgentFeedbackStatus;
 }
 
 export interface McpTuning {
