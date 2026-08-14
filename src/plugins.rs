@@ -1633,7 +1633,7 @@ fn volume_spec_to_k8s(v: &VolumeSpec) -> Volume {
         "configMap" => Volume {
             name: v.name.clone(),
             config_map: Some(ConfigMapVolumeSource {
-                name: v.source_name.clone(),
+                name: v.source_name.clone().unwrap_or_default(),
                 ..Default::default()
             }),
             ..Default::default()
