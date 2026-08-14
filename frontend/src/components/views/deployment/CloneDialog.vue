@@ -2,6 +2,7 @@
 import { ref, watch } from "vue";
 import { deploymentsUxApi } from "@/api/deployments_additions";
 import { namespacesApi } from "@/api/namespaces";
+import { k8sNameRules } from "@/utils/validation";
 
 const props = defineProps<{
   modelValue: boolean;
@@ -111,6 +112,7 @@ const handleClone = async () => {
         <v-text-field
           v-model="newName"
           label="New Name"
+          :rules="k8sNameRules"
           hint="Leave unchanged to keep the source name (only allowed when cloning to a different namespace)"
           persistent-hint
           density="compact"
