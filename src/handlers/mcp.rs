@@ -2200,7 +2200,11 @@ async fn tool_refresh_resource(
 
 // ── Deployment mutation tools (intercepted from mcp-k8s for audit logging) ──
 
-async fn mcp_k8s_tool(state: &AppState, tool_name: &str, args: &serde_json::Value) -> Result<String, String> {
+async fn mcp_k8s_tool(
+    state: &AppState,
+    tool_name: &str,
+    args: &serde_json::Value,
+) -> Result<String, String> {
     let k8s_client = mcp_k8s::K8sClient::new(
         state.kube_client.clone(),
         state.allowed_namespaces.clone(),
