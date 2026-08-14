@@ -22,15 +22,9 @@ fn validate_dashboard(name: &str) {
         let id = panel["id"]
             .as_u64()
             .unwrap_or_else(|| panic!("{name}: panel missing numeric id: {panel}"));
-        assert!(
-            ids.insert(id),
-            "{name}: duplicate panel id {id}"
-        );
+        assert!(ids.insert(id), "{name}: duplicate panel id {id}");
 
-        assert!(
-            panel["type"].is_string(),
-            "{name}: panel {id} missing type"
-        );
+        assert!(panel["type"].is_string(), "{name}: panel {id} missing type");
 
         if panel["type"].as_str() == Some("row") {
             continue;
@@ -66,13 +60,12 @@ fn validate_dashboard(name: &str) {
     }
 
     let templating = &dash["templating"]["list"];
-    assert!(
-        templating.is_array(),
-        "{name}: missing templating.list"
-    );
+    assert!(templating.is_array(), "{name}: missing templating.list");
 
     let vars = templating.as_array().unwrap();
-    let has_datasource = vars.iter().any(|v| v["name"].as_str() == Some("datasource"));
+    let has_datasource = vars
+        .iter()
+        .any(|v| v["name"].as_str() == Some("datasource"));
     assert!(
         has_datasource,
         "{name}: missing datasource template variable"
@@ -107,7 +100,10 @@ fn dashboard_infrastructure_has_plugin_panels() {
     let has_plugins_row = panels
         .iter()
         .any(|p| p["type"].as_str() == Some("row") && p["title"].as_str() == Some("Plugins"));
-    assert!(has_plugins_row, "infrastructure dashboard must have a Plugins row");
+    assert!(
+        has_plugins_row,
+        "infrastructure dashboard must have a Plugins row"
+    );
 
     let plugin_metric_panels: Vec<_> = panels
         .iter()
@@ -175,9 +171,7 @@ fn all_dashboards_cross_link_via_tag() {
         let tags = dash["tags"]
             .as_array()
             .unwrap_or_else(|| panic!("{name}: missing tags"));
-        let has_deckwatch_tag = tags
-            .iter()
-            .any(|t| t.as_str() == Some("deckwatch"));
+        let has_deckwatch_tag = tags.iter().any(|t| t.as_str() == Some("deckwatch"));
         assert!(
             has_deckwatch_tag,
             "{name}: missing 'deckwatch' tag for cross-linking"
