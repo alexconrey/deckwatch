@@ -210,6 +210,7 @@ pub async fn upload_plugin_wasm(
             let loaded = crate::plugins::fetch_plugins(&s, &state_clone).await;
             tracing::info!(plugin = %name_clone, count = loaded.len(), "plugin reload after upload");
             *state_clone.plugins.write().await = loaded;
+            state_clone.plugin_patch_fingerprints.lock().await.clear();
         });
     }
 

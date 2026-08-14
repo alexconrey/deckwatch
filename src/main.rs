@@ -113,6 +113,9 @@ async fn main() {
         db,
         encryption_key: config.encryption_key.clone(),
         plugins: std::sync::Arc::new(tokio::sync::RwLock::new(Vec::new())),
+        plugin_patch_fingerprints: std::sync::Arc::new(tokio::sync::Mutex::new(
+            std::collections::HashMap::new(),
+        )),
     };
 
     migrate_configmap_apps_to_db(&state).await;

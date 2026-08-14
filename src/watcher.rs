@@ -1,5 +1,6 @@
 #![allow(dead_code, unused_imports)]
 use std::collections::{BTreeMap, HashMap};
+use std::hash::{Hash, Hasher};
 use std::time::Instant;
 
 use k8s_openapi::api::apps::v1::Deployment;
@@ -1422,6 +1423,17 @@ async fn update_build_status(
     }
 }
 
+/// Hash a JSON patch value to a `u64` fingerprint using the standard library's
+/// `DefaultHasher`. No external dependencies required. The hash is computed from
+/// the compact JSON string so it captures every field and value.
+fn fingerprint_patch(patch: &serde_json::Value) -> u64 {
+    use std::collections::hash_map::DefaultHasher;
+    let s = patch.to_string();
+    let mut h = DefaultHasher::new();
+    s.hash(&mut h);
+    h.finish()
+}
+
 /// Build a JSON container object for a sidecar spec. Used when assembling the
 /// SSA patch for deployments and cronjobs.
 fn sidecar_to_json(s: &SidecarSpec) -> serde_json::Value {
@@ -1462,6 +1474,11 @@ fn sidecar_to_json(s: &SidecarSpec) -> serde_json::Value {
 }
 
 async fn reconcile_application_plugins(state: &AppState) {
+    // Snapshot the fingerprint cache once for this reconcile cycle.
+    // Each key is `"namespace/name"` and the value is the hash of the last
+    // patch JSON we sent to the API server for that workload.
+    let fingerprints_arc = state.plugin_patch_fingerprints.clone();
+
     let rows = match application_plugin_resources::Entity::find()
         .all(&state.db)
         .await
@@ -1575,13 +1592,27 @@ async fn reconcile_application_plugins(state: &AppState) {
                         }
                     });
 
-                    if let Err(e) = dep_api.patch(&dep_name, &pp, &Patch::Apply(&patch)).await {
+                    let fp_key = format!("{ns}/{dep_name}");
+                    let new_fp = fingerprint_patch(&patch);
+                    let skip = {
+                        let fps = fingerprints_arc.lock().await;
+                        fps.get(&fp_key).copied() == Some(new_fp)
+                    };
+                    if skip {
+                        tracing::debug!(
+                            namespace = %ns,
+                            deployment = %dep_name,
+                            "reconcile_application_plugins: patch unchanged, skipping"
+                        );
+                    } else if let Err(e) = dep_api.patch(&dep_name, &pp, &Patch::Apply(&patch)).await {
                         tracing::warn!(
                             namespace = %ns,
                             deployment = %dep_name,
                             error = %e,
                             "reconcile_application_plugins: failed to patch deployment"
                         );
+                    } else {
+                        fingerprints_arc.lock().await.insert(fp_key, new_fp);
                     }
                 }
             }
@@ -1646,7 +1677,19 @@ async fn reconcile_application_plugins(state: &AppState) {
                     });
 
                     let cj_typed_api: Api<CronJob> = Api::namespaced(state.kube_client.clone(), ns);
-                    if let Err(e) = cj_typed_api
+                    let cj_fp_key = format!("cj:{ns}/{cj_name}");
+                    let cj_new_fp = fingerprint_patch(&patch);
+                    let cj_skip = {
+                        let fps = fingerprints_arc.lock().await;
+                        fps.get(&cj_fp_key).copied() == Some(cj_new_fp)
+                    };
+                    if cj_skip {
+                        tracing::debug!(
+                            namespace = %ns,
+                            cronjob = %cj_name,
+                            "reconcile_application_plugins: patch unchanged, skipping"
+                        );
+                    } else if let Err(e) = cj_typed_api
                         .patch(&cj_name, &pp, &Patch::Apply(&patch))
                         .await
                     {
@@ -1656,6 +1699,8 @@ async fn reconcile_application_plugins(state: &AppState) {
                             error = %e,
                             "reconcile_application_plugins: failed to patch cronjob"
                         );
+                    } else {
+                        fingerprints_arc.lock().await.insert(cj_fp_key, cj_new_fp);
                     }
                 }
             }

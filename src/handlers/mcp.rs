@@ -1536,6 +1536,7 @@ async fn tool_enable_plugin(state: &AppState, args: &serde_json::Value) -> Resul
         let loaded = crate::plugins::fetch_plugins(&snap, &state_clone).await;
         tracing::info!(count = loaded.len(), "plugins reloaded after enable");
         *state_clone.plugins.write().await = loaded;
+        state_clone.plugin_patch_fingerprints.lock().await.clear();
     });
 
     Ok(serde_json::json!({
@@ -1571,6 +1572,9 @@ async fn tool_disable_plugin(state: &AppState, args: &serde_json::Value) -> Resu
         let mut loaded = state.plugins.write().await;
         loaded.retain(|p| p.name != name);
     }
+    // Clearing fingerprints forces a fresh reconcile on the next cycle so
+    // resources injected by this plugin are no longer applied.
+    state.plugin_patch_fingerprints.lock().await.clear();
 
     Ok(serde_json::json!({
         "name": name,
@@ -1647,6 +1651,7 @@ async fn tool_update_plugin_config(
             let loaded = crate::plugins::fetch_plugins(&snap, &state_clone).await;
             tracing::info!(count = loaded.len(), "plugins reloaded after config update");
             *state_clone.plugins.write().await = loaded;
+            state_clone.plugin_patch_fingerprints.lock().await.clear();
         });
     }
 
