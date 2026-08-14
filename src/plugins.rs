@@ -13,8 +13,9 @@ use std::sync::Arc;
 
 use extism::{Function, Manifest, Plugin, UserData, Val, ValType, Wasm};
 use k8s_openapi::api::core::v1::{
-    ConfigMapKeySelector, Container, ContainerPort, EnvVar, EnvVarSource, ResourceRequirements,
-    SecretKeySelector,
+    ConfigMapKeySelector, ConfigMapVolumeSource, Container, ContainerPort, EmptyDirVolumeSource,
+    EnvVar, EnvVarSource, ResourceRequirements, SecretKeySelector, SecretVolumeSource, Volume,
+    VolumeMount,
 };
 use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
 use kube::api::{DynamicObject, Patch, PatchParams};
@@ -107,6 +108,11 @@ pub struct PluginResult {
     #[serde(default)]
     pub deployment_labels: std::collections::HashMap<String, String>,
 
+    /// Init containers to prepend to `spec.template.spec.initContainers`.
+    /// Old plugins that do not emit this field deserialize to an empty vec.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub init_containers: Vec<SidecarSpec>,
+
     /// Errors the plugin wants surfaced in deckwatch's structured logs.
     ///
     /// Plugins populate this instead of calling `extism_pdk::log!()` — the
@@ -153,18 +159,65 @@ pub struct ConfigMapKeyRefSpec {
     pub key: String,
 }
 
+/// A volume to attach to the pod, declared by a plugin sidecar.
+/// Mirrors `deckwatch_plugin_sdk::VolumeSpec` — kept in sync manually.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VolumeSpec {
+    pub name: String,
+    pub volume_type: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub size_limit: Option<String>,
+}
+
+/// A volume mount descriptor.
+/// Mirrors `deckwatch_plugin_sdk::VolumeMountSpec` — kept in sync manually.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VolumeMountSpec {
+    pub name: String,
+    pub mount_path: String,
+    #[serde(default)]
+    pub read_only: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sub_path: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SidecarSpec {
     pub name: String,
     pub image: String,
     #[serde(default)]
     pub env: Vec<EnvVarSpec>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub port: Option<i32>,
-    #[serde(default)]
+    /// CPU request. Takes precedence over deprecated `cpu`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cpu_request: Option<String>,
+    /// CPU limit. Takes precedence over deprecated `cpu`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cpu_limit: Option<String>,
+    /// Memory request. Takes precedence over deprecated `memory`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory_request: Option<String>,
+    /// Memory limit. Takes precedence over deprecated `memory`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory_limit: Option<String>,
+    /// Deprecated: use `cpu_request`/`cpu_limit`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cpu: Option<String>,
-    #[serde(default)]
+    /// Deprecated: use `memory_request`/`memory_limit`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub memory: Option<String>,
+    /// Volumes required by this sidecar (merged into pod `spec.volumes`).
+    #[serde(default)]
+    pub volumes: Vec<VolumeSpec>,
+    /// Volume mounts for this sidecar container.
+    #[serde(default)]
+    pub volume_mounts: Vec<VolumeMountSpec>,
+    /// Volume mounts to add to the primary container on behalf of this sidecar.
+    #[serde(default)]
+    pub primary_volume_mounts: Vec<VolumeMountSpec>,
 }
 
 // ── Annotation key prefixes ───────────────────────────────────────────────────
@@ -319,6 +372,10 @@ pub struct ResourceProvisionResult {
     /// Old plugins that do not return this field deserialize to an empty vec.
     #[serde(default)]
     pub sidecars: Vec<SidecarSpec>,
+    /// Init containers to prepend to `initContainers` on all application deployments.
+    /// Old plugins that do not emit this field deserialize to an empty vec.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub init_containers: Vec<SidecarSpec>,
     #[serde(default)]
     pub kubernetes_resources: Vec<serde_json::Value>,
     #[serde(default)]
@@ -900,6 +957,7 @@ pub fn apply_plugins(
 
                 apply_env_vars(plugin, &result.env_vars, pod_spec, dep_annotations);
                 apply_sidecars(plugin, &result.sidecars, pod_spec, dep_annotations);
+                apply_init_containers(&result.init_containers, pod_spec);
                 all_k8s_resources.extend(result.kubernetes_resources.clone());
                 if let Some(sa) = result.service_account_name.clone() {
                     apply_service_account(plugin, sa, pod_spec, dep_annotations);
@@ -1441,6 +1499,33 @@ fn apply_sidecars(
 ) {
     let mut injected: Vec<String> = Vec::new();
 
+    // Add primary_volume_mounts from all sidecars to the primary container.
+    let all_primary_mounts: Vec<VolumeMount> = sidecars
+        .iter()
+        .flat_map(|s| &s.primary_volume_mounts)
+        .map(volume_mount_spec_to_k8s)
+        .collect();
+    if !all_primary_mounts.is_empty() {
+        if let Some(primary) = pod_spec.containers.first_mut() {
+            let mounts = primary.volume_mounts.get_or_insert_with(Vec::new);
+            for vm in all_primary_mounts {
+                if !mounts.iter().any(|m| m.name == vm.name && m.mount_path == vm.mount_path) {
+                    mounts.push(vm);
+                }
+            }
+        }
+    }
+
+    // Merge volumes from all sidecars into pod_spec.volumes.
+    let pod_volumes = pod_spec.volumes.get_or_insert_with(Vec::new);
+    for spec in sidecars {
+        for vol in &spec.volumes {
+            if !pod_volumes.iter().any(|v| v.name == vol.name) {
+                pod_volumes.push(volume_spec_to_k8s(vol));
+            }
+        }
+    }
+
     for spec in sidecars {
         if pod_spec.containers.iter().any(|c| c.name == spec.name) {
             continue;
@@ -1452,7 +1537,14 @@ fn apply_sidecars(
                 ..Default::default()
             }]
         });
-        let resources = build_resources(spec.cpu.as_deref(), spec.memory.as_deref());
+        let volume_mounts: Vec<VolumeMount> =
+            spec.volume_mounts.iter().map(volume_mount_spec_to_k8s).collect();
+        let resources = build_resources(
+            spec.cpu_request.as_deref().or(spec.cpu.as_deref()),
+            spec.cpu_limit.as_deref().or(spec.cpu.as_deref()),
+            spec.memory_request.as_deref().or(spec.memory.as_deref()),
+            spec.memory_limit.as_deref().or(spec.memory.as_deref()),
+        );
 
         pod_spec.containers.push(Container {
             name: spec.name.clone(),
@@ -1460,6 +1552,7 @@ fn apply_sidecars(
             env: if env.is_empty() { None } else { Some(env) },
             ports,
             resources,
+            volume_mounts: if volume_mounts.is_empty() { None } else { Some(volume_mounts) },
             ..Default::default()
         });
         injected.push(spec.name.clone());
@@ -1470,6 +1563,85 @@ fn apply_sidecars(
             format!("{PLUGIN_SIDECAR_ANNOTATION_PREFIX}{}", plugin.name),
             injected.join(","),
         );
+    }
+}
+
+fn apply_init_containers(
+    sidecars: &[SidecarSpec],
+    pod_spec: &mut k8s_openapi::api::core::v1::PodSpec,
+) {
+    let init_containers = pod_spec.init_containers.get_or_insert_with(Vec::new);
+    for spec in sidecars {
+        if init_containers.iter().any(|c| c.name == spec.name) {
+            continue;
+        }
+        let env: Vec<EnvVar> = spec.env.iter().map(build_kube_env_var).collect();
+        let ports = spec.port.map(|p| {
+            vec![ContainerPort {
+                container_port: p,
+                ..Default::default()
+            }]
+        });
+        let volume_mounts: Vec<VolumeMount> =
+            spec.volume_mounts.iter().map(volume_mount_spec_to_k8s).collect();
+        let resources = build_resources(
+            spec.cpu_request.as_deref().or(spec.cpu.as_deref()),
+            spec.cpu_limit.as_deref().or(spec.cpu.as_deref()),
+            spec.memory_request.as_deref().or(spec.memory.as_deref()),
+            spec.memory_limit.as_deref().or(spec.memory.as_deref()),
+        );
+        init_containers.push(Container {
+            name: spec.name.clone(),
+            image: Some(spec.image.clone()),
+            env: if env.is_empty() { None } else { Some(env) },
+            ports,
+            resources,
+            volume_mounts: if volume_mounts.is_empty() { None } else { Some(volume_mounts) },
+            ..Default::default()
+        });
+    }
+}
+
+fn volume_mount_spec_to_k8s(vm: &VolumeMountSpec) -> VolumeMount {
+    VolumeMount {
+        name: vm.name.clone(),
+        mount_path: vm.mount_path.clone(),
+        read_only: if vm.read_only { Some(true) } else { None },
+        sub_path: vm.sub_path.clone(),
+        ..Default::default()
+    }
+}
+
+fn volume_spec_to_k8s(v: &VolumeSpec) -> Volume {
+    match v.volume_type.as_str() {
+        "emptyDir" => Volume {
+            name: v.name.clone(),
+            empty_dir: Some(EmptyDirVolumeSource {
+                size_limit: v.size_limit.as_deref().map(|s| Quantity(s.to_string())),
+                ..Default::default()
+            }),
+            ..Default::default()
+        },
+        "secret" => Volume {
+            name: v.name.clone(),
+            secret: Some(SecretVolumeSource {
+                secret_name: v.source_name.clone(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        },
+        "configMap" => Volume {
+            name: v.name.clone(),
+            config_map: Some(ConfigMapVolumeSource {
+                name: v.source_name.clone(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        },
+        _ => Volume {
+            name: v.name.clone(),
+            ..Default::default()
+        },
     }
 }
 
@@ -1497,20 +1669,32 @@ fn apply_service_account(
     dep_annotations.insert(format!("deckwatch.plugin-sa/{}", plugin.name), sa_name);
 }
 
-fn build_resources(cpu: Option<&str>, memory: Option<&str>) -> Option<ResourceRequirements> {
-    if cpu.is_none() && memory.is_none() {
+fn build_resources(
+    cpu_request: Option<&str>,
+    cpu_limit: Option<&str>,
+    memory_request: Option<&str>,
+    memory_limit: Option<&str>,
+) -> Option<ResourceRequirements> {
+    if cpu_request.is_none() && cpu_limit.is_none() && memory_request.is_none() && memory_limit.is_none() {
         return None;
     }
-    let mut map = BTreeMap::new();
-    if let Some(c) = cpu {
-        map.insert("cpu".to_string(), Quantity(c.to_string()));
+    let mut requests: BTreeMap<String, Quantity> = BTreeMap::new();
+    let mut limits: BTreeMap<String, Quantity> = BTreeMap::new();
+    if let Some(c) = cpu_request {
+        requests.insert("cpu".to_string(), Quantity(c.to_string()));
     }
-    if let Some(m) = memory {
-        map.insert("memory".to_string(), Quantity(m.to_string()));
+    if let Some(c) = cpu_limit {
+        limits.insert("cpu".to_string(), Quantity(c.to_string()));
+    }
+    if let Some(m) = memory_request {
+        requests.insert("memory".to_string(), Quantity(m.to_string()));
+    }
+    if let Some(m) = memory_limit {
+        limits.insert("memory".to_string(), Quantity(m.to_string()));
     }
     Some(ResourceRequirements {
-        requests: Some(map.clone()),
-        limits: Some(map),
+        requests: if requests.is_empty() { None } else { Some(requests) },
+        limits: if limits.is_empty() { None } else { Some(limits) },
         ..Default::default()
     })
 }
@@ -1895,18 +2079,13 @@ mod tests {
             SidecarSpec {
                 name: "existing-sidecar".to_string(),
                 image: "new:latest".to_string(),
-                env: vec![],
-                port: None,
-                cpu: None,
-                memory: None,
+                ..Default::default()
             },
             SidecarSpec {
                 name: "new-sidecar".to_string(),
                 image: "sidecar:v1".to_string(),
-                env: vec![],
                 port: Some(8080),
-                cpu: None,
-                memory: None,
+                ..Default::default()
             },
         ];
 

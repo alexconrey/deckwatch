@@ -193,6 +193,7 @@ pub async fn provision(
         state: Set(state_json),
         annotations: Set(annotations_json),
         sidecars: Set(sidecars_json),
+        init_containers: Set("[]".to_string()),
         created_at: Set(now),
         updated_at: Set(now),
     };

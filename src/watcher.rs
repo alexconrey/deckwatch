@@ -22,7 +22,7 @@ use crate::entities::builds;
 use crate::entities::gitops_configs;
 use crate::kube_ext::deployment_phase;
 use crate::metrics;
-use crate::plugins::SidecarSpec;
+use crate::plugins::{SidecarSpec, VolumeSpec, VolumeMountSpec};
 use crate::state::AppState;
 
 /// Return the current UTC time as a `DateTimeUtc` without requiring a direct
@@ -1481,16 +1481,44 @@ fn sidecar_to_json(s: &SidecarSpec) -> serde_json::Value {
             }))
             .collect::<Vec<_>>());
     }
-    if s.cpu.is_some() || s.memory.is_some() {
+    if !s.volume_mounts.is_empty() {
+        c["volumeMounts"] = serde_json::json!(s
+            .volume_mounts
+            .iter()
+            .map(|vm| {
+                let mut obj = serde_json::json!({
+                    "name": vm.name,
+                    "mountPath": vm.mount_path,
+                });
+                if vm.read_only {
+                    obj["readOnly"] = serde_json::json!(true);
+                }
+                if let Some(ref sp) = vm.sub_path {
+                    obj["subPath"] = serde_json::json!(sp);
+                }
+                obj
+            })
+            .collect::<Vec<_>>());
+    }
+    // Prefer split request/limit fields; fall back to deprecated cpu/memory.
+    let cpu_req = s.cpu_request.as_deref().or(s.cpu.as_deref());
+    let cpu_lim = s.cpu_limit.as_deref().or(s.cpu.as_deref());
+    let mem_req = s.memory_request.as_deref().or(s.memory.as_deref());
+    let mem_lim = s.memory_limit.as_deref().or(s.memory.as_deref());
+    if cpu_req.is_some() || cpu_lim.is_some() || mem_req.is_some() || mem_lim.is_some() {
         let mut req = serde_json::Map::new();
         let mut lim = serde_json::Map::new();
-        if let Some(ref cpu) = s.cpu {
-            req.insert("cpu".to_string(), serde_json::json!(cpu));
-            lim.insert("cpu".to_string(), serde_json::json!(cpu));
+        if let Some(c) = cpu_req {
+            req.insert("cpu".to_string(), serde_json::json!(c));
         }
-        if let Some(ref mem) = s.memory {
-            req.insert("memory".to_string(), serde_json::json!(mem));
-            lim.insert("memory".to_string(), serde_json::json!(mem));
+        if let Some(c) = cpu_lim {
+            lim.insert("cpu".to_string(), serde_json::json!(c));
+        }
+        if let Some(m) = mem_req {
+            req.insert("memory".to_string(), serde_json::json!(m));
+        }
+        if let Some(m) = mem_lim {
+            lim.insert("memory".to_string(), serde_json::json!(m));
         }
         c["resources"] = serde_json::json!({
             "requests": req,
@@ -1498,6 +1526,28 @@ fn sidecar_to_json(s: &SidecarSpec) -> serde_json::Value {
         });
     }
     c
+}
+
+/// Build a Kubernetes volume JSON object from a VolumeSpec.
+fn volume_spec_to_json(v: &VolumeSpec) -> serde_json::Value {
+    match v.volume_type.as_str() {
+        "emptyDir" => {
+            let mut ed = serde_json::Map::new();
+            if let Some(ref limit) = v.size_limit {
+                ed.insert("sizeLimit".to_string(), serde_json::json!(limit));
+            }
+            serde_json::json!({"name": v.name, "emptyDir": ed})
+        }
+        "secret" => serde_json::json!({
+            "name": v.name,
+            "secret": {"secretName": v.source_name},
+        }),
+        "configMap" => serde_json::json!({
+            "name": v.name,
+            "configMap": {"name": v.source_name},
+        }),
+        _ => serde_json::json!({"name": v.name}),
+    }
 }
 
 async fn reconcile_application_plugins(state: &AppState) {
@@ -1533,7 +1583,7 @@ async fn reconcile_application_plugins(state: &AppState) {
     // Provisioned resources keyed by app_id → "{plugin_name}/{resource_id}" → state map.
     let mut app_provisioned: HashMap<String, HashMap<String, HashMap<String, String>>> =
         HashMap::new();
-
+    let mut app_init_containers: HashMap<String, Vec<SidecarSpec>> = HashMap::new();
     for row in rows {
         let state_map: HashMap<String, String> =
             serde_json::from_str(&row.state).unwrap_or_default();
@@ -1549,6 +1599,8 @@ async fn reconcile_application_plugins(state: &AppState) {
             .or_default()
             .insert(resource_key, state_map.clone());
 
+        let init_containers_raw: Vec<SidecarSpec> =
+            serde_json::from_str(&row.init_containers).unwrap_or_default();
         let state_entry = app_state.entry(row.application_id.clone()).or_default();
         state_entry.extend(state_map);
         if !ann_map.is_empty() {
@@ -1558,14 +1610,21 @@ async fn reconcile_application_plugins(state: &AppState) {
             ann_entry.extend(ann_map);
         }
         if !sidecars_raw.is_empty() {
-            let sidecar_entry = app_sidecars.entry(row.application_id).or_default();
+            let sidecar_entry = app_sidecars.entry(row.application_id.clone()).or_default();
             sidecar_entry.extend(sidecars_raw);
+        }
+        if !init_containers_raw.is_empty() {
+            let ic_entry = app_init_containers
+                .entry(row.application_id)
+                .or_default();
+            ic_entry.extend(init_containers_raw);
         }
     }
 
     for (app_id, env_map) in &app_state {
         let sidecars = app_sidecars.get(app_id).cloned().unwrap_or_default();
-        if env_map.is_empty() && sidecars.is_empty() {
+        let init_containers = app_init_containers.get(app_id).cloned().unwrap_or_default();
+        if env_map.is_empty() && sidecars.is_empty() && init_containers.is_empty() {
             continue;
         }
 
@@ -1589,6 +1648,38 @@ async fn reconcile_application_plugins(state: &AppState) {
             })
             .collect();
         env_vars.sort_by(|a, b| a.name.cmp(&b.name));
+
+        // Pre-compute volumes and primary_volume_mounts from all sidecars.
+        let all_volumes: Vec<serde_json::Value> = {
+            let mut seen = std::collections::HashSet::new();
+            sidecars
+                .iter()
+                .flat_map(|s| &s.volumes)
+                .filter(|v| seen.insert(v.name.clone()))
+                .map(volume_spec_to_json)
+                .collect()
+        };
+        let primary_vm_patch: Vec<serde_json::Value> = {
+            let mut seen = std::collections::HashSet::new();
+            sidecars
+                .iter()
+                .flat_map(|s| &s.primary_volume_mounts)
+                .filter(|vm| seen.insert((vm.name.clone(), vm.mount_path.clone())))
+                .map(|vm| {
+                    let mut obj = serde_json::json!({
+                        "name": vm.name,
+                        "mountPath": vm.mount_path,
+                    });
+                    if vm.read_only {
+                        obj["readOnly"] = serde_json::json!(true);
+                    }
+                    if let Some(ref sp) = vm.sub_path {
+                        obj["subPath"] = serde_json::json!(sp);
+                    }
+                    obj
+                })
+                .collect()
+        };
 
         let label_selector = format!("deckwatch.io/application={app_name}");
         let pp = PatchParams::apply("deckwatch-plugin-resources").force();
@@ -1664,13 +1755,18 @@ async fn reconcile_application_plugins(state: &AppState) {
                         .map(|c| c.name.clone())
                         .unwrap_or_default();
 
-                    let mut containers_patch = vec![serde_json::json!({
+                    let mut primary_patch = serde_json::json!({
                         "name": primary_name,
                         "env": env_vars.iter().map(|e| serde_json::json!({
                             "name": e.name,
                             "value": e.value.as_deref().unwrap_or(""),
                         })).collect::<Vec<_>>(),
-                    })];
+                    });
+                    if !primary_vm_patch.is_empty() {
+                        primary_patch["volumeMounts"] = serde_json::json!(primary_vm_patch);
+                    }
+
+                    let mut containers_patch = vec![primary_patch];
                     containers_patch.extend(sidecars.iter().map(sidecar_to_json));
 
                     let mut metadata_patch = serde_json::json!({
@@ -1684,15 +1780,24 @@ async fn reconcile_application_plugins(state: &AppState) {
                         metadata_patch["labels"] = serde_json::json!(final_labels);
                     }
 
+                    let mut pod_spec_patch = serde_json::json!({
+                        "containers": containers_patch,
+                    });
+                    if !all_volumes.is_empty() {
+                        pod_spec_patch["volumes"] = serde_json::json!(all_volumes);
+                    }
+                    if !init_containers.is_empty() {
+                        pod_spec_patch["initContainers"] =
+                            serde_json::json!(init_containers.iter().map(sidecar_to_json).collect::<Vec<_>>());
+                    }
+
                     let patch = serde_json::json!({
                         "apiVersion": "apps/v1",
                         "kind": "Deployment",
                         "metadata": metadata_patch,
                         "spec": {
                             "template": {
-                                "spec": {
-                                    "containers": containers_patch,
-                                }
+                                "spec": pod_spec_patch,
                             }
                         }
                     });
@@ -1754,14 +1859,30 @@ async fn reconcile_application_plugins(state: &AppState) {
                         .map(|c| c.name.clone())
                         .unwrap_or_default();
 
-                    let mut cj_containers_patch = vec![serde_json::json!({
+                    let mut cj_primary_patch = serde_json::json!({
                         "name": container_name,
                         "env": env_vars.iter().map(|e| serde_json::json!({
                             "name": e.name,
                             "value": e.value.as_deref().unwrap_or(""),
                         })).collect::<Vec<_>>(),
-                    })];
+                    });
+                    if !primary_vm_patch.is_empty() {
+                        cj_primary_patch["volumeMounts"] = serde_json::json!(primary_vm_patch);
+                    }
+
+                    let mut cj_containers_patch = vec![cj_primary_patch];
                     cj_containers_patch.extend(sidecars.iter().map(sidecar_to_json));
+
+                    let mut cj_pod_spec_patch = serde_json::json!({
+                        "containers": cj_containers_patch,
+                    });
+                    if !all_volumes.is_empty() {
+                        cj_pod_spec_patch["volumes"] = serde_json::json!(all_volumes);
+                    }
+                    if !init_containers.is_empty() {
+                        cj_pod_spec_patch["initContainers"] =
+                            serde_json::json!(init_containers.iter().map(sidecar_to_json).collect::<Vec<_>>());
+                    }
 
                     let patch = serde_json::json!({
                         "apiVersion": "batch/v1",
@@ -1774,9 +1895,7 @@ async fn reconcile_application_plugins(state: &AppState) {
                             "jobTemplate": {
                                 "spec": {
                                     "template": {
-                                        "spec": {
-                                            "containers": cj_containers_patch,
-                                        }
+                                        "spec": cj_pod_spec_patch,
                                     }
                                 }
                             }
