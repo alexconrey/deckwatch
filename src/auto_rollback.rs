@@ -31,6 +31,7 @@ use kube::api::{ListParams, Patch, PatchParams};
 use kube::{Api, ResourceExt};
 
 use crate::kube_ext::{deployment_phase, DeploymentPhase};
+use crate::metrics;
 use crate::state::AppState;
 use crate::watcher::{ann, get_ann};
 
@@ -339,6 +340,8 @@ async fn perform_rollback(
     dep_api
         .patch(&name, &PatchParams::default(), &Patch::Strategic(patch))
         .await?;
+
+    metrics::record_auto_rollback(ns, &name);
 
     Ok(())
 }

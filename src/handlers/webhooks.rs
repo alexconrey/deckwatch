@@ -211,7 +211,7 @@ pub async fn receive(
                 .await
             {
                 Ok(job_name) => {
-                    metrics::record_gitops_build(ns, "started");
+                    metrics::record_gitops_build(ns, &dep_name, "started");
                     // Mirror the poller's post-build patch so the UI sees
                     // the same "building" indicator regardless of source.
                     let now = jiff::Timestamp::now().to_string();
