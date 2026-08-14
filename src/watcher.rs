@@ -1521,7 +1521,7 @@ async fn reconcile_application_plugins(state: &AppState) {
             continue;
         }
 
-        let env_vars: Vec<EnvVar> = env_map
+        let mut env_vars: Vec<EnvVar> = env_map
             .iter()
             .map(|(k, v)| EnvVar {
                 name: k.clone(),
@@ -1529,6 +1529,7 @@ async fn reconcile_application_plugins(state: &AppState) {
                 ..Default::default()
             })
             .collect();
+        env_vars.sort_by(|a, b| a.name.cmp(&b.name));
 
         let label_selector = format!("deckwatch.io/application={app_name}");
         let pp = PatchParams::apply("deckwatch-plugin-resources").force();
