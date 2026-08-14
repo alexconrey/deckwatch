@@ -16,7 +16,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::entities::{agent_feedback, builds, gitops_configs};
 use crate::handlers::applications;
-use crate::handlers::{addons, gitops, ingresses, monitoring, settings, templates};
+use crate::handlers::{
+    addons, application_resources, gitops, ingresses, monitoring, settings, templates,
+};
 use crate::state::AppState;
 
 // ---------------------------------------------------------------------------
@@ -160,7 +162,15 @@ fn mcp_resource_group(name: &str) -> Option<&'static str> {
     if name.contains("gitops") || name.contains("build") || name == "trigger_build" {
         return Some("gitops");
     }
-    if name.contains("plugin") {
+    if name.contains("plugin")
+        || matches!(
+            name,
+            "list_application_resources"
+                | "provision_resource"
+                | "deprovision_resource"
+                | "refresh_resource"
+        )
+    {
         return Some("plugins");
     }
     if name == "enable_monitoring" || name == "disable_monitoring" || name.contains("monitor") {
@@ -614,6 +624,77 @@ fn deckwatch_tool_definitions() -> Vec<serde_json::Value> {
                 "additionalProperties": false
             }
         }),
+        // ── Plugin resource management ─────────────────────────────────────
+        serde_json::json!({
+            "name": "list_application_resources",
+            "description": "List all provisioned plugin resources for an application. Returns each resource's current state (injected env vars), the fields used at provision time, deployment annotations, injected sidecars, and status. Use this to audit what infrastructure is attached to an application before making changes.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "namespace": { "type": "string" },
+                    "application_name": { "type": "string", "description": "Application name (as created via create_application or the deckwatch UI)" }
+                },
+                "required": ["namespace", "application_name"],
+                "additionalProperties": false
+            }
+        }),
+        serde_json::json!({
+            "name": "provision_resource",
+            "description": "Provision a plugin-managed infrastructure resource for an application (e.g. an RDS database, S3 bucket). \
+        The plugin runs its provision() function, returns injected env vars that are stamped into every deployment in the application, and the result is persisted. \
+        Available resource_id values and required fields can be discovered via `list_plugins` (inspect the plugin metadata) or `list_application_resources` to see what is already provisioned. \
+        Singleton resources (e.g. a database per app) will be rejected if one already exists.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "namespace": { "type": "string" },
+                    "application_name": { "type": "string", "description": "Application name" },
+                    "plugin_name": { "type": "string", "description": "Plugin name as configured in Settings (must be currently loaded)" },
+                    "resource_id": { "type": "string", "description": "Resource identifier declared by the plugin (e.g. 'rds-postgres', 's3-bucket')" },
+                    "fields": {
+                        "type": "object",
+                        "description": "Key-value input fields matching the plugin's declared ConfigField inputs (e.g. instance_class, storage_gb). All values must be strings.",
+                        "additionalProperties": { "type": "string" }
+                    }
+                },
+                "required": ["namespace", "application_name", "plugin_name", "resource_id"],
+                "additionalProperties": false
+            }
+        }),
+        serde_json::json!({
+            "name": "deprovision_resource",
+            "description": "Deprovision (tear down) a plugin-managed infrastructure resource from an application. \
+        WARNING: This calls the plugin's deprovision() function, which tears down the underlying cloud infrastructure (e.g. deletes an RDS instance or S3 bucket) and removes the injected env vars from all application deployments. \
+        This action is destructive and may result in data loss — confirm with the user before proceeding.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "namespace": { "type": "string" },
+                    "application_name": { "type": "string" },
+                    "plugin_name": { "type": "string", "description": "Plugin name as configured in Settings" },
+                    "resource_id": { "type": "string", "description": "Resource identifier (e.g. 'rds-postgres')" }
+                },
+                "required": ["namespace", "application_name", "plugin_name", "resource_id"],
+                "additionalProperties": false
+            }
+        }),
+        serde_json::json!({
+            "name": "refresh_resource",
+            "description": "Re-run provision() in-place for an already-provisioned plugin resource to refresh its state (e.g. after an RDS instance becomes available following initial provisioning). \
+        Uses the fields stored at provision time — no new input required. \
+        Useful when a resource is stuck in a 'provisioning' or intermediate state and the plugin is expected to return updated env vars once the underlying infrastructure is ready.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "namespace": { "type": "string" },
+                    "application_name": { "type": "string" },
+                    "plugin_name": { "type": "string", "description": "Plugin name as configured in Settings" },
+                    "resource_id": { "type": "string", "description": "Resource identifier (e.g. 'rds-postgres')" }
+                },
+                "required": ["namespace", "application_name", "plugin_name", "resource_id"],
+                "additionalProperties": false
+            }
+        }),
         serde_json::json!({
             "name": "get_plugin_config",
             "description": "Get the current configuration of a loaded plugin, including all config field values (secrets masked). Use this to audit plugin settings or understand what is configured before making changes.",
@@ -762,6 +843,10 @@ async fn handle_tool_call(state: &AppState, request: &JsonRpcRequest) -> JsonRpc
         "validate_plugin" => Some(tool_validate_plugin(state, args).await),
         "associate_plugin" => Some(tool_associate_plugin(state, args).await),
         "disassociate_plugin" => Some(tool_disassociate_plugin(state, args).await),
+        "list_application_resources" => Some(tool_list_application_resources(state, args).await),
+        "provision_resource" => Some(tool_provision_resource(state, args).await),
+        "deprovision_resource" => Some(tool_deprovision_resource(state, args).await),
+        "refresh_resource" => Some(tool_refresh_resource(state, args).await),
         "submit_agent_feedback" => Some(tool_submit_agent_feedback(state, args).await),
         _ => None,
     };
@@ -1914,6 +1999,133 @@ async fn tool_validate_plugin(
     serde_json::to_string_pretty(&output).map_err(|e| e.to_string())
 }
 
+// ── Plugin resource management tools ────────────────────────────────────────
+
+async fn tool_list_application_resources(
+    state: &AppState,
+    args: &serde_json::Value,
+) -> Result<String, String> {
+    let ns = args["namespace"].as_str().ok_or("namespace is required")?;
+    let app_name = args["application_name"]
+        .as_str()
+        .ok_or("application_name is required")?;
+
+    let response = application_resources::list(
+        State(state.clone()),
+        axum::extract::Path((ns.to_string(), app_name.to_string())),
+    )
+    .await
+    .map_err(|e| format!("{e}"))?;
+
+    serde_json::to_string_pretty(&response.0).map_err(|e| e.to_string())
+}
+
+async fn tool_provision_resource(
+    state: &AppState,
+    args: &serde_json::Value,
+) -> Result<String, String> {
+    let ns = args["namespace"].as_str().ok_or("namespace is required")?;
+    let app_name = args["application_name"]
+        .as_str()
+        .ok_or("application_name is required")?;
+    let plugin_name = args["plugin_name"]
+        .as_str()
+        .ok_or("plugin_name is required")?;
+    let resource_id = args["resource_id"]
+        .as_str()
+        .ok_or("resource_id is required")?;
+
+    let fields: std::collections::HashMap<String, String> = args
+        .get("fields")
+        .and_then(|v| serde_json::from_value(v.clone()).ok())
+        .unwrap_or_default();
+
+    let req_body = application_resources::ProvisionRequest { fields };
+
+    let result = application_resources::provision(
+        State(state.clone()),
+        axum::extract::Path((
+            ns.to_string(),
+            app_name.to_string(),
+            plugin_name.to_string(),
+            resource_id.to_string(),
+        )),
+        Some(Json(req_body)),
+    )
+    .await
+    .map_err(|e| format!("{e}"))?;
+
+    let (_status, Json(detail)) = result;
+    serde_json::to_string_pretty(&detail).map_err(|e| e.to_string())
+}
+
+async fn tool_deprovision_resource(
+    state: &AppState,
+    args: &serde_json::Value,
+) -> Result<String, String> {
+    let ns = args["namespace"].as_str().ok_or("namespace is required")?;
+    let app_name = args["application_name"]
+        .as_str()
+        .ok_or("application_name is required")?;
+    let plugin_name = args["plugin_name"]
+        .as_str()
+        .ok_or("plugin_name is required")?;
+    let resource_id = args["resource_id"]
+        .as_str()
+        .ok_or("resource_id is required")?;
+
+    application_resources::deprovision(
+        State(state.clone()),
+        axum::extract::Path((
+            ns.to_string(),
+            app_name.to_string(),
+            plugin_name.to_string(),
+            resource_id.to_string(),
+        )),
+    )
+    .await
+    .map_err(|e| format!("{e}"))?;
+
+    Ok(serde_json::json!({
+        "status": "deprovisioned",
+        "namespace": ns,
+        "application_name": app_name,
+        "plugin_name": plugin_name,
+        "resource_id": resource_id
+    })
+    .to_string())
+}
+
+async fn tool_refresh_resource(
+    state: &AppState,
+    args: &serde_json::Value,
+) -> Result<String, String> {
+    let ns = args["namespace"].as_str().ok_or("namespace is required")?;
+    let app_name = args["application_name"]
+        .as_str()
+        .ok_or("application_name is required")?;
+    let plugin_name = args["plugin_name"]
+        .as_str()
+        .ok_or("plugin_name is required")?;
+    let resource_id = args["resource_id"]
+        .as_str()
+        .ok_or("resource_id is required")?;
+
+    let response = application_resources::refresh(
+        State(state.clone()),
+        axum::extract::Path((
+            ns.to_string(),
+            app_name.to_string(),
+            plugin_name.to_string(),
+            resource_id.to_string(),
+        )),
+    )
+    .await
+    .map_err(|e| format!("{e}"))?;
+
+    serde_json::to_string_pretty(&response.0).map_err(|e| e.to_string())
+}
+
 // ── Application plugin association tools ────────────────────────────────────
 
 async fn tool_associate_plugin(
@@ -1937,17 +2149,45 @@ async fn tool_associate_plugin(
         .map_err(|e| format!("database error: {e}"))?
         .ok_or_else(|| format!("application '{app_name}' not found in namespace '{ns}'"))?;
 
-    // Verify plugin is loaded.
-    {
+    // Verify plugin is loaded using case-insensitive name match (Bug 2).
+    // Also capture the canonical plugin name as stored in settings.
+    let canonical_name = {
         let plugins = state.plugins.read().await;
-        if !plugins.iter().any(|p| p.name == plugin_name) {
-            return Err(format!(
-                "plugin '{plugin_name}' not loaded — add and enable it in Settings first"
-            ));
-        }
-    }
+        plugins
+            .iter()
+            .find(|p| p.name.eq_ignore_ascii_case(plugin_name))
+            .map(|p| p.name.clone())
+            .ok_or_else(|| {
+                format!("plugin '{plugin_name}' not loaded — add and enable it in Settings first")
+            })?
+    };
 
     use crate::entities::application_plugins;
+    use sea_orm::{ColumnTrait, QueryFilter};
+
+    // Bug 1: idempotency — check if the association already exists before
+    // attempting an insert.  Use a case-insensitive comparison so that
+    // "AWS" and "aws" are treated as the same plugin (Bug 2).
+    use sea_orm::sea_query::{Expr, Func};
+    let existing = application_plugins::Entity::find()
+        .filter(application_plugins::Column::ApplicationId.eq(&app_id))
+        .filter(
+            Expr::expr(Func::lower(Expr::col(
+                application_plugins::Column::PluginName,
+            )))
+            .eq(canonical_name.to_lowercase()),
+        )
+        .one(&state.db)
+        .await
+        .map_err(|e| format!("database error: {e}"))?;
+
+    if existing.is_some() {
+        return Ok(format!(
+            "Plugin '{canonical_name}' is already associated with application '{app_name}' \
+             in namespace '{ns}' (no-op)."
+        ));
+    }
+
     use sea_orm::ActiveValue::Set;
 
     let now_val = {
@@ -1962,20 +2202,11 @@ async fn tool_associate_plugin(
     let model = application_plugins::ActiveModel {
         id: Set(uuid::Uuid::new_v4().to_string()),
         application_id: Set(app_id.clone()),
-        plugin_name: Set(plugin_name.to_string()),
+        plugin_name: Set(canonical_name.clone()),
         created_at: Set(now_val),
     };
 
-    use sea_orm::sea_query::OnConflict;
-    let _ = application_plugins::Entity::insert(model)
-        .on_conflict(
-            OnConflict::columns([
-                application_plugins::Column::ApplicationId,
-                application_plugins::Column::PluginName,
-            ])
-            .do_nothing()
-            .to_owned(),
-        )
+    application_plugins::Entity::insert(model)
         .exec(&state.db)
         .await
         .map_err(|e| format!("database error: {e}"))?;
@@ -1984,15 +2215,15 @@ async fn tool_associate_plugin(
         &state.db,
         "create",
         "application-plugin",
-        plugin_name,
+        &canonical_name,
         ns,
-        &format!("MCP: associated plugin '{plugin_name}' with application '{app_name}'"),
+        &format!("MCP: associated plugin '{canonical_name}' with application '{app_name}'"),
     )
     .await
     .ok();
 
     Ok(format!(
-        "Plugin '{plugin_name}' associated with application '{app_name}' in namespace '{ns}'. \
+        "Plugin '{canonical_name}' associated with application '{app_name}' in namespace '{ns}'. \
          The plugin reconciler will begin running it against all deployments within 30 seconds."
     ))
 }
@@ -2011,10 +2242,18 @@ async fn tool_disassociate_plugin(
 
     use crate::entities::application_plugins;
     use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+    // Bug 2: use case-insensitive comparison so that "AWS" and "aws" match the
+    // same stored row regardless of how the name was originally cased.
+    use sea_orm::sea_query::{Expr, Func};
 
     let deleted = application_plugins::Entity::delete_many()
         .filter(application_plugins::Column::ApplicationId.eq(&app_id))
-        .filter(application_plugins::Column::PluginName.eq(plugin_name))
+        .filter(
+            Expr::expr(Func::lower(Expr::col(
+                application_plugins::Column::PluginName,
+            )))
+            .eq(plugin_name.to_lowercase()),
+        )
         .exec(&state.db)
         .await
         .map_err(|e| format!("database error: {e}"))?;
