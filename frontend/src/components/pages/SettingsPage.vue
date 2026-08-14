@@ -28,9 +28,10 @@ import type {
   GitTokenSecretRequest,
   IngressClassSummary,
   IngressTemplate,
+  McpTuning,
+  McpTuningField,
   NotificationEventType,
   NotificationSettings,
-  McpTuning,
   OciRegistry,
   OciRegistryType,
   PluginConfig,
@@ -1003,7 +1004,18 @@ function addPlugin() {
     config: {},
     inherit_env_keys: [],
     inherit_env_file_keys: {},
+    mcp_tuning: {},
   });
+}
+
+function setPluginMcpTuning(pluginName: string, fieldKey: string, value: string) {
+  const idx = plugins.value.findIndex((p) => p.name === pluginName);
+  if (idx === -1) return;
+  const plugin = plugins.value[idx];
+  plugins.value[idx] = {
+    ...plugin,
+    mcp_tuning: { ...(plugin.mcp_tuning ?? {}), [fieldKey]: value },
+  };
 }
 
 function removePlugin(idx: number) {
@@ -3234,6 +3246,43 @@ onMounted(load);
               </v-card>
             </v-col>
           </v-row>
+
+          <!-- Per-plugin MCP tuning subsections -->
+          <template
+            v-for="lp in loadedPlugins.filter((p: PluginSummary) => p.mcp_tuning_fields && p.mcp_tuning_fields.length > 0)"
+            :key="lp.name"
+          >
+            <v-divider class="my-4" />
+            <div class="mb-3">
+              <div class="d-flex align-center ga-2 mb-1">
+                <v-icon icon="mdi-puzzle-outline" size="small" color="primary" />
+                <span class="text-subtitle-1 font-weight-medium">Plugin: {{ lp.name }}</span>
+                <v-chip size="x-small" variant="tonal" color="primary">{{ lp.version }}</v-chip>
+              </div>
+              <div class="text-caption text-medium-emphasis mb-3">
+                Plugin-declared naming conventions injected into MCP sessions when enabled.
+              </div>
+              <v-row dense>
+                <v-col
+                  v-for="field in (lp.mcp_tuning_fields as McpTuningField[])"
+                  :key="field.key"
+                  cols="12"
+                  md="6"
+                >
+                  <v-text-field
+                    :model-value="plugins.find((p: PluginConfig) => p.name === lp.name)?.mcp_tuning?.[field.key] ?? ''"
+                    :label="field.label"
+                    :placeholder="field.placeholder || field.default || ''"
+                    :hint="field.description"
+                    persistent-hint
+                    variant="outlined"
+                    density="comfortable"
+                    @update:model-value="(v: string) => setPluginMcpTuning(lp.name, field.key, v)"
+                  />
+                </v-col>
+              </v-row>
+            </div>
+          </template>
         </div>
 
         <!-- Advanced -->

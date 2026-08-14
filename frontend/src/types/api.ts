@@ -677,6 +677,7 @@ export interface PluginConfig {
    *  and injects its content as the config key. Cloud-agnostic: the plugin
    *  decides what to do with the content (e.g. STS token exchange). */
   inherit_env_file_keys: Record<string, string>;
+  mcp_tuning?: Record<string, string>;
 }
 
 export interface DeckwatchSettings {
@@ -1048,6 +1049,14 @@ export interface ConfigField {
   env_source?: string | null;
 }
 
+export interface McpTuningField {
+  key: string;
+  label: string;
+  description: string;
+  placeholder: string;
+  default?: string | null;
+}
+
 export interface PluginSummary {
   name: string;
   version: string;
@@ -1056,6 +1065,7 @@ export interface PluginSummary {
   depends_on: string[];
   config_schema: ConfigField[];
   resources: PluginResource[];
+  mcp_tuning_fields: McpTuningField[];
   wasm_size_bytes: number;
 }
 

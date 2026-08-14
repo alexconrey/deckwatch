@@ -113,6 +113,40 @@ async fn handle_initialize(state: &AppState, request: &JsonRpcRequest) -> JsonRp
         instructions_parts.push(global);
     }
 
+    // Inject per-plugin MCP tuning blocks from admin-saved values.
+    {
+        let plugins_guard = state.plugins.read().await;
+        for plugin_cfg in &loaded.plugins {
+            if !plugin_cfg.enabled || plugin_cfg.mcp_tuning.is_empty() {
+                continue;
+            }
+            if let Some(loaded_plugin) = plugins_guard.iter().find(|p| p.name == plugin_cfg.name) {
+                let mut lines: Vec<String> = Vec::new();
+                for field in &loaded_plugin.metadata.mcp_tuning_fields {
+                    if let Some(value) = plugin_cfg
+                        .mcp_tuning
+                        .get(&field.key)
+                        .filter(|v| !v.is_empty())
+                    {
+                        lines.push(format!("{}: {}", field.label, value));
+                    }
+                }
+                if !lines.is_empty() {
+                    let display_name = if loaded_plugin.metadata.name.is_empty() {
+                        &loaded_plugin.name
+                    } else {
+                        &loaded_plugin.metadata.name
+                    };
+                    instructions_parts.push(format!(
+                        "[Plugin: {}]\n{}",
+                        display_name,
+                        lines.join("\n")
+                    ));
+                }
+            }
+        }
+    }
+
     if agent_feedback_enabled {
         instructions_parts.push(
             "Agent feedback is enabled. If at any point you encounter missing tooling, \
@@ -2333,6 +2367,7 @@ async fn tool_validate_plugin(
         // Validation runs do not enforce a checksum — the caller is explicitly
         // testing an arbitrary source before committing it to settings.
         sha256: None,
+        mcp_tuning: Default::default(),
     };
 
     let test_ctx = crate::plugins::PluginContext {
