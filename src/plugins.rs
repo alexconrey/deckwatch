@@ -1509,7 +1509,10 @@ fn apply_sidecars(
         if let Some(primary) = pod_spec.containers.first_mut() {
             let mounts = primary.volume_mounts.get_or_insert_with(Vec::new);
             for vm in all_primary_mounts {
-                if !mounts.iter().any(|m| m.name == vm.name && m.mount_path == vm.mount_path) {
+                if !mounts
+                    .iter()
+                    .any(|m| m.name == vm.name && m.mount_path == vm.mount_path)
+                {
                     mounts.push(vm);
                 }
             }
@@ -1537,8 +1540,11 @@ fn apply_sidecars(
                 ..Default::default()
             }]
         });
-        let volume_mounts: Vec<VolumeMount> =
-            spec.volume_mounts.iter().map(volume_mount_spec_to_k8s).collect();
+        let volume_mounts: Vec<VolumeMount> = spec
+            .volume_mounts
+            .iter()
+            .map(volume_mount_spec_to_k8s)
+            .collect();
         let resources = build_resources(
             spec.cpu_request.as_deref().or(spec.cpu.as_deref()),
             spec.cpu_limit.as_deref().or(spec.cpu.as_deref()),
@@ -1552,7 +1558,11 @@ fn apply_sidecars(
             env: if env.is_empty() { None } else { Some(env) },
             ports,
             resources,
-            volume_mounts: if volume_mounts.is_empty() { None } else { Some(volume_mounts) },
+            volume_mounts: if volume_mounts.is_empty() {
+                None
+            } else {
+                Some(volume_mounts)
+            },
             ..Default::default()
         });
         injected.push(spec.name.clone());
@@ -1582,8 +1592,11 @@ fn apply_init_containers(
                 ..Default::default()
             }]
         });
-        let volume_mounts: Vec<VolumeMount> =
-            spec.volume_mounts.iter().map(volume_mount_spec_to_k8s).collect();
+        let volume_mounts: Vec<VolumeMount> = spec
+            .volume_mounts
+            .iter()
+            .map(volume_mount_spec_to_k8s)
+            .collect();
         let resources = build_resources(
             spec.cpu_request.as_deref().or(spec.cpu.as_deref()),
             spec.cpu_limit.as_deref().or(spec.cpu.as_deref()),
@@ -1596,7 +1609,11 @@ fn apply_init_containers(
             env: if env.is_empty() { None } else { Some(env) },
             ports,
             resources,
-            volume_mounts: if volume_mounts.is_empty() { None } else { Some(volume_mounts) },
+            volume_mounts: if volume_mounts.is_empty() {
+                None
+            } else {
+                Some(volume_mounts)
+            },
             ..Default::default()
         });
     }
@@ -1675,7 +1692,11 @@ fn build_resources(
     memory_request: Option<&str>,
     memory_limit: Option<&str>,
 ) -> Option<ResourceRequirements> {
-    if cpu_request.is_none() && cpu_limit.is_none() && memory_request.is_none() && memory_limit.is_none() {
+    if cpu_request.is_none()
+        && cpu_limit.is_none()
+        && memory_request.is_none()
+        && memory_limit.is_none()
+    {
         return None;
     }
     let mut requests: BTreeMap<String, Quantity> = BTreeMap::new();
@@ -1693,8 +1714,16 @@ fn build_resources(
         limits.insert("memory".to_string(), Quantity(m.to_string()));
     }
     Some(ResourceRequirements {
-        requests: if requests.is_empty() { None } else { Some(requests) },
-        limits: if limits.is_empty() { None } else { Some(limits) },
+        requests: if requests.is_empty() {
+            None
+        } else {
+            Some(requests)
+        },
+        limits: if limits.is_empty() {
+            None
+        } else {
+            Some(limits)
+        },
         ..Default::default()
     })
 }

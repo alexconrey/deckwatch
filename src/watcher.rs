@@ -22,7 +22,7 @@ use crate::entities::builds;
 use crate::entities::gitops_configs;
 use crate::kube_ext::deployment_phase;
 use crate::metrics;
-use crate::plugins::{SidecarSpec, VolumeSpec, VolumeMountSpec};
+use crate::plugins::{SidecarSpec, VolumeMountSpec, VolumeSpec};
 use crate::state::AppState;
 
 /// Return the current UTC time as a `DateTimeUtc` without requiring a direct
@@ -1614,9 +1614,7 @@ async fn reconcile_application_plugins(state: &AppState) {
             sidecar_entry.extend(sidecars_raw);
         }
         if !init_containers_raw.is_empty() {
-            let ic_entry = app_init_containers
-                .entry(row.application_id)
-                .or_default();
+            let ic_entry = app_init_containers.entry(row.application_id).or_default();
             ic_entry.extend(init_containers_raw);
         }
     }
@@ -1787,8 +1785,10 @@ async fn reconcile_application_plugins(state: &AppState) {
                         pod_spec_patch["volumes"] = serde_json::json!(all_volumes);
                     }
                     if !init_containers.is_empty() {
-                        pod_spec_patch["initContainers"] =
-                            serde_json::json!(init_containers.iter().map(sidecar_to_json).collect::<Vec<_>>());
+                        pod_spec_patch["initContainers"] = serde_json::json!(init_containers
+                            .iter()
+                            .map(sidecar_to_json)
+                            .collect::<Vec<_>>());
                     }
 
                     let patch = serde_json::json!({
@@ -1880,8 +1880,10 @@ async fn reconcile_application_plugins(state: &AppState) {
                         cj_pod_spec_patch["volumes"] = serde_json::json!(all_volumes);
                     }
                     if !init_containers.is_empty() {
-                        cj_pod_spec_patch["initContainers"] =
-                            serde_json::json!(init_containers.iter().map(sidecar_to_json).collect::<Vec<_>>());
+                        cj_pod_spec_patch["initContainers"] = serde_json::json!(init_containers
+                            .iter()
+                            .map(sidecar_to_json)
+                            .collect::<Vec<_>>());
                     }
 
                     let patch = serde_json::json!({
