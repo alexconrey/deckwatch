@@ -537,6 +537,12 @@ pub struct PluginConfig {
     /// always pin a checksum).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sha256: Option<String>,
+    /// Admin-set MCP tuning values for this plugin.
+    /// Keys match McpTuningField.key values declared in the plugin's metadata.
+    /// Values are prepended to every MCP initialize response as a
+    /// [Plugin: name] block so the AI sees current naming conventions.
+    #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
+    pub mcp_tuning: std::collections::HashMap<String, String>,
 }
 
 pub async fn get_settings(
