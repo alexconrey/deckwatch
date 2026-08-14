@@ -753,34 +753,49 @@ pub async fn add_plugin(
         .map_err(|e| AppError::BadRequest(format!("database error: {e}")))?
         .ok_or_else(|| AppError::NotFound(format!("application '{name}' not found")))?;
 
-    // Verify plugin is loaded.
-    {
+    // Verify plugin is loaded using case-insensitive name match (Bug 2).
+    // Capture the canonical name so we store it consistently.
+    let canonical_name = {
         let plugins = state.plugins.read().await;
-        if !plugins.iter().any(|p| p.name == plugin_name) {
-            return Err(AppError::NotFound(format!(
-                "plugin '{plugin_name}' not loaded — check Settings > Plugins"
-            )));
-        }
+        plugins
+            .iter()
+            .find(|p| p.name.eq_ignore_ascii_case(&plugin_name))
+            .map(|p| p.name.clone())
+            .ok_or_else(|| {
+                AppError::NotFound(format!(
+                    "plugin '{plugin_name}' not loaded — check Settings > Plugins"
+                ))
+            })?
+    };
+
+    // Bug 1: idempotency — check for an existing association before inserting.
+    // Use a case-insensitive comparison in the DB query (Bug 2).
+    use sea_orm::sea_query::{Expr, Func};
+    let existing = application_plugins::Entity::find()
+        .filter(application_plugins::Column::ApplicationId.eq(&app_id))
+        .filter(
+            Expr::expr(Func::lower(Expr::col(
+                application_plugins::Column::PluginName,
+            )))
+            .eq(canonical_name.to_lowercase()),
+        )
+        .one(&state.db)
+        .await
+        .map_err(|e| AppError::BadRequest(format!("database error: {e}")))?;
+
+    if existing.is_some() {
+        // Already associated — honour the idempotency contract and return success.
+        return Ok(StatusCode::OK);
     }
 
     let model = application_plugins::ActiveModel {
         id: Set(uuid::Uuid::new_v4().to_string()),
         application_id: Set(app_id.clone()),
-        plugin_name: Set(plugin_name.clone()),
+        plugin_name: Set(canonical_name.clone()),
         created_at: Set(now_utc()),
     };
 
-    // Insert; if the unique index fires, treat as a no-op (already associated).
-    use sea_orm::sea_query::OnConflict;
-    let _ = application_plugins::Entity::insert(model)
-        .on_conflict(
-            OnConflict::columns([
-                application_plugins::Column::ApplicationId,
-                application_plugins::Column::PluginName,
-            ])
-            .do_nothing()
-            .to_owned(),
-        )
+    application_plugins::Entity::insert(model)
         .exec(&state.db)
         .await
         .map_err(|e| AppError::BadRequest(format!("database error: {e}")))?;
@@ -789,9 +804,9 @@ pub async fn add_plugin(
         &state.db,
         "create",
         "application-plugin",
-        &plugin_name,
+        &canonical_name,
         &ns,
-        &format!("associated plugin '{plugin_name}' with application '{name}'"),
+        &format!("associated plugin '{canonical_name}' with application '{name}'"),
     )
     .await
     .ok();
@@ -808,9 +823,17 @@ pub async fn remove_plugin(
 ) -> Result<StatusCode, AppError> {
     let app_id = format!("{ns}/{name}");
 
+    // Bug 2: use case-insensitive comparison so that "AWS" and "aws" resolve to
+    // the same stored row regardless of how the name was originally cased.
+    use sea_orm::sea_query::{Expr, Func};
     let deleted = application_plugins::Entity::delete_many()
         .filter(application_plugins::Column::ApplicationId.eq(&app_id))
-        .filter(application_plugins::Column::PluginName.eq(&plugin_name))
+        .filter(
+            Expr::expr(Func::lower(Expr::col(
+                application_plugins::Column::PluginName,
+            )))
+            .eq(plugin_name.to_lowercase()),
+        )
         .exec(&state.db)
         .await
         .map_err(|e| AppError::BadRequest(format!("database error: {e}")))?;
