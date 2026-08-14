@@ -2685,7 +2685,7 @@ checksum = "4facc753ae494aeb6e3c22f839b158aebd4f9270f55cd3c79906c45476c47ab4"
 [[package]]
 name = "mcp-k8s"
 version = "0.1.0"
-source = "git+https://github.com/alexconrey/mcp-k8s.git#7854dc565d3e31201aaa112621451f58d598a8fd"
+source = "git+https://github.com/alexconrey/mcp-k8s.git?branch=feat%2Fmcp-deployment-probe-config#d7ac98d9c3b98451a68c21cfbeb1134073d87a05"
 dependencies = [
  "axum",
  "axum-server",
