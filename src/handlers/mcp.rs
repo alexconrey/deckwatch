@@ -1953,7 +1953,13 @@ async fn tool_submit_agent_feedback(
     let summary = args["summary"].as_str().ok_or("summary is required")?;
     let detail = args["detail"].as_str().ok_or("detail is required")?;
 
-    let valid_categories = ["missing_tool", "mcp_tuning", "workflow", "documentation", "other"];
+    let valid_categories = [
+        "missing_tool",
+        "mcp_tuning",
+        "workflow",
+        "documentation",
+        "other",
+    ];
     if !valid_categories.contains(&category) {
         return Err(format!(
             "invalid category '{}'; must be one of: {}",

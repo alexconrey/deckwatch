@@ -65,8 +65,8 @@ pub async fn list_agent_feedback(
     State(state): State<AppState>,
     Query(query): Query<ListFeedbackQuery>,
 ) -> Result<Json<AgentFeedbackListResponse>, AppError> {
-    let mut select = agent_feedback::Entity::find()
-        .order_by_desc(agent_feedback::Column::CreatedAt);
+    let mut select =
+        agent_feedback::Entity::find().order_by_desc(agent_feedback::Column::CreatedAt);
 
     if let Some(status) = &query.status {
         select = select.filter(agent_feedback::Column::Status.eq(status.as_str()));
