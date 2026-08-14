@@ -14,6 +14,7 @@ use axum::Json;
 use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder, QuerySelect};
 use serde::{Deserialize, Serialize};
 
+use crate::audit;
 use crate::entities::{agent_feedback, builds, gitops_configs};
 use crate::handlers::applications;
 use crate::handlers::{
@@ -848,6 +849,11 @@ async fn handle_tool_call(state: &AppState, request: &JsonRpcRequest) -> JsonRpc
         "deprovision_resource" => Some(tool_deprovision_resource(state, args).await),
         "refresh_resource" => Some(tool_refresh_resource(state, args).await),
         "submit_agent_feedback" => Some(tool_submit_agent_feedback(state, args).await),
+        // Intercept k8s deployment mutation tools so they are audit-logged.
+        "create_deployment" => Some(tool_mcp_create_deployment(state, args).await),
+        "delete_deployment" => Some(tool_mcp_delete_deployment(state, args).await),
+        "scale_deployment" => Some(tool_mcp_scale_deployment(state, args).await),
+        "restart_deployment" => Some(tool_mcp_restart_deployment(state, args).await),
         _ => None,
     };
 
@@ -1041,6 +1047,18 @@ async fn tool_create_application(
         .await;
     }
 
+    audit::log_action(
+        &state.db,
+        "create",
+        "application",
+        name,
+        ns,
+        &format!("MCP: created application '{name}'"),
+        "",
+    )
+    .await
+    .ok();
+
     serde_json::to_string_pretty(&detail).map_err(|e| e.to_string())
 }
 
@@ -1089,6 +1107,18 @@ async fn tool_configure_gitops(
     .await
     .map_err(|e| format!("{e}"))?;
 
+    audit::log_action(
+        &state.db,
+        "upsert",
+        "gitops",
+        &format!("{ns}/{name}"),
+        ns,
+        "MCP: set gitops config",
+        "",
+    )
+    .await
+    .ok();
+
     serde_json::to_string_pretty(&result.0).map_err(|e| e.to_string())
 }
 
@@ -1105,6 +1135,18 @@ async fn tool_trigger_gitops_build(
     )
     .await
     .map_err(|e| format!("{e}"))?;
+
+    audit::log_action(
+        &state.db,
+        "trigger",
+        "gitops",
+        &format!("{ns}/{name}"),
+        ns,
+        "MCP: triggered gitops build",
+        "",
+    )
+    .await
+    .ok();
 
     serde_json::to_string_pretty(&result.0).map_err(|e| e.to_string())
 }
@@ -1691,6 +1733,18 @@ async fn tool_enable_plugin(state: &AppState, args: &serde_json::Value) -> Resul
         state_clone.plugin_patch_fingerprints.lock().await.clear();
     });
 
+    audit::log_action(
+        &state.db,
+        "enable",
+        "plugin",
+        name,
+        "",
+        &format!("MCP: enabled plugin '{name}'"),
+        "",
+    )
+    .await
+    .ok();
+
     Ok(serde_json::json!({
         "name": name,
         "enabled": true,
@@ -1727,6 +1781,18 @@ async fn tool_disable_plugin(state: &AppState, args: &serde_json::Value) -> Resu
     // Clearing fingerprints forces a fresh reconcile on the next cycle so
     // resources injected by this plugin are no longer applied.
     state.plugin_patch_fingerprints.lock().await.clear();
+
+    audit::log_action(
+        &state.db,
+        "disable",
+        "plugin",
+        name,
+        "",
+        &format!("MCP: disabled plugin '{name}'"),
+        "",
+    )
+    .await
+    .ok();
 
     Ok(serde_json::json!({
         "name": name,
@@ -2132,6 +2198,104 @@ async fn tool_refresh_resource(
     serde_json::to_string_pretty(&response.0).map_err(|e| e.to_string())
 }
 
+// ── Deployment mutation tools (intercepted from mcp-k8s for audit logging) ──
+
+async fn mcp_k8s_tool(state: &AppState, tool_name: &str, args: &serde_json::Value) -> Result<String, String> {
+    let k8s_client = mcp_k8s::K8sClient::new(
+        state.kube_client.clone(),
+        state.allowed_namespaces.clone(),
+        mcp_k8s::permissions::ActionPermissions::default(),
+    );
+    mcp_k8s::mcp::handle_tool(&k8s_client, tool_name, args)
+        .await
+        .unwrap_or_else(|| Err(format!("unknown tool: {tool_name}")))
+}
+
+async fn tool_mcp_create_deployment(
+    state: &AppState,
+    args: &serde_json::Value,
+) -> Result<String, String> {
+    let result = mcp_k8s_tool(state, "create_deployment", args).await?;
+    let ns = args["namespace"].as_str().unwrap_or("");
+    let name = args["name"].as_str().unwrap_or("");
+    audit::log_action(
+        &state.db,
+        "create",
+        "deployment",
+        name,
+        ns,
+        "MCP: create_deployment",
+        "",
+    )
+    .await
+    .ok();
+    Ok(result)
+}
+
+async fn tool_mcp_delete_deployment(
+    state: &AppState,
+    args: &serde_json::Value,
+) -> Result<String, String> {
+    let result = mcp_k8s_tool(state, "delete_deployment", args).await?;
+    let ns = args["namespace"].as_str().unwrap_or("");
+    let name = args["name"].as_str().unwrap_or("");
+    audit::log_action(
+        &state.db,
+        "delete",
+        "deployment",
+        name,
+        ns,
+        "MCP: delete_deployment",
+        "",
+    )
+    .await
+    .ok();
+    Ok(result)
+}
+
+async fn tool_mcp_scale_deployment(
+    state: &AppState,
+    args: &serde_json::Value,
+) -> Result<String, String> {
+    let result = mcp_k8s_tool(state, "scale_deployment", args).await?;
+    let ns = args["namespace"].as_str().unwrap_or("");
+    let name = args["name"].as_str().unwrap_or("");
+    let replicas = args["replicas"].as_i64().unwrap_or(0);
+    audit::log_action(
+        &state.db,
+        "scale",
+        "deployment",
+        name,
+        ns,
+        &format!("MCP: scaled deployment to {replicas} replicas"),
+        "",
+    )
+    .await
+    .ok();
+    Ok(result)
+}
+
+async fn tool_mcp_restart_deployment(
+    state: &AppState,
+    args: &serde_json::Value,
+) -> Result<String, String> {
+    let result = mcp_k8s_tool(state, "restart_deployment", args).await?;
+    let ns = args["namespace"].as_str().unwrap_or("");
+    let name = args["name"].as_str().unwrap_or("");
+    audit::log_action(
+        &state.db,
+        "restart",
+        "deployment",
+        name,
+        ns,
+        "MCP: restart_deployment",
+        "",
+    )
+    .await
+    .ok();
+    Ok(result)
+}
+
 // ── Application plugin association tools ────────────────────────────────────
 
 async fn tool_associate_plugin(
@@ -2224,6 +2388,7 @@ async fn tool_associate_plugin(
         &canonical_name,
         ns,
         &format!("MCP: associated plugin '{canonical_name}' with application '{app_name}'"),
+        "",
     )
     .await
     .ok();
@@ -2277,6 +2442,7 @@ async fn tool_disassociate_plugin(
         plugin_name,
         ns,
         &format!("MCP: removed plugin '{plugin_name}' from application '{app_name}'"),
+        "",
     )
     .await
     .ok();

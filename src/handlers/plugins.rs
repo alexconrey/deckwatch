@@ -131,6 +131,7 @@ pub async fn save_plugin_config(
         &name,
         "",
         &format!("updated config for plugin '{name}'"),
+        "",
     )
     .await
     {
@@ -224,6 +225,7 @@ pub async fn upload_plugin_wasm(
             "uploaded WASM binary for plugin '{name}' ({} bytes)",
             body.len()
         ),
+        "",
     )
     .await
     .ok();

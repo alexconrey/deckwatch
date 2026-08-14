@@ -179,6 +179,7 @@ pub async fn create(
         &req.name,
         "",
         &format!("created ingress class {}", req.name),
+        "",
     )
     .await
     {
@@ -239,6 +240,7 @@ pub async fn update(
         &name,
         "",
         "updated ingress class",
+        "",
     )
     .await
     {
@@ -265,6 +267,7 @@ pub async fn delete(
         &name,
         "",
         "deleted ingress class",
+        "",
     )
     .await
     {

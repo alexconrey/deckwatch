@@ -807,6 +807,7 @@ pub async fn add_plugin(
         &canonical_name,
         &ns,
         &format!("associated plugin '{canonical_name}' with application '{name}'"),
+        "",
     )
     .await
     .ok();
@@ -851,6 +852,7 @@ pub async fn remove_plugin(
         &plugin_name,
         &ns,
         &format!("removed plugin '{plugin_name}' from application '{name}'"),
+        "",
     )
     .await
     .ok();

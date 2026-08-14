@@ -474,6 +474,7 @@ pub async fn create(
         &req.name,
         &ns,
         &format!("created deployment with image {}", detail.image),
+        "",
     )
     .await
     {
@@ -690,6 +691,7 @@ pub async fn update(
         &name,
         &ns,
         &format!("updated deployment (image: {})", detail.image),
+        "",
     )
     .await
     {
@@ -720,6 +722,7 @@ pub async fn delete(
         &name,
         &ns,
         "deleted deployment",
+        "",
     )
     .await
     {
@@ -760,6 +763,7 @@ pub async fn restart(
         &name,
         &ns,
         "initiated rolling restart",
+        "",
     )
     .await
     {
@@ -799,6 +803,7 @@ pub async fn scale(
         &name,
         &ns,
         &format!("scaled to {} replicas", req.replicas),
+        "",
     )
     .await
     {

@@ -196,6 +196,7 @@ pub async fn create(
         &req.name,
         &ns,
         &format!("created ingress for host {host_desc}"),
+        "",
     )
     .await
     {
@@ -278,6 +279,7 @@ pub async fn update(
         &name,
         &ns,
         "updated ingress",
+        "",
     )
     .await
     {
@@ -304,6 +306,7 @@ pub async fn delete(
         &name,
         &ns,
         "deleted ingress",
+        "",
     )
     .await
     {

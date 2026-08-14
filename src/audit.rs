@@ -31,6 +31,7 @@ pub async fn log_action(
     resource_name: &str,
     namespace: &str,
     detail: &str,
+    user_identity: &str,
 ) -> Result<(), sea_orm::DbErr> {
     let model = audit_entity::ActiveModel {
         id: Set(uuid::Uuid::new_v4().to_string()),
@@ -40,7 +41,7 @@ pub async fn log_action(
         resource_name: Set(resource_name.to_string()),
         namespace: Set(namespace.to_string()),
         detail: Set(detail.to_string()),
-        user_identity: Set(String::new()),
+        user_identity: Set(user_identity.to_string()),
     };
     audit_entity::Entity::insert(model).exec(db).await?;
     metrics::record_audit_event(action, resource_type);
@@ -54,11 +55,16 @@ pub struct AuditQuery {
     pub resource_type: Option<String>,
     pub namespace: Option<String>,
     pub limit: Option<u64>,
+    /// Cursor for forward pagination: pass the `next_cursor` from a previous
+    /// response to receive the next page of results (ordered by id ascending).
+    pub cursor: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
 pub struct AuditResponse {
-    pub entries: Vec<AuditEntry>,
+    pub items: Vec<AuditEntry>,
+    /// If present, pass as `?cursor=` to retrieve the next page.
+    pub next_cursor: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -92,10 +98,14 @@ pub async fn list_audit_logs(
     State(state): State<AppState>,
     Query(q): Query<AuditQuery>,
 ) -> Result<Json<AuditResponse>, AppError> {
-    let limit = q.limit.unwrap_or(50).min(500);
+    let limit = q.limit.unwrap_or(50).min(200);
 
-    let mut query = audit_entity::Entity::find().order_by_desc(audit_entity::Column::Timestamp);
+    let mut query = audit_entity::Entity::find().order_by_asc(audit_entity::Column::Id);
 
+    // Cursor-based forward pagination: skip all records whose id is <= cursor.
+    if let Some(ref cursor) = q.cursor {
+        query = query.filter(audit_entity::Column::Id.gt(cursor.as_str()));
+    }
     if let Some(ref rt) = q.resource_type {
         query = query.filter(audit_entity::Column::ResourceType.eq(rt.as_str()));
     }
@@ -103,12 +113,24 @@ pub async fn list_audit_logs(
         query = query.filter(audit_entity::Column::Namespace.eq(ns.as_str()));
     }
 
+    // Fetch one extra row to detect whether there is a next page.
     let rows: Vec<audit_entity::Model> = query
-        .limit(limit)
+        .limit(limit + 1)
         .all(&state.db)
         .await
         .map_err(|e| AppError::BadRequest(format!("failed to query audit log: {e}")))?;
 
-    let entries = rows.into_iter().map(AuditEntry::from).collect();
-    Ok(Json(AuditResponse { entries }))
+    let has_more = rows.len() as u64 > limit;
+    let items: Vec<AuditEntry> = rows
+        .into_iter()
+        .take(limit as usize)
+        .map(AuditEntry::from)
+        .collect();
+    let next_cursor = if has_more {
+        items.last().map(|e| e.id.clone())
+    } else {
+        None
+    };
+
+    Ok(Json(AuditResponse { items, next_cursor }))
 }
