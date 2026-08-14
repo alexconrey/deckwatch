@@ -237,11 +237,13 @@ pub fn sse_closed() {
     gauge!("deckwatch_active_sse_connections").decrement(1.0);
 }
 
-/// Record a gitops build result. Call once per build completion.
-pub fn record_gitops_build(namespace: &str, status: &str) {
+/// Record a gitops build result. Call once per build start or completion.
+/// - `deployment`: the deployment name (e.g. `my-app`)
+pub fn record_gitops_build(namespace: &str, deployment: &str, status: &str) {
     counter!(
         "deckwatch_gitops_builds_total",
         "namespace" => namespace.to_owned(),
+        "deployment" => deployment.to_owned(),
         "status" => status.to_owned(),
     )
     .increment(1);
@@ -328,6 +330,41 @@ pub fn record_plugin_k8s_resource(kind: &str, status: &str) {
         "status" => status.to_owned(),
     )
     .increment(1);
+}
+
+/// Record how long a single plugin reconciliation took for an application.
+/// Call from `reconcile_application_plugins` once per application per cycle.
+/// - `plugin`: the application name being reconciled (scoping label)
+/// - `namespace`: the Kubernetes namespace being reconciled
+pub fn record_plugin_reconcile_duration(plugin: &str, namespace: &str, duration_s: f64) {
+    histogram!(
+        "deckwatch_plugin_reconcile_duration_seconds",
+        "plugin" => plugin.to_owned(),
+        "namespace" => namespace.to_owned(),
+    )
+    .record(duration_s);
+}
+
+/// Increment the auto-rollback counter. Call once per rollback that fires.
+pub fn record_auto_rollback(namespace: &str, deployment: &str) {
+    counter!(
+        "deckwatch_auto_rollbacks_total",
+        "namespace" => namespace.to_owned(),
+        "deployment" => deployment.to_owned(),
+    )
+    .increment(1);
+}
+
+/// Record the wall-clock duration of a completed build (success or failure).
+/// - `status`: `succeeded` or `failed`
+pub fn record_build_duration(namespace: &str, deployment: &str, status: &str, duration_s: f64) {
+    histogram!(
+        "deckwatch_build_duration_seconds",
+        "namespace" => namespace.to_owned(),
+        "deployment" => deployment.to_owned(),
+        "status" => status.to_owned(),
+    )
+    .record(duration_s);
 }
 
 /// Record a deckwatch-native MCP tool invocation (e.g. `create_application`).

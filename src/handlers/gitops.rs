@@ -632,7 +632,7 @@ pub async fn trigger_build(
 
     // Record that a build was kicked off for this namespace. The watcher
     // records "success" or "failure" once the Job completes.
-    metrics::record_gitops_build(&ns, "started");
+    metrics::record_gitops_build(&ns, &name, "started");
 
     // Update the gitops_configs row with build status.
     let now = now_utc();

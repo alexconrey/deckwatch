@@ -220,7 +220,7 @@ async fn check_and_build(
     let job_name: String = trigger_build(state, ns, &dep, &remote_sha, &token, &auth_user).await?;
     // Counter incremented once per build kickoff; success/failure is recorded
     // later in monitor_builds when the Job completes.
-    metrics::record_gitops_build(ns, "started");
+    metrics::record_gitops_build(ns, dep_name, "started");
 
     // Update the gitops_configs row with build status.
     let now = now_utc();
@@ -1150,7 +1150,7 @@ async fn monitor_builds(state: &AppState, http: &reqwest::Client) -> anyhow::Res
                         active.updated_at = Set(now);
                     })
                     .await?;
-                    metrics::record_gitops_build(ns, "success");
+                    metrics::record_gitops_build(ns, dep_name, "success");
 
                     let build_log = capture_build_group_logs(state, ns, build_group).await;
                     update_build_status(&state.db, build_group, "succeeded", None, build_log).await;
@@ -1179,7 +1179,7 @@ async fn monitor_builds(state: &AppState, http: &reqwest::Client) -> anyhow::Res
                             active.updated_at = Set(now);
                         })
                         .await?;
-                        metrics::record_gitops_build(ns, "failure");
+                        metrics::record_gitops_build(ns, dep_name, "failure");
 
                         let build_log = capture_build_group_logs(state, ns, build_group).await;
                         update_build_status(
@@ -1262,7 +1262,7 @@ async fn monitor_builds(state: &AppState, http: &reqwest::Client) -> anyhow::Res
                     active.updated_at = Set(now);
                 })
                 .await?;
-                metrics::record_gitops_build(ns, "success");
+                metrics::record_gitops_build(ns, dep_name, "success");
 
                 let build_log = capture_build_group_logs(state, ns, build_group).await;
                 update_build_status(&state.db, build_group, "succeeded", None, build_log).await;
@@ -1283,7 +1283,7 @@ async fn monitor_builds(state: &AppState, http: &reqwest::Client) -> anyhow::Res
                     active.updated_at = Set(now);
                 })
                 .await?;
-                metrics::record_gitops_build(ns, "failure");
+                metrics::record_gitops_build(ns, dep_name, "failure");
 
                 let build_log = capture_build_group_logs(state, ns, build_group).await;
                 update_build_status(&state.db, build_group, "failed", Some(&reason), build_log)
@@ -1411,6 +1411,17 @@ async fn update_build_status(
     };
 
     let now_utc = now_utc();
+
+    // Capture started_at and application_id before consuming `row` into the
+    // ActiveModel so we can record build duration.
+    let application_id = row.application_id.clone();
+    let started_at = row.started_at;
+    if let Some(started) = started_at {
+        let duration_s = (now_utc - started).num_milliseconds().max(0) as f64 / 1000.0;
+        let (ns, dep_name) = application_id.split_once("/").unwrap_or(("unknown", "unknown"));
+        metrics::record_build_duration(ns, dep_name, status, duration_s);
+    }
+
     let mut active: builds::ActiveModel = row.into();
     active.status = Set(status.to_string());
     active.completed_at = Set(Some(now_utc));
@@ -1515,6 +1526,8 @@ async fn reconcile_application_plugins(state: &AppState) {
         if !state.is_namespace_allowed(ns) {
             continue;
         }
+
+        let reconcile_start = Instant::now();
 
         let mut env_vars: Vec<EnvVar> = env_map
             .iter()
@@ -1663,6 +1676,12 @@ async fn reconcile_application_plugins(state: &AppState) {
                 tracing::warn!(namespace = %ns, error = %e, "reconcile_application_plugins: failed to list cronjobs");
             }
         }
+
+        metrics::record_plugin_reconcile_duration(
+            app_name,
+            ns,
+            reconcile_start.elapsed().as_secs_f64(),
+        );
     }
 }
 
