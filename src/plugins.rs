@@ -1385,4 +1385,217 @@ mod tests {
             "\"bool\""
         );
     }
+
+    fn make_plugin(name: &str, provides: Vec<&str>, depends_on: Vec<&str>) -> LoadedPlugin {
+        LoadedPlugin {
+            name: name.to_string(),
+            wasm_bytes: vec![],
+            allowed_hosts: vec![],
+            config: BTreeMap::new(),
+            inherit_env_keys: vec![],
+            inherit_env_file_keys: BTreeMap::new(),
+            metadata: PluginMetadata {
+                name: name.to_string(),
+                provides: provides.into_iter().map(String::from).collect(),
+                depends_on: depends_on.into_iter().map(String::from).collect(),
+                ..Default::default()
+            },
+        }
+    }
+
+    #[test]
+    fn sort_by_dependencies_respects_ordering() {
+        let plugins = vec![
+            make_plugin("consumer", vec![], vec!["capability-a"]),
+            make_plugin("provider", vec!["capability-a"], vec![]),
+        ];
+        let sorted = sort_by_dependencies(&plugins);
+        let names: Vec<&str> = sorted.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(
+            names,
+            vec!["provider", "consumer"],
+            "provider must run before consumer"
+        );
+    }
+
+    #[test]
+    fn sort_by_dependencies_handles_cycle_without_panic() {
+        let plugins = vec![
+            make_plugin("a", vec!["cap-a"], vec!["cap-b"]),
+            make_plugin("b", vec!["cap-b"], vec!["cap-a"]),
+        ];
+        let sorted = sort_by_dependencies(&plugins);
+        assert_eq!(
+            sorted.len(),
+            2,
+            "all plugins must be returned even with a cycle"
+        );
+        let names: std::collections::HashSet<&str> =
+            sorted.iter().map(|p| p.name.as_str()).collect();
+        assert!(names.contains("a"));
+        assert!(names.contains("b"));
+    }
+
+    #[test]
+    fn sort_by_dependencies_single_plugin() {
+        let plugins = vec![make_plugin("solo", vec![], vec![])];
+        let sorted = sort_by_dependencies(&plugins);
+        assert_eq!(sorted.len(), 1);
+        assert_eq!(sorted[0].name, "solo");
+    }
+
+    #[test]
+    fn sort_by_dependencies_preserves_order_without_edges() {
+        let plugins = vec![
+            make_plugin("alpha", vec![], vec![]),
+            make_plugin("beta", vec![], vec![]),
+            make_plugin("gamma", vec![], vec![]),
+        ];
+        let sorted = sort_by_dependencies(&plugins);
+        let names: Vec<&str> = sorted.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(
+            names,
+            vec!["alpha", "beta", "gamma"],
+            "plugins with no deps keep original order"
+        );
+    }
+
+    #[test]
+    fn apply_service_account_sets_sa_on_default() {
+        let plugin = make_plugin("test-plugin", vec![], vec![]);
+        let mut pod_spec = k8s_openapi::api::core::v1::PodSpec {
+            containers: vec![],
+            ..Default::default()
+        };
+        let mut annotations = BTreeMap::new();
+
+        apply_service_account(&plugin, "my-sa".to_string(), &mut pod_spec, &mut annotations);
+
+        assert_eq!(
+            pod_spec.service_account_name.as_deref(),
+            Some("my-sa"),
+            "SA should be set when pod has default SA"
+        );
+        assert_eq!(
+            annotations.get("deckwatch.plugin-sa/test-plugin"),
+            Some(&"my-sa".to_string())
+        );
+    }
+
+    #[test]
+    fn apply_service_account_skips_non_default() {
+        let plugin = make_plugin("test-plugin", vec![], vec![]);
+        let mut pod_spec = k8s_openapi::api::core::v1::PodSpec {
+            containers: vec![],
+            service_account_name: Some("existing-sa".to_string()),
+            ..Default::default()
+        };
+        let mut annotations = BTreeMap::new();
+
+        apply_service_account(
+            &plugin,
+            "new-sa".to_string(),
+            &mut pod_spec,
+            &mut annotations,
+        );
+
+        assert_eq!(
+            pod_spec.service_account_name.as_deref(),
+            Some("existing-sa"),
+            "existing non-default SA must not be overwritten"
+        );
+        assert!(
+            !annotations.contains_key("deckwatch.plugin-sa/test-plugin"),
+            "no annotation should be set when SA is skipped"
+        );
+    }
+
+    #[test]
+    fn apply_env_vars_skips_duplicates() {
+        let plugin = make_plugin("test-plugin", vec![], vec![]);
+        let mut pod_spec = k8s_openapi::api::core::v1::PodSpec {
+            containers: vec![k8s_openapi::api::core::v1::Container {
+                name: "app".to_string(),
+                env: Some(vec![k8s_openapi::api::core::v1::EnvVar {
+                    name: "EXISTING".to_string(),
+                    value: Some("old-value".to_string()),
+                    ..Default::default()
+                }]),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let mut annotations = BTreeMap::new();
+
+        let env_vars = vec![
+            EnvVarSpec {
+                name: "EXISTING".to_string(),
+                value: "new-value".to_string(),
+                value_from: None,
+            },
+            EnvVarSpec {
+                name: "NEW_VAR".to_string(),
+                value: "added".to_string(),
+                value_from: None,
+            },
+        ];
+
+        apply_env_vars(&plugin, &env_vars, &mut pod_spec, &mut annotations);
+
+        let env = pod_spec.containers[0].env.as_ref().unwrap();
+        assert_eq!(env.len(), 2, "duplicate should not be added");
+        assert_eq!(
+            env[0].value.as_deref(),
+            Some("old-value"),
+            "existing var should keep original value"
+        );
+        assert_eq!(env[1].name, "NEW_VAR");
+    }
+
+    #[test]
+    fn apply_sidecars_skips_duplicate_container_names() {
+        let plugin = make_plugin("test-plugin", vec![], vec![]);
+        let mut pod_spec = k8s_openapi::api::core::v1::PodSpec {
+            containers: vec![k8s_openapi::api::core::v1::Container {
+                name: "existing-sidecar".to_string(),
+                image: Some("old:latest".to_string()),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let mut annotations = BTreeMap::new();
+
+        let sidecars = vec![
+            SidecarSpec {
+                name: "existing-sidecar".to_string(),
+                image: "new:latest".to_string(),
+                env: vec![],
+                port: None,
+                cpu: None,
+                memory: None,
+            },
+            SidecarSpec {
+                name: "new-sidecar".to_string(),
+                image: "sidecar:v1".to_string(),
+                env: vec![],
+                port: Some(8080),
+                cpu: None,
+                memory: None,
+            },
+        ];
+
+        apply_sidecars(&plugin, &sidecars, &mut pod_spec, &mut annotations);
+
+        assert_eq!(
+            pod_spec.containers.len(),
+            2,
+            "duplicate sidecar should not be added"
+        );
+        assert_eq!(
+            pod_spec.containers[0].image.as_deref(),
+            Some("old:latest"),
+            "existing container image should not be overwritten"
+        );
+        assert_eq!(pod_spec.containers[1].name, "new-sidecar");
+    }
 }
