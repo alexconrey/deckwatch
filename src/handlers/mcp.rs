@@ -420,6 +420,20 @@ fn deckwatch_tool_definitions() -> Vec<serde_json::Value> {
             }
         }),
         serde_json::json!({
+            "name": "watch_build",
+            "description": "Poll a GitOps build until it completes (success or failed) and return the final status and build log. Blocks until the build finishes or 600 seconds elapse. Defaults to the most recent build job if job_name is not specified.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "namespace": { "type": "string" },
+                    "deployment_name": { "type": "string" },
+                    "job_name": { "type": "string", "description": "Build job name to watch (e.g. myapp-build-abc1234). Defaults to the most recent build job." }
+                },
+                "required": ["namespace", "deployment_name"],
+                "additionalProperties": false
+            }
+        }),
+        serde_json::json!({
             "name": "generate_local_build",
             "description": "Generate a local docker run command that reproduces a deployment's Kaniko build locally. Useful for diagnosing build failures without pushing commits.",
             "inputSchema": {
@@ -657,6 +671,7 @@ async fn handle_tool_call(state: &AppState, request: &JsonRpcRequest) -> JsonRpc
         "delete_ingress_template" => Some(tool_delete_ingress_template(state, args).await),
         "list_builds" => Some(tool_list_builds(state, args).await),
         "get_build_log" => Some(tool_get_build_log(state, args).await),
+        "watch_build" => Some(tool_watch_build(state, args).await),
         "generate_local_build" => Some(tool_generate_local_build(state, args).await),
         "get_monitoring" => Some(tool_get_monitoring(state, args).await),
         "enable_monitoring" => Some(tool_enable_monitoring(state, args).await),
@@ -1188,6 +1203,75 @@ async fn tool_get_build_log(state: &AppState, args: &serde_json::Value) -> Resul
         None => Err(format!(
             "no build found for job '{job_name}' in {ns}/{name}"
         )),
+    }
+}
+
+async fn tool_watch_build(state: &AppState, args: &serde_json::Value) -> Result<String, String> {
+    let ns = args["namespace"].as_str().ok_or("namespace is required")?;
+    let name = args["deployment_name"]
+        .as_str()
+        .ok_or("deployment_name is required")?;
+
+    let _ = state.deployments_api(ns).map_err(|e| e.to_string())?;
+
+    let app_id = format!("{ns}/{name}");
+
+    // Resolve the job_name to watch: use the caller-supplied value, or fall
+    // back to the most recent build job recorded on the gitops_configs row.
+    let job_name: String = if let Some(j) = args["job_name"].as_str() {
+        j.to_string()
+    } else {
+        let config_row = gitops_configs::Entity::find()
+            .filter(gitops_configs::Column::ApplicationId.eq(&app_id))
+            .one(&state.db)
+            .await
+            .map_err(|e| format!("db error: {e}"))?;
+
+        match config_row {
+            Some(row) => row
+                .last_build_job
+                .ok_or_else(|| format!("no build has been triggered for {ns}/{name}"))?,
+            None => return Err(format!("GitOps is not configured for {ns}/{name}")),
+        }
+    };
+
+    const TIMEOUT_SECS: u64 = 600;
+    const POLL_INTERVAL_SECS: u64 = 4;
+
+    let start = tokio::time::Instant::now();
+    let timeout = tokio::time::Duration::from_secs(TIMEOUT_SECS);
+    let poll_interval = tokio::time::Duration::from_secs(POLL_INTERVAL_SECS);
+
+    loop {
+        let build_row = builds::Entity::find()
+            .filter(builds::Column::ApplicationId.eq(&app_id))
+            .filter(builds::Column::JobName.eq(&job_name))
+            .one(&state.db)
+            .await
+            .map_err(|e| format!("db error: {e}"))?;
+
+        if let Some(row) = build_row {
+            if row.status == "success" || row.status == "failed" {
+                let result = serde_json::json!({
+                    "job_name": row.job_name,
+                    "commit_sha": row.commit_sha,
+                    "status": row.status,
+                    "started_at": row.started_at.map(|t| t.to_string()),
+                    "completed_at": row.completed_at.map(|t| t.to_string()),
+                    "error_message": row.error_message,
+                    "build_log": row.build_log,
+                });
+                return serde_json::to_string_pretty(&result).map_err(|e| e.to_string());
+            }
+        }
+
+        if start.elapsed() >= timeout {
+            return Err(format!(
+                "timed out after {TIMEOUT_SECS}s waiting for build '{job_name}' to complete"
+            ));
+        }
+
+        tokio::time::sleep(poll_interval).await;
     }
 }
 

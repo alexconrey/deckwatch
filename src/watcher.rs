@@ -144,16 +144,11 @@ async fn check_and_build(
     let token = if !config.token_secret.is_empty() {
         // Shared token from settings (looked up by name)
         let settings = crate::handlers::settings::load_settings_from_db(state).await;
-        let token_entry = settings
-            .git_token_secrets
-            .iter()
-            .find(|t| t.name == config.token_secret || t.secret_name == config.token_secret);
-        match token_entry.and_then(|t| t.encrypted_token.as_deref()) {
-            Some(encrypted) => {
-                crate::crypto::decrypt(&state.encryption_key, encrypted).unwrap_or_default()
-            }
-            None => String::new(),
-        }
+        // resolve_token tries encrypted_token first, then falls back to
+        // reading the k8s secret (secret_name/namespace) — same as plugins.rs.
+        crate::plugins::resolve_git_token(&config.token_secret, &settings, state)
+            .await
+            .unwrap_or_default()
     } else if let Some(encrypted) = config.encrypted_token.as_deref() {
         // Per-app encrypted token (stored on the gitops config itself)
         crate::crypto::decrypt(&state.encryption_key, encrypted).unwrap_or_default()

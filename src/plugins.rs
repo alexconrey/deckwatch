@@ -488,7 +488,7 @@ async fn fetch_bytes(
     let mut builder = http.get(&url);
 
     if let Some(token_secret_name) = &cfg.token_secret {
-        if let Some(token) = resolve_token(token_secret_name, settings, state).await {
+        if let Some(token) = resolve_git_token(token_secret_name, settings, state).await {
             builder = builder.bearer_auth(token);
         }
     }
@@ -523,7 +523,9 @@ fn resolve_url(source: &PluginSource) -> String {
     }
 }
 
-async fn resolve_token(
+/// Resolve a git token by display name: tries `encrypted_token` first, then
+/// falls back to reading the `token` key from the referenced k8s secret.
+pub async fn resolve_git_token(
     secret_ref_name: &str,
     settings: &DeckwatchSettings,
     state: &AppState,
