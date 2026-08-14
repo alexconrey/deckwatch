@@ -407,31 +407,78 @@ const showProvisionDialog = ref(false);
 const provisioningPlugin = ref<string>("");
 const provisioningResourceId = ref<string>("");
 const provisioningResource = ref<PluginResource | null>(null);
-const provisionFields = ref<Record<string, string>>({});
+// String-based fields (string, secret, select) and boolean fields stored separately
+// so v-model bindings are type-safe for vue-tsc.
+const provisionStringFields = ref<Record<string, string>>({});
+const provisionBoolFields = ref<Record<string, boolean>>({});
 const provisioning = ref(false);
+const provisionError = ref<string | null>(null);
 
-function openProvisionDialog(pluginName: string, resource: PluginResource) {
+const provisionFormValid = computed(() => {
+  if (!provisioningResource.value) return true;
+  return provisioningResource.value.fields
+    .filter((f) => f.required)
+    .every((f) => {
+      if (f.field_type === "bool") return true; // switches always have a value
+      const val = provisionStringFields.value[f.key];
+      return val !== undefined && val !== "";
+    });
+});
+
+function makeRequiredRule(label: string) {
+  return (v: unknown) => (v !== "" && v !== null && v !== undefined) || `${label} is required`;
+}
+
+async function openProvisionDialog(pluginName: string, resource: PluginResource) {
   provisioningPlugin.value = pluginName;
   provisioningResourceId.value = resource.id;
   provisioningResource.value = resource;
-  const defaults: Record<string, string> = {};
-  for (const f of resource.fields) { defaults[f.key] = f.default ?? ""; }
-  provisionFields.value = defaults;
-  showProvisionDialog.value = true;
+  provisionError.value = null;
+  const strDefaults: Record<string, string> = {};
+  const boolDefaults: Record<string, boolean> = {};
+  for (const f of resource.fields) {
+    if (f.field_type === "bool") {
+      boolDefaults[f.key] = f.default === "true";
+    } else {
+      strDefaults[f.key] = f.default ?? "";
+    }
+  }
+  provisionStringFields.value = strDefaults;
+  provisionBoolFields.value = boolDefaults;
+  if (resource.fields.length === 0) {
+    // No user input needed — provision immediately.
+    await confirmProvision();
+  } else {
+    showProvisionDialog.value = true;
+  }
 }
 
 async function confirmProvision() {
   provisioning.value = true;
+  provisionError.value = null;
   try {
+    const fields: Record<string, string> = {};
+    for (const [key, val] of Object.entries(provisionStringFields.value)) {
+      if (val !== "") fields[key] = val;
+    }
+    for (const [key, val] of Object.entries(provisionBoolFields.value)) {
+      fields[key] = val ? "true" : "false";
+    }
     const newResource = await applicationResourcesApi.provision(
       props.namespace, props.name, provisioningPlugin.value, provisioningResourceId.value,
-      { fields: provisionFields.value },
+      { fields },
     );
     infraResources.value.push(newResource);
     showProvisionDialog.value = false;
     pluginSuccess(`${provisioningResource.value?.label ?? "Resource"} provisioned`);
   } catch (e) {
-    pluginError(e instanceof Error ? e.message : "Provisioning failed");
+    const msg = e instanceof Error ? e.message : "Provisioning failed";
+    if (showProvisionDialog.value) {
+      provisionError.value = msg;
+    } else {
+      // Empty-field path: dialog was never shown, fall back to snackbar.
+      pluginError(msg);
+    }
   } finally {
     provisioning.value = false;
   }
@@ -940,15 +987,54 @@ watch(activeTab, async (tab) => {
       <!-- Provision dialog -->
       <v-dialog v-model="showProvisionDialog" max-width="520">
         <v-card>
-          <v-card-title>Provision {{ provisioningResource?.label }}</v-card-title>
+          <v-card-title class="d-flex align-center ga-2">
+            <v-icon :icon="provisioningResource?.icon || 'mdi-cube-outline'" />
+            Add {{ provisioningResource?.label }}
+          </v-card-title>
           <v-card-text>
+            <v-alert
+              v-if="provisionError"
+              type="error"
+              variant="tonal"
+              density="compact"
+              class="mb-4"
+            >
+              {{ provisionError }}
+            </v-alert>
             <template v-for="field in provisioningResource?.fields ?? []" :key="field.key">
+              <!-- Select field -->
+              <v-select
+                v-if="field.field_type === 'select'"
+                v-model="provisionStringFields[field.key]"
+                :label="field.label"
+                :hint="field.description"
+                :items="field.options"
+                :rules="field.required ? [makeRequiredRule(field.label)] : []"
+                variant="outlined"
+                density="compact"
+                class="mb-2"
+                persistent-hint
+              />
+              <!-- Boolean field -->
+              <v-switch
+                v-else-if="field.field_type === 'bool'"
+                v-model="provisionBoolFields[field.key]"
+                :label="field.label"
+                :hint="field.description"
+                color="primary"
+                density="compact"
+                class="mb-2"
+                persistent-hint
+              />
+              <!-- String / secret field -->
               <v-text-field
-                v-model="provisionFields[field.key]"
+                v-else
+                v-model="provisionStringFields[field.key]"
                 :label="field.label"
                 :hint="field.description"
                 :required="field.required"
                 :type="field.field_type === 'secret' ? 'password' : 'text'"
+                :rules="field.required ? [makeRequiredRule(field.label)] : []"
                 variant="outlined"
                 density="compact"
                 class="mb-2"
@@ -959,7 +1045,13 @@ watch(activeTab, async (tab) => {
           <v-card-actions>
             <v-spacer />
             <v-btn variant="text" @click="showProvisionDialog = false">Cancel</v-btn>
-            <v-btn color="primary" variant="flat" :loading="provisioning" @click="confirmProvision">
+            <v-btn
+              color="primary"
+              variant="flat"
+              :loading="provisioning"
+              :disabled="!provisionFormValid"
+              @click="confirmProvision"
+            >
               Provision
             </v-btn>
           </v-card-actions>
