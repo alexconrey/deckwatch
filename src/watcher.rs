@@ -1594,8 +1594,7 @@ async fn reconcile_application_plugins(state: &AppState) {
                             match crate::plugins::run_plugin(plugin, &ctx) {
                                 Ok(result) => {
                                     // Warnings are already logged inside run_plugin.
-                                    final_annotations
-                                        .extend(result.deployment_annotations.clone());
+                                    final_annotations.extend(result.deployment_annotations.clone());
                                     final_labels.extend(result.deployment_labels.clone());
                                 }
                                 Err(e) => {
