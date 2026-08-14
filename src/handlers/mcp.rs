@@ -16,7 +16,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::entities::{agent_feedback, builds, gitops_configs};
 use crate::handlers::applications;
-use crate::handlers::{addons, application_resources, gitops, ingresses, monitoring, settings, templates};
+use crate::handlers::{
+    addons, application_resources, gitops, ingresses, monitoring, settings, templates,
+};
 use crate::state::AppState;
 
 // ---------------------------------------------------------------------------
@@ -639,9 +641,9 @@ fn deckwatch_tool_definitions() -> Vec<serde_json::Value> {
         serde_json::json!({
             "name": "provision_resource",
             "description": "Provision a plugin-managed infrastructure resource for an application (e.g. an RDS database, S3 bucket). \
-The plugin runs its provision() function, returns injected env vars that are stamped into every deployment in the application, and the result is persisted. \
-Available resource_id values and required fields can be discovered via `list_plugins` (inspect the plugin metadata) or `list_application_resources` to see what is already provisioned. \
-Singleton resources (e.g. a database per app) will be rejected if one already exists.",
+        The plugin runs its provision() function, returns injected env vars that are stamped into every deployment in the application, and the result is persisted. \
+        Available resource_id values and required fields can be discovered via `list_plugins` (inspect the plugin metadata) or `list_application_resources` to see what is already provisioned. \
+        Singleton resources (e.g. a database per app) will be rejected if one already exists.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -662,8 +664,8 @@ Singleton resources (e.g. a database per app) will be rejected if one already ex
         serde_json::json!({
             "name": "deprovision_resource",
             "description": "Deprovision (tear down) a plugin-managed infrastructure resource from an application. \
-WARNING: This calls the plugin's deprovision() function, which tears down the underlying cloud infrastructure (e.g. deletes an RDS instance or S3 bucket) and removes the injected env vars from all application deployments. \
-This action is destructive and may result in data loss — confirm with the user before proceeding.",
+        WARNING: This calls the plugin's deprovision() function, which tears down the underlying cloud infrastructure (e.g. deletes an RDS instance or S3 bucket) and removes the injected env vars from all application deployments. \
+        This action is destructive and may result in data loss — confirm with the user before proceeding.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -679,8 +681,8 @@ This action is destructive and may result in data loss — confirm with the user
         serde_json::json!({
             "name": "refresh_resource",
             "description": "Re-run provision() in-place for an already-provisioned plugin resource to refresh its state (e.g. after an RDS instance becomes available following initial provisioning). \
-Uses the fields stored at provision time — no new input required. \
-Useful when a resource is stuck in a 'provisioning' or intermediate state and the plugin is expected to return updated env vars once the underlying infrastructure is ready.",
+        Uses the fields stored at provision time — no new input required. \
+        Useful when a resource is stuck in a 'provisioning' or intermediate state and the plugin is expected to return updated env vars once the underlying infrastructure is ready.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -2056,9 +2058,7 @@ async fn tool_associate_plugin(
             .find(|p| p.name.eq_ignore_ascii_case(plugin_name))
             .map(|p| p.name.clone())
             .ok_or_else(|| {
-                format!(
-                    "plugin '{plugin_name}' not loaded — add and enable it in Settings first"
-                )
+                format!("plugin '{plugin_name}' not loaded — add and enable it in Settings first")
             })?
     };
 
@@ -2192,7 +2192,13 @@ async fn tool_submit_agent_feedback(
     let summary = args["summary"].as_str().ok_or("summary is required")?;
     let detail = args["detail"].as_str().ok_or("detail is required")?;
 
-    let valid_categories = ["missing_tool", "mcp_tuning", "workflow", "documentation", "other"];
+    let valid_categories = [
+        "missing_tool",
+        "mcp_tuning",
+        "workflow",
+        "documentation",
+        "other",
+    ];
     if !valid_categories.contains(&category) {
         return Err(format!(
             "invalid category '{}'; must be one of: {}",
