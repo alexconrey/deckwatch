@@ -52,8 +52,8 @@ jobs:
         env:
           COREPACK_INTEGRITY_KEYS: ""
 
-      - name: vite build
-        run: pnpm exec vite build
+      - name: type check + build
+        run: pnpm run build
 
   helm-lint:
     name: Helm Lint
