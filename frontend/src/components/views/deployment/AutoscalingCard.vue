@@ -86,10 +86,10 @@ const handleSave = async () => {
       max_replicas: form.value.maxReplicas,
       target_cpu_utilization: form.value.cpuEnabled
         ? form.value.cpuTarget
-        : null,
+        : undefined,
       target_memory_utilization: form.value.memoryEnabled
         ? form.value.memoryTarget
-        : null,
+        : undefined,
     };
     hpa.value = await autoscalingApi.upsert(
       props.namespace,
@@ -168,8 +168,8 @@ const conditionColor = (status: string) => {
             </tr>
           </thead>
           <tbody>
-            <tr v-for="c in hpa.conditions" :key="c.condition_type">
-              <td>{{ c.condition_type }}</td>
+            <tr v-for="c in hpa.conditions" :key="c.type">
+              <td>{{ c.type }}</td>
               <td><v-chip :color="conditionColor(c.status)" size="x-small" variant="flat">{{ c.status }}</v-chip></td>
               <td class="text-secondary">{{ c.reason ?? "-" }}</td>
               <td class="text-secondary">{{ c.message ?? "-" }}</td>

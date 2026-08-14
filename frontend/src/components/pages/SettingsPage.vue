@@ -2363,7 +2363,7 @@ onMounted(load);
                       label="Default"
                       density="comfortable"
                       hide-details
-                      @update:model-value="(v: boolean) => { if (v) setIngressTemplateDefault(idx); else tpl.is_default = false; }"
+                      @update:model-value="(v: boolean | null) => { if (v) setIngressTemplateDefault(idx); else tpl.is_default = false; }"
                     />
                   </v-col>
                 </v-row>

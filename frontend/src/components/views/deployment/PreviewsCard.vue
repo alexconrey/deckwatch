@@ -113,7 +113,7 @@ async function loadBranchOptions() {
       tokenSecret: props.tokenSecret,
       namespace: props.namespace,
     });
-    branchOptions.value = res.branches.map((b) => b.name);
+    branchOptions.value = res.branches;
   } catch (e) {
     branchesError.value =
       e instanceof ApiError

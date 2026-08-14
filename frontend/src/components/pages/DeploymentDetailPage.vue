@@ -1617,6 +1617,7 @@ const handleDeleteIngress = async () => {
       v-model="showTerminalDialog"
       :namespace="namespace"
       :pod-name="terminalPod"
+      :containers="sidecarContainers"
     />
 
     <!-- Diagnostic drill-down drawer (StatusChip click) -->
