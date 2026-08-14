@@ -29,31 +29,15 @@ impl MigrationTrait for Migration {
                             .default(Expr::current_timestamp()),
                     )
                     // missing_tool | mcp_tuning | workflow | documentation | other
-                    .col(
-                        ColumnDef::new(AgentFeedback::Category)
-                            .string()
-                            .not_null(),
-                    )
-                    .col(
-                        ColumnDef::new(AgentFeedback::Summary)
-                            .string()
-                            .not_null(),
-                    )
-                    .col(
-                        ColumnDef::new(AgentFeedback::Detail)
-                            .text()
-                            .not_null(),
-                    )
+                    .col(ColumnDef::new(AgentFeedback::Category).string().not_null())
+                    .col(ColumnDef::new(AgentFeedback::Summary).string().not_null())
+                    .col(ColumnDef::new(AgentFeedback::Detail).text().not_null())
                     .col(
                         ColumnDef::new(AgentFeedback::SuggestedToolName)
                             .string()
                             .null(),
                     )
-                    .col(
-                        ColumnDef::new(AgentFeedback::SuggestedPrompt)
-                            .text()
-                            .null(),
-                    )
+                    .col(ColumnDef::new(AgentFeedback::SuggestedPrompt).text().null())
                     // pending | reviewed | actioned | dismissed
                     .col(
                         ColumnDef::new(AgentFeedback::Status)
