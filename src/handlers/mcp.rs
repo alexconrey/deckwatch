@@ -586,6 +586,18 @@ fn deckwatch_tool_definitions() -> Vec<serde_json::Value> {
             }
         }),
         serde_json::json!({
+            "name": "get_plugin_config",
+            "description": "Get the current configuration of a loaded plugin, including all config field values (secrets masked). Use this to audit plugin settings or understand what is configured before making changes.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "name": { "type": "string", "description": "Plugin name as configured in settings" }
+                },
+                "required": ["name"],
+                "additionalProperties": false
+            }
+        }),
+        serde_json::json!({
             "name": "validate_plugin",
             "description": "Validate a plugin before adding it to settings. Fetches the WASM binary from the given source, confirms it loads and exports an `apply` function, then dry-runs it with a configurable test context and reports exactly what env vars, sidecars, and Kubernetes resources it would inject. Does not modify any state.",
             "inputSchema": {
@@ -680,6 +692,7 @@ async fn handle_tool_call(state: &AppState, request: &JsonRpcRequest) -> JsonRpc
         "enable_plugin" => Some(tool_enable_plugin(state, args).await),
         "disable_plugin" => Some(tool_disable_plugin(state, args).await),
         "update_plugin_config" => Some(tool_update_plugin_config(state, args).await),
+        "get_plugin_config" => Some(tool_get_plugin_config(state, args).await),
         "validate_plugin" => Some(tool_validate_plugin(state, args).await),
         "associate_plugin" => Some(tool_associate_plugin(state, args).await),
         "disassociate_plugin" => Some(tool_disassociate_plugin(state, args).await),
@@ -1648,6 +1661,93 @@ async fn tool_update_plugin_config(
         "status": "updated — plugin reloading in background"
     }))
     .map_err(|e| e.to_string())
+}
+
+async fn tool_get_plugin_config(
+    state: &AppState,
+    args: &serde_json::Value,
+) -> Result<String, String> {
+    let name = args["name"].as_str().ok_or("name is required")?;
+
+    let s = settings::load_settings_from_db(state).await;
+    let cfg = s
+        .plugins
+        .iter()
+        .find(|p| p.name == name)
+        .ok_or_else(|| format!("plugin '{name}' not found in settings"))?;
+
+    // Check whether the plugin is currently loaded in memory.
+    let loaded_guard = state.plugins.read().await;
+    let loaded_plugin = loaded_guard.iter().find(|p| p.name == name);
+
+    let status = if !cfg.enabled {
+        "disabled"
+    } else if loaded_plugin.is_some() {
+        "loaded"
+    } else {
+        "not loaded"
+    };
+
+    // Build the config field list by merging the schema (from the loaded
+    // plugin's metadata) with the persisted values in settings.
+    let schema_fields: &[crate::plugins::ConfigField] = loaded_plugin
+        .map(|lp| lp.metadata.config_schema.as_slice())
+        .unwrap_or(&[]);
+
+    let mut config_entries: Vec<serde_json::Value> = Vec::new();
+    let mut schema_keys: std::collections::HashSet<&str> = std::collections::HashSet::new();
+
+    for field in schema_fields {
+        schema_keys.insert(field.key.as_str());
+        let is_secret = field.field_type == crate::plugins::ConfigFieldType::Secret;
+        let raw_value = cfg.config.get(&field.key);
+        let value: serde_json::Value = match (is_secret, raw_value) {
+            // Secret with a value set — mask it.
+            (true, Some(_)) => serde_json::Value::String("***".to_string()),
+            // Secret not yet configured.
+            (true, None) => serde_json::Value::Null,
+            // Non-secret with a value.
+            (false, Some(v)) => serde_json::Value::String(v.clone()),
+            // Non-secret not yet configured.
+            (false, None) => serde_json::Value::Null,
+        };
+        config_entries.push(serde_json::json!({
+            "key": field.key,
+            "label": field.label,
+            "description": field.description,
+            "field_type": field.field_type,
+            "value": value,
+            "is_secret": is_secret,
+        }));
+    }
+
+    // Append any config keys that exist in settings but were not declared in
+    // the schema (e.g. keys added manually before the plugin published a schema,
+    // or internal keys like CURRENT_TIMESTAMP that plugins read internally).
+    for (key, val) in &cfg.config {
+        if !schema_keys.contains(key.as_str()) {
+            config_entries.push(serde_json::json!({
+                "key": key,
+                "label": key,
+                "description": "",
+                "field_type": "string",
+                "value": val,
+                "is_secret": false,
+            }));
+        }
+    }
+
+    let result = serde_json::json!({
+        "name": cfg.name,
+        "enabled": cfg.enabled,
+        "status": status,
+        "allowed_hosts": cfg.allowed_hosts,
+        "inherit_env_keys": cfg.inherit_env_keys,
+        "config": config_entries,
+        "config_schema_fields": schema_fields.len(),
+    });
+
+    serde_json::to_string_pretty(&result).map_err(|e| e.to_string())
 }
 
 async fn tool_validate_plugin(
