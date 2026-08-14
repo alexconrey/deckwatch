@@ -121,26 +121,22 @@ pub async fn list(
 
     // Fetch deployments and cronjobs for all applications concurrently instead
     // of making 2 sequential K8s API calls per application row (N+1 pattern).
-    let k8s_results =
-        futures::future::join_all(rows.iter().map(|row| {
-            let dep_api = dep_api.clone();
-            let cj_api = cj_api.clone();
-            let sel = member_selector(&row.name);
-            async move {
-                let member_lp = ListParams::default().labels(&sel);
-                let t_dep = K8sTimer::new("deployments", "list");
-                let t_cj = K8sTimer::new("cronjobs", "list");
-                let (deps_res, cjs_res) = futures::future::join(
-                    dep_api.list(&member_lp),
-                    cj_api.list(&member_lp),
-                )
-                .await;
-                t_dep.finish(deps_res.is_ok());
-                t_cj.finish(cjs_res.is_ok());
-                (deps_res, cjs_res)
-            }
-        }))
-        .await;
+    let k8s_results = futures::future::join_all(rows.iter().map(|row| {
+        let dep_api = dep_api.clone();
+        let cj_api = cj_api.clone();
+        let sel = member_selector(&row.name);
+        async move {
+            let member_lp = ListParams::default().labels(&sel);
+            let t_dep = K8sTimer::new("deployments", "list");
+            let t_cj = K8sTimer::new("cronjobs", "list");
+            let (deps_res, cjs_res) =
+                futures::future::join(dep_api.list(&member_lp), cj_api.list(&member_lp)).await;
+            t_dep.finish(deps_res.is_ok());
+            t_cj.finish(cjs_res.is_ok());
+            (deps_res, cjs_res)
+        }
+    }))
+    .await;
 
     let mut applications = Vec::with_capacity(rows.len());
     for (row, (deps_res, cjs_res)) in rows.iter().zip(k8s_results) {

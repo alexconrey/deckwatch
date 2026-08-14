@@ -226,7 +226,8 @@ async fn check_and_build(
     let dep_api = state.deployments_api(ns)?;
     let dep = dep_api.get(dep_name).await?;
 
-    let job_name: String = trigger_build(state, ns, &dep, &remote_sha, &token, &auth_user, settings).await?;
+    let job_name: String =
+        trigger_build(state, ns, &dep, &remote_sha, &token, &auth_user, settings).await?;
     // Counter incremented once per build kickoff; success/failure is recorded
     // later in monitor_builds when the Job completes.
     metrics::record_gitops_build(ns, "started");
@@ -1177,7 +1178,8 @@ async fn monitor_builds(state: &AppState, http: &reqwest::Client) -> anyhow::Res
                         "all arch builds complete, creating manifest assembly job"
                     );
                     if let Err(e) =
-                        create_manifest_job(state, ns, dep_name, build_group, short_sha, &settings).await
+                        create_manifest_job(state, ns, dep_name, build_group, short_sha, &settings)
+                            .await
                     {
                         tracing::error!(
                             deployment = %dep_name,
