@@ -423,8 +423,10 @@ onMounted(() => {
           variant="outlined"
           density="comfortable"
           :loading="settingsLoading"
+          :rules="[(v: string) => !!v || 'Repository is required']"
           hint="Managed in Settings → Git Repositories"
           persistent-hint
+          required
           class="mb-1"
         >
           <template #item="{ props: itemProps, item }">
@@ -438,6 +440,8 @@ onMounted(() => {
           placeholder="https://github.com/org/repo"
           variant="outlined"
           density="comfortable"
+          :rules="[(v: string) => !!v || 'Repository URL is required']"
+          required
           class="mb-2"
         />
 
@@ -451,9 +455,11 @@ onMounted(() => {
               variant="outlined"
               density="comfortable"
               :loading="branchLoading"
+              :rules="[(v: string) => !!v || 'Branch is required']"
               :error-messages="branchError ? [branchError] : []"
               :menu-props="{ maxHeight: 300 }"
               auto-select-first
+              required
               @focus="fetchBranches"
               @update:search="() => {
                 if (!branchOptions.length && !branchLoading) fetchBranches();
@@ -490,8 +496,10 @@ onMounted(() => {
           variant="outlined"
           density="comfortable"
           :loading="settingsLoading"
+          :rules="[(v: string) => !!v || 'OCI registry is required — images built by GitOps must be pushed somewhere']"
           hint="Managed in Settings → OCI Registries. Any OCI-compliant registry works."
           persistent-hint
+          required
           class="mb-1"
         >
           <template #item="{ props: itemProps, item }">
@@ -503,10 +511,13 @@ onMounted(() => {
             <v-text-field
               v-model="form.ociRepository"
               label="Custom registry URL"
-              placeholder="ghcr.io/myorg/api or docker.io/myorg/api"
+              placeholder="registry.example.com/myapp"
+              hint="The repository GitOps will push built images to, e.g. ghcr.io/myorg/api"
+              persistent-hint
+              :rules="[(v: string) => !!v || 'OCI repository URL is required']"
               variant="outlined"
               density="comfortable"
-              hide-details
+              required
             />
           </v-col>
           <v-col v-if="canBrowseRegistry" cols="2">

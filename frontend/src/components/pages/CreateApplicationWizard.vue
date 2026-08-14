@@ -39,6 +39,8 @@ const HOST_RE = /^([a-z0-9]([-a-z0-9]*[a-z0-9])?)(\.[a-z0-9]([-a-z0-9]*[a-z0-9])
 
 const nameError = computed(() => {
   if (!appName.value) return "";
+  if (appName.value.includes("_"))
+    return "Resource names cannot contain underscores — Kubernetes only allows lowercase letters, numbers, and hyphens";
   if (appName.value.length > 63)
     return "Name must be 63 characters or fewer.";
   if (!DNS_RE.test(appName.value))

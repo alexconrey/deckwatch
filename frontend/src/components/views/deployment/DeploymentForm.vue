@@ -14,6 +14,7 @@ import {
   isCostIncreaseOverFactor,
   type HourlyCost,
 } from "@/utils/cost";
+import { k8sNameRules } from "@/utils/validation";
 
 const props = defineProps<{
   initialValues?: Partial<CreateDeploymentRequest>;
@@ -519,8 +520,8 @@ const probeHints: Record<string, string> = {
           v-model="form.name"
           label="Deployment Name"
           :disabled="isEdit"
-          :rules="[(v: string) => !!v || 'Required']"
-          hint="A unique name for your app (lowercase, hyphens allowed)"
+          :rules="k8sNameRules"
+          hint="Lowercase letters, digits, and hyphens only (e.g. my-api)"
           persistent-hint
           required
         />

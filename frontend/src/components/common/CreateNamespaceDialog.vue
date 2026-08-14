@@ -23,6 +23,10 @@ const namePattern = /^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$/;
 const nameRules = [
   (v: string) => !!v || "Name is required",
   (v: string) =>
+    !v.includes("_")
+      ? true
+      : "Resource names cannot contain underscores — Kubernetes only allows lowercase letters, numbers, and hyphens",
+  (v: string) =>
     namePattern.test(v) ||
     "Must be lowercase alphanumeric or '-', start/end with alphanumeric, up to 63 chars",
 ];
