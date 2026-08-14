@@ -205,6 +205,81 @@ pub async fn provision(
     Ok((StatusCode::CREATED, Json(row_to_response(inserted))))
 }
 
+// ── PATCH /api/namespaces/{ns}/applications/{name}/resources/{plugin}/{resource_id}
+//
+// Re-runs provision() with the stored fields and updates the record in-place.
+// Used to refresh state after async provisioning completes (e.g. RDS becomes
+// available after the initial "provisioning" response).
+
+pub async fn refresh(
+    State(state): State<AppState>,
+    Path((ns, app_name, plugin_name, resource_id)): Path<(String, String, String, String)>,
+) -> Result<Json<ProvisionedResource>, AppError> {
+    let _ = state.deployments_api(&ns)?;
+
+    let app_id = format!("{ns}/{app_name}");
+
+    let row = application_plugin_resources::Entity::find()
+        .filter(application_plugin_resources::Column::ApplicationId.eq(&app_id))
+        .filter(application_plugin_resources::Column::PluginName.eq(&plugin_name))
+        .filter(application_plugin_resources::Column::ResourceId.eq(&resource_id))
+        .one(&state.db)
+        .await
+        .map_err(|e| AppError::BadRequest(format!("database error: {e}")))?
+        .ok_or_else(|| {
+            AppError::NotFound(format!(
+                "no provisioned resource '{resource_id}' from plugin '{plugin_name}' found for application '{app_name}'"
+            ))
+        })?;
+
+    let fields: HashMap<String, String> = serde_json::from_str(&row.fields).unwrap_or_default();
+
+    let plugins = state.plugins.read().await;
+    let plugin = plugins
+        .iter()
+        .find(|p| p.name == plugin_name)
+        .ok_or_else(|| AppError::NotFound(format!("plugin '{plugin_name}' is not loaded")))?;
+
+    let req = ResourceProvisionRequest {
+        application_name: app_name.clone(),
+        namespace: ns.clone(),
+        resource_id: resource_id.clone(),
+        fields: fields.clone(),
+    };
+
+    let result: ResourceProvisionResult = crate::plugins::run_provision(plugin, &req)
+        .map_err(|e| AppError::BadRequest(format!("provision() failed: {e}")))?;
+
+    let kubernetes_resources = result.kubernetes_resources.clone();
+    let state_map = result.state.clone();
+    let deployment_annotations = result.deployment_annotations.clone();
+    let sidecars: Vec<SidecarSpec> = result.sidecars.clone();
+    drop(plugins);
+
+    if !kubernetes_resources.is_empty() {
+        crate::plugins::apply_kubernetes_resources(&kubernetes_resources, &state.kube_client).await;
+    }
+
+    let now = now_utc();
+    let state_json = serde_json::to_string(&state_map).unwrap_or_else(|_| "{}".to_string());
+    let annotations_json =
+        serde_json::to_string(&deployment_annotations).unwrap_or_else(|_| "{}".to_string());
+    let sidecars_json = serde_json::to_string(&sidecars).unwrap_or_else(|_| "[]".to_string());
+
+    let mut active: application_plugin_resources::ActiveModel = row.into();
+    active.state = Set(state_json);
+    active.annotations = Set(annotations_json);
+    active.sidecars = Set(sidecars_json);
+    active.updated_at = Set(now);
+
+    let updated = active
+        .update(&state.db)
+        .await
+        .map_err(|e| AppError::BadRequest(format!("failed to update resource: {e}")))?;
+
+    Ok(Json(row_to_response(updated)))
+}
+
 // ── DELETE /api/namespaces/{ns}/applications/{name}/resources/{plugin}/{resource_id}
 
 pub async fn deprovision(

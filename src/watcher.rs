@@ -58,27 +58,33 @@ pub fn get_oci_repository(dep: &Deployment) -> Option<&str> {
 
 pub async fn run_poller(state: AppState) {
     let mut interval = tokio::time::interval(std::time::Duration::from_secs(10));
+    let mut pending_interval = tokio::time::interval(std::time::Duration::from_secs(30));
     let http_client = reqwest::Client::new();
 
     loop {
-        interval.tick().await;
+        tokio::select! {
+            _ = interval.tick() => {
+                let cycle_start = Instant::now();
 
-        let cycle_start = Instant::now();
+                if let Err(e) = poll_cycle(&state, &http_client).await {
+                    tracing::error!(error = %e, "watcher poll cycle failed");
+                }
 
-        if let Err(e) = poll_cycle(&state, &http_client).await {
-            tracing::error!(error = %e, "watcher poll cycle failed");
+                if let Err(e) = monitor_builds(&state, &http_client).await {
+                    tracing::error!(error = %e, "watcher build monitor failed");
+                }
+
+                reconcile_application_plugins(&state).await;
+
+                // Update resource gauges (best-effort; errors are logged, not fatal).
+                update_resource_gauges(&state).await;
+
+                metrics::record_gitops_poll_duration(cycle_start.elapsed().as_secs_f64());
+            }
+            _ = pending_interval.tick() => {
+                reconcile_pending_resources(&state).await;
+            }
         }
-
-        if let Err(e) = monitor_builds(&state, &http_client).await {
-            tracing::error!(error = %e, "watcher build monitor failed");
-        }
-
-        reconcile_application_plugins(&state).await;
-
-        // Update resource gauges (best-effort; errors are logged, not fatal).
-        update_resource_gauges(&state).await;
-
-        metrics::record_gitops_poll_duration(cycle_start.elapsed().as_secs_f64());
     }
 }
 
@@ -1515,7 +1521,7 @@ async fn reconcile_application_plugins(state: &AppState) {
             continue;
         }
 
-        let env_vars: Vec<EnvVar> = env_map
+        let mut env_vars: Vec<EnvVar> = env_map
             .iter()
             .map(|(k, v)| EnvVar {
                 name: k.clone(),
@@ -1523,6 +1529,7 @@ async fn reconcile_application_plugins(state: &AppState) {
                 ..Default::default()
             })
             .collect();
+        env_vars.sort_by(|a, b| a.name.cmp(&b.name));
 
         let label_selector = format!("deckwatch.io/application={app_name}");
         let pp = PatchParams::apply("deckwatch-plugin-resources").force();
@@ -1661,6 +1668,175 @@ async fn reconcile_application_plugins(state: &AppState) {
                 tracing::warn!(namespace = %ns, error = %e, "reconcile_application_plugins: failed to list cronjobs");
             }
         }
+    }
+}
+
+/// Pending status values for provisioned resources.
+///
+/// A resource is considered pending if any `*_STATUS` key in its state JSON
+/// holds one of these values, or if it looks like a database resource
+/// (contains `DB_ENGINE` or `DB_STATUS`) but has no `DB_HOST` yet.
+const PENDING_STATUS_VALUES: &[&str] = &["provisioning", "creating", "modifying", "backing-up"];
+
+/// Return `true` if the serialised state JSON indicates the resource is still
+/// being provisioned (i.e. the watcher should keep polling).
+fn is_pending(state_json: &str) -> bool {
+    let state: HashMap<String, String> = match serde_json::from_str(state_json) {
+        Ok(m) => m,
+        Err(_) => return false,
+    };
+
+    // Any *_STATUS key whose value is a known in-progress string.
+    for (key, value) in &state {
+        if key.ends_with("_STATUS") && PENDING_STATUS_VALUES.contains(&value.as_str()) {
+            return true;
+        }
+    }
+
+    // Database resource with an empty or missing endpoint.
+    if state.contains_key("DB_ENGINE") || state.contains_key("DB_STATUS") {
+        let db_host = state.get("DB_HOST").map(String::as_str).unwrap_or("");
+        if db_host.is_empty() {
+            return true;
+        }
+    }
+
+    false
+}
+
+/// Background reconciler for provisioned plugin resources that are still pending.
+///
+/// Iterates every row in `application_plugin_resources` whose state looks like
+/// an in-progress provisioning (see [`is_pending`]). For each such row it
+/// re-calls the plugin's `provision()` export; if the returned state has grown
+/// or is no longer pending the DB row is updated so that the env-var reconciler
+/// and the UI reflect the real infrastructure state.
+///
+/// Errors from individual `provision()` calls are logged at WARN and never
+/// abort the loop — the row simply stays pending and is retried next cycle.
+async fn reconcile_pending_resources(state: &AppState) {
+    let rows = match application_plugin_resources::Entity::find()
+        .all(&state.db)
+        .await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::warn!(error = %e, "reconcile_pending_resources: failed to query db");
+            return;
+        }
+    };
+
+    let pending: Vec<_> = rows.into_iter().filter(|r| is_pending(&r.state)).collect();
+    if pending.is_empty() {
+        return;
+    }
+
+    // Snapshot the plugin list once so we hold the lock for the minimum time.
+    let plugins = {
+        let guard = state.plugins.read().await;
+        guard.clone()
+    };
+
+    for row in pending {
+        let plugin_name = row.plugin_name.clone();
+        let resource_id = row.resource_id.clone();
+        let current_state_json = row.state.clone();
+
+        // Parse application_id as "{ns}/{name}".
+        // Clone into owned strings so there is no live borrow on `row` when
+        // we later call `row.into()` to construct the ActiveModel.
+        let (ns, app_name) = match row.application_id.split_once('/') {
+            Some((n, a)) => (n.to_string(), a.to_string()),
+            None => continue,
+        };
+
+        // Skip if the plugin is not currently loaded.
+        let plugin = match plugins.iter().find(|p| p.name == plugin_name) {
+            Some(p) => p,
+            None => {
+                tracing::debug!(
+                    plugin = %plugin_name,
+                    namespace = %ns,
+                    application = %app_name,
+                    "reconcile_pending_resources: plugin not loaded, skipping"
+                );
+                continue;
+            }
+        };
+
+        let fields: HashMap<String, String> = serde_json::from_str(&row.fields).unwrap_or_default();
+
+        let req = crate::plugins::ResourceProvisionRequest {
+            application_name: app_name.to_string(),
+            namespace: ns.to_string(),
+            resource_id: resource_id.clone(),
+            fields,
+        };
+
+        let result = match crate::plugins::run_provision(plugin, &req) {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::warn!(
+                    namespace = %ns,
+                    application = %app_name,
+                    plugin = %plugin_name,
+                    resource_id = %resource_id,
+                    error = %e,
+                    "reconcile_pending_resources: provision() failed, will retry next cycle"
+                );
+                continue;
+            }
+        };
+
+        let current_state: HashMap<String, String> =
+            serde_json::from_str(&current_state_json).unwrap_or_default();
+        let keys_before = current_state.len();
+        let keys_after = result.state.len();
+
+        let new_state_json =
+            serde_json::to_string(&result.state).unwrap_or_else(|_| "{}".to_string());
+
+        // Only write to the DB if the state grew or is no longer pending.
+        let state_changed = keys_after > keys_before || !is_pending(&new_state_json);
+        if !state_changed {
+            continue;
+        }
+
+        let db_host = result.state.get("DB_HOST").cloned().unwrap_or_default();
+        let new_annotations_json = serde_json::to_string(&result.deployment_annotations)
+            .unwrap_or_else(|_| "{}".to_string());
+        let new_sidecars_json =
+            serde_json::to_string(&result.sidecars).unwrap_or_else(|_| "[]".to_string());
+        let now = now_utc();
+
+        let mut active: application_plugin_resources::ActiveModel = row.into();
+        active.state = Set(new_state_json);
+        active.annotations = Set(new_annotations_json);
+        active.sidecars = Set(new_sidecars_json);
+        active.updated_at = Set(now);
+
+        if let Err(e) = active.update(&state.db).await {
+            tracing::warn!(
+                namespace = %ns,
+                application = %app_name,
+                plugin = %plugin_name,
+                resource_id = %resource_id,
+                error = %e,
+                "reconcile_pending_resources: failed to update row"
+            );
+            continue;
+        }
+
+        tracing::info!(
+            namespace = %ns,
+            application = %app_name,
+            plugin = %plugin_name,
+            resource_id = %resource_id,
+            state_keys_before = keys_before,
+            state_keys_after = keys_after,
+            db_host = %db_host,
+            "resource status updated"
+        );
     }
 }
 

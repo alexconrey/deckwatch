@@ -711,3 +711,81 @@ fn reconcile_skips_malformed_app_id() {
     let app_id = "no-slash-here";
     assert!(app_id.split_once('/').is_none());
 }
+
+// ── is_pending tests ─────────────────────────────────────────────────────────
+
+#[test]
+fn is_pending_returns_false_for_empty_state() {
+    assert!(!is_pending("{}"));
+}
+
+#[test]
+fn is_pending_returns_false_for_invalid_json() {
+    assert!(!is_pending("not-json"));
+}
+
+#[test]
+fn is_pending_true_when_status_key_is_provisioning() {
+    let state = r#"{"DB_STATUS": "provisioning", "DB_ENGINE": "postgres"}"#;
+    assert!(is_pending(state));
+}
+
+#[test]
+fn is_pending_true_when_status_key_is_creating() {
+    let state = r#"{"DB_STATUS": "creating"}"#;
+    assert!(is_pending(state));
+}
+
+#[test]
+fn is_pending_true_when_status_key_is_modifying() {
+    let state = r#"{"DB_STATUS": "modifying", "DB_HOST": "example.rds.amazonaws.com"}"#;
+    assert!(is_pending(state));
+}
+
+#[test]
+fn is_pending_true_when_status_key_is_backing_up() {
+    let state = r#"{"DB_STATUS": "backing-up", "DB_HOST": "example.rds.amazonaws.com"}"#;
+    assert!(is_pending(state));
+}
+
+#[test]
+fn is_pending_false_when_status_is_available_and_host_present() {
+    let state = r#"{"DB_STATUS": "available", "DB_ENGINE": "postgres", "DB_HOST": "bd-k2crm-db.xxx.rds.amazonaws.com"}"#;
+    assert!(!is_pending(state));
+}
+
+#[test]
+fn is_pending_true_when_db_engine_present_but_host_empty() {
+    let state = r#"{"DB_ENGINE": "postgres", "DB_HOST": ""}"#;
+    assert!(is_pending(state));
+}
+
+#[test]
+fn is_pending_true_when_db_engine_present_and_host_missing() {
+    let state = r#"{"DB_ENGINE": "postgres", "DB_STATUS": "available"}"#;
+    assert!(is_pending(state));
+}
+
+#[test]
+fn is_pending_false_when_db_engine_and_host_both_present() {
+    let state = r#"{"DB_ENGINE": "postgres", "DB_HOST": "mydb.cluster.rds.amazonaws.com", "DB_STATUS": "available"}"#;
+    assert!(!is_pending(state));
+}
+
+#[test]
+fn is_pending_true_for_non_db_status_key_with_provisioning_value() {
+    let state = r#"{"S3_STATUS": "provisioning", "S3_BUCKET": ""}"#;
+    assert!(is_pending(state));
+}
+
+#[test]
+fn is_pending_false_for_non_db_resource_with_non_pending_status() {
+    let state = r#"{"S3_STATUS": "ready", "S3_BUCKET": "my-bucket"}"#;
+    assert!(!is_pending(state));
+}
+
+#[test]
+fn is_pending_false_for_state_with_no_status_keys_and_no_db_keys() {
+    let state = r#"{"SOME_KEY": "some_value", "ANOTHER_KEY": "another_value"}"#;
+    assert!(!is_pending(state));
+}
