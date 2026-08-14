@@ -344,7 +344,12 @@ pub async fn fetch_and_validate(
     let bytes = match fetch_bytes(cfg, &http, &settings, state).await {
         Ok(b) => b,
         Err(e) => {
-            metrics::record_plugin_execution(&cfg.name, "validate", "error", start.elapsed().as_secs_f64());
+            metrics::record_plugin_execution(
+                &cfg.name,
+                "validate",
+                "error",
+                start.elapsed().as_secs_f64(),
+            );
             metrics::record_plugin_error(&cfg.name, "fetch_failed");
             return ValidationResult {
                 wasm_size_bytes: 0,
@@ -369,7 +374,12 @@ pub async fn fetch_and_validate(
 
     match run_plugin(&plugin, &test_ctx) {
         Ok(result) => {
-            metrics::record_plugin_execution(&cfg.name, "validate", "ok", start.elapsed().as_secs_f64());
+            metrics::record_plugin_execution(
+                &cfg.name,
+                "validate",
+                "ok",
+                start.elapsed().as_secs_f64(),
+            );
             ValidationResult {
                 wasm_size_bytes: size,
                 apply_export_found: true,
@@ -379,7 +389,12 @@ pub async fn fetch_and_validate(
             }
         }
         Err(e) => {
-            metrics::record_plugin_execution(&cfg.name, "validate", "error", start.elapsed().as_secs_f64());
+            metrics::record_plugin_execution(
+                &cfg.name,
+                "validate",
+                "error",
+                start.elapsed().as_secs_f64(),
+            );
             metrics::record_plugin_error(&cfg.name, "apply_failed");
             ValidationResult {
                 wasm_size_bytes: size,
@@ -1469,7 +1484,12 @@ mod tests {
         };
         let mut annotations = BTreeMap::new();
 
-        apply_service_account(&plugin, "my-sa".to_string(), &mut pod_spec, &mut annotations);
+        apply_service_account(
+            &plugin,
+            "my-sa".to_string(),
+            &mut pod_spec,
+            &mut annotations,
+        );
 
         assert_eq!(
             pod_spec.service_account_name.as_deref(),
