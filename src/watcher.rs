@@ -1604,7 +1604,9 @@ async fn reconcile_application_plugins(state: &AppState) {
                             deployment = %dep_name,
                             "reconcile_application_plugins: patch unchanged, skipping"
                         );
-                    } else if let Err(e) = dep_api.patch(&dep_name, &pp, &Patch::Apply(&patch)).await {
+                    } else if let Err(e) =
+                        dep_api.patch(&dep_name, &pp, &Patch::Apply(&patch)).await
+                    {
                         tracing::warn!(
                             namespace = %ns,
                             deployment = %dep_name,
