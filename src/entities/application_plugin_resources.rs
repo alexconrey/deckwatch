@@ -20,6 +20,9 @@ pub struct Model {
     /// JSON array of SidecarSpec objects to inject into all application deployments.
     #[sea_orm(column_type = "Text")]
     pub sidecars: String,
+    /// JSON array of SidecarSpec objects to prepend to `initContainers` on all application deployments.
+    #[sea_orm(column_type = "Text")]
+    pub init_containers: String,
     pub created_at: DateTimeUtc,
     pub updated_at: DateTimeUtc,
 }

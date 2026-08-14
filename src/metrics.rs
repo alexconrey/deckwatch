@@ -237,11 +237,13 @@ pub fn sse_closed() {
     gauge!("deckwatch_active_sse_connections").decrement(1.0);
 }
 
-/// Record a gitops build result. Call once per build completion.
-pub fn record_gitops_build(namespace: &str, status: &str) {
+/// Record a gitops build result. Call once per build start or completion.
+/// - `deployment`: the deployment name (e.g. `my-app`)
+pub fn record_gitops_build(namespace: &str, deployment: &str, status: &str) {
     counter!(
         "deckwatch_gitops_builds_total",
         "namespace" => namespace.to_owned(),
+        "deployment" => deployment.to_owned(),
         "status" => status.to_owned(),
     )
     .increment(1);

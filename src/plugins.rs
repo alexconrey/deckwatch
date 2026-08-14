@@ -1576,7 +1576,11 @@ mod tests {
             make_plugin("consumer", vec![], vec!["capability-a"]),
         ];
         let sorted = sort_by_dependencies(&plugins);
-        assert_eq!(sorted.len(), 2, "both plugins should survive when dep is met");
+        assert_eq!(
+            sorted.len(),
+            2,
+            "both plugins should survive when dep is met"
+        );
         let names: Vec<&str> = sorted.iter().map(|p| p.name.as_str()).collect();
         assert_eq!(names, vec!["provider", "consumer"]);
     }
@@ -1593,8 +1597,14 @@ mod tests {
 
     #[test]
     fn version_gte_handles_missing_components() {
-        assert!(version_gte("1", "0.9.9"), "single-component version treated as 1.0.0");
-        assert!(version_gte("1.2", "1.1.9"), "two-component version treated as 1.2.0");
+        assert!(
+            version_gte("1", "0.9.9"),
+            "single-component version treated as 1.0.0"
+        );
+        assert!(
+            version_gte("1.2", "1.1.9"),
+            "two-component version treated as 1.2.0"
+        );
     }
 
     #[test]
