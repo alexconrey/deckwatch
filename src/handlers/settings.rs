@@ -52,8 +52,8 @@ pub struct DeckwatchSettings {
     /// the secret name per deployment.
     #[serde(default)]
     pub git_token_secrets: Vec<GitTokenSecret>,
-    /// Distributed-tracing wiring for the OpenTelemetry Collector addon and
-    /// the trace-viewer UI. Optional so a settings ConfigMap that predates
+    /// Distributed-tracing wiring for the OpenTelemetry Collector and the
+    /// trace-viewer UI. Optional so a settings ConfigMap that predates
     /// this field still deserializes; a missing block means "tracing not
     /// configured" and the tracing handler returns `unavailable_reason`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -130,7 +130,7 @@ fn default_marketplace_url() -> String {
 /// Groups map to tools by name pattern:
 /// - `namespaces`  → tools containing "namespace"
 /// - `deployments` → tools containing "deployment" + scale/restart/rollback
-/// - `applications`→ create_application, list_addons, attach_addon, detach_addon, list_templates
+/// - `applications`→ create_application, list_templates
 /// - `gitops`      → tools containing "gitops" or "build"
 /// - `ingresses`   → tools containing "ingress"
 /// - `pods`        → tools containing "pod"
@@ -306,7 +306,7 @@ pub struct GitTokenSecret {
 }
 
 /// Distributed-tracing consumer settings. Written by the operator, read by
-/// the tracing handler and the OpenTelemetry Collector addon. See
+/// the tracing handler and the OpenTelemetry Collector. See
 /// `docs/TRACING.md` sec 6.3 for the mapping to values.yaml.
 ///
 /// Split into `otlp_endpoint` (write path: where the sidecar collector
@@ -321,8 +321,8 @@ pub struct TracingSettings {
     /// frontend "Open in UI" deep-link. Blank/unknown defaults to `tempo`.
     #[serde(default)]
     pub backend_kind: String,
-    /// OTLP gRPC endpoint the OpenTelemetry Collector sidecar exports to.
-    /// Empty means the sidecar addon will point at localhost by default --
+    /// OTLP gRPC endpoint the OpenTelemetry Collector exports to.
+    /// Empty means no external tracing backend is configured --
     /// operators must set this for spans to actually leave the pod.
     #[serde(default)]
     pub otlp_endpoint: String,

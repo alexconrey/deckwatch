@@ -168,8 +168,7 @@ export function recordApiCall(
     .replace(/\/pods\/[^/]+/, "/pods/{pod_name}")
     .replace(/\/ingresses\/[^/]+/, "/ingresses/{name}")
     .replace(/\/cronjobs\/[^/]+/, "/cronjobs/{name}")
-    .replace(/\/containers\/[^/]+/, "/containers/{container_name}")
-    .replace(/\/addons\/[^/]+/, "/addons/{addon_id}");
+    .replace(/\/containers\/[^/]+/, "/containers/{container_name}");
 
   apiCalls.push({
     path: normalized,

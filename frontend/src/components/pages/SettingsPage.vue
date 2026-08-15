@@ -427,9 +427,9 @@ const mcpTuningGroups = [
     placeholder: "e.g. Always set resource requests and limits. Production deployments require readiness probes.",
   },
   {
-    key: "applications", label: "Applications & Addons", icon: "mdi-application-outline",
-    examples: ["create_application", "attach_addon", "list_templates"],
-    placeholder: "e.g. Use the web-app template for all HTTP services. Attach Redis only for stateful workloads.",
+    key: "applications", label: "Applications", icon: "mdi-application-outline",
+    examples: ["create_application", "list_templates"],
+    placeholder: "e.g. Use the web-app template for all HTTP services.",
   },
   {
     key: "gitops", label: "GitOps & Builds", icon: "mdi-source-branch",
@@ -1355,9 +1355,9 @@ onMounted(load);
         <div v-else-if="section === 'storage'">
           <h3 class="text-h6 mb-2">Default storage class</h3>
           <p class="text-body-2 text-secondary mb-3">
-            When set, addons that provision persistent volumes (e.g. PostgreSQL)
-            will use this storage class instead of the cluster default. Leave as
-            "None" to let the cluster decide.
+            When set, workloads that provision persistent volumes will use this
+            storage class instead of the cluster default. Leave as "None" to let
+            the cluster decide.
           </p>
 
           <v-select
