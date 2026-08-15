@@ -450,42 +450,6 @@ export interface AddContainerRequest {
   resource_requests?: ResourceSpec;
 }
 
-// --- Addons ---
-
-export interface AddonEnvVar {
-  name: string;
-  value: string;
-}
-
-export interface AddonResourceSpec {
-  cpu: string | null;
-  memory: string | null;
-}
-
-export interface AddonDefinition {
-  id: string;
-  name: string;
-  description: string;
-  image: string;
-  default_port: number | null;
-  default_env: AddonEnvVar[];
-  default_resources: AddonResourceSpec | null;
-}
-
-export interface AddonListResponse {
-  addons: AddonDefinition[];
-}
-
-export interface AttachAddonRequest {
-  container_name?: string;
-  port?: number;
-  env?: { name: string; value: string }[];
-  resource_limits?: ResourceSpec;
-  resource_requests?: ResourceSpec;
-  storage?: string;
-  storage_class?: string;
-}
-
 // --- AI Diagnostics types ---
 
 export type DiagAgent = "claude" | "codex";
@@ -816,13 +780,6 @@ export interface UpdateApplicationRequest {
 export interface AddMemberRequest {
   kind: string;
   resource_name: string;
-}
-
-export interface UpdateAddonRequest {
-  port?: number;
-  env?: { name: string; value: string }[];
-  resource_limits?: ResourceSpec;
-  resource_requests?: ResourceSpec;
 }
 
 // --- GitOps Settings types ---

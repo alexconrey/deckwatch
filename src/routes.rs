@@ -11,7 +11,7 @@ use crate::audit;
 use crate::auth::{self, AuthConfig};
 use crate::handlers::registry::RegistryStore;
 use crate::handlers::{
-    addons, admission, agent_feedback, ai_fix, application_resources, applications, autoscaling,
+    admission, agent_feedback, ai_fix, application_resources, applications, autoscaling,
     configmaps_ui, cronjobs, deployments, deployments_ux, diagnostics, docs, events, exec, git,
     gitops, health, ingressclasses, ingresses, license, logs, mcp, monitoring, namespaces, nodes,
     plugins, pods, portforward, prometheus_query, promote, registry, registry_ui, resource_metrics,
@@ -182,13 +182,6 @@ pub fn build_router(
         .route("/api/namespaces/{ns}/cronjobs", get(cronjobs::list))
         .route("/api/namespaces/{ns}/cronjobs/{name}", get(cronjobs::get))
         .route("/api/nodes", get(nodes::list_nodes))
-        .route("/api/addons", get(addons::list))
-        .route(
-            "/api/namespaces/{ns}/deployments/{name}/addons/{addon_id}",
-            post(addons::attach)
-                .patch(addons::update)
-                .delete(addons::detach),
-        )
         .route(
             "/api/templates",
             get(templates::list).put(templates::update),

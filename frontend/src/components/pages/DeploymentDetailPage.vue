@@ -33,7 +33,6 @@ import GitOpsCard from "@/components/views/deployment/GitOpsCard.vue";
 import YamlViewer from "@/components/common/YamlViewer.vue";
 import { formatAge } from "@/utils/format";
 import YamlEditor from "@/components/common/YamlEditor.vue";
-import AddonsCard from "@/components/views/deployment/AddonsCard.vue";
 import SidecarManager from "@/components/views/deployment/SidecarManager.vue";
 import MetricsDetailCard from "@/components/views/deployment/MetricsDetailCard.vue";
 import HistoryCard from "@/components/views/deployment/HistoryCard.vue";
@@ -1140,14 +1139,6 @@ const handleDeleteIngress = async () => {
 
       <!-- GitOps -->
       <GitOpsCard :namespace="namespace" :deployment-name="name" />
-
-      <!-- Addons -->
-      <AddonsCard
-        :namespace="namespace"
-        :deployment-name="name"
-        :containers="sidecarContainers"
-        @changed="fetchDetail"
-      />
 
       <!-- Sidecar Containers -->
       <SidecarManager

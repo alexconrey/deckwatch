@@ -1,5 +1,5 @@
 #![allow(dead_code, unused_imports, clippy::manual_clamp)]
-//! Distributed tracing query proxy for the tracing addon UI.
+//! Distributed tracing query proxy for the tracing UI.
 //!
 //! Deckwatch does not itself store spans -- this handler proxies a curated
 //! set of trace queries to whatever backend the operator configured
@@ -46,8 +46,7 @@ use crate::state::AppState;
 #[derive(Debug, Deserialize)]
 pub struct ListTracesQuery {
     /// Service name to search for. Matches `service.name` in OTLP semantic
-    /// conventions and is what the collector sidecar sets to the deployment
-    /// name by default (see `handlers::addons::catalog()`).
+    /// conventions.
     pub service: String,
     /// Cap on returned trace summaries. Backend-side hard limit is
     /// `MAX_TRACES_PER_QUERY`; user values above that are silently clamped.

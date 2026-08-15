@@ -7,20 +7,13 @@ import { tracingApi, traceUrlFor, type TraceSummary } from "@/api/tracing";
 // freshness — mirrors the resource-metrics card polling story rather than
 // the logs viewer's tight loop.
 //
-// The card auto-hides when tracing is not configured AND no addon is
-// attached, so an install without tracing wired up isn't cluttered with
-// a permanent "not configured" callout. Once the addon lands the card
-// appears with the callout, guiding the operator toward settings.
+// The card auto-hides when tracing is not configured, so an install
+// without tracing wired up isn't cluttered with a permanent "not
+// configured" callout.
 
 const props = defineProps<{
   namespace: string;
   deploymentName: string;
-  // From DeploymentDetailPage: the attached-addons list, filtered to
-  // otel-collector. Empty means no tracing sidecar → we still render the
-  // card if the backend returns traces (backend may be receiving spans
-  // from a manually-instrumented app) but hide the "attach the addon"
-  // hint.
-  hasCollectorAddon: boolean;
 }>();
 
 const traces = ref<TraceSummary[]>([]);
@@ -41,8 +34,7 @@ const load = async () => {
     const res = await tracingApi.listTraces(
       props.namespace,
       props.deploymentName,
-      // Sidecar defaults service.name to the deployment name via
-      // interpolate() in src/handlers/addons.rs -- same value here.
+      // Use the deployment name as the service.name for trace lookups.
       props.deploymentName,
       TRACE_LIMIT,
     );
@@ -77,10 +69,9 @@ watch(
   },
 );
 
-// Card is hidden when: no traces, no backend, no addon attached. That
+// Card is hidden when: no traces and no backend configured. That
 // keeps deployments without tracing wired up from getting a dead card.
 const shouldRender = computed(() => {
-  if (props.hasCollectorAddon) return true;
   if (traces.value.length > 0) return true;
   if (unavailableReason.value !== null) return false;
   return false;
@@ -157,10 +148,6 @@ const shortId = (id: string): string =>
       class="text-center py-4 text-secondary text-body-2"
     >
       No traces recorded yet
-      <div v-if="hasCollectorAddon" class="text-caption mt-1">
-        The collector is attached — spans should appear within a few seconds
-        of the next request.
-      </div>
     </div>
 
     <v-table v-else-if="traces.length > 0" density="compact">

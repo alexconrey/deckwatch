@@ -71,7 +71,6 @@ fn test_tools_list_tool_names() {
     let expected = [
         // Deckwatch-specific
         "create_application",
-        "list_addons",
         "list_templates",
         "configure_gitops",
         "get_gitops_status",
@@ -289,40 +288,6 @@ async fn test_upstream_tool_dispatch() {
         assert_eq!(err.code, -32000);
         assert!(!err.message.is_empty());
     }
-}
-
-#[tokio::test]
-async fn test_list_addons_returns_catalog() {
-    let state = build_test_state().await;
-    let req = JsonRpcRequest {
-        jsonrpc: "2.0".to_string(),
-        id: Some(json!(30)),
-        method: "tools/call".to_string(),
-        params: json!({
-            "name": "list_addons",
-            "arguments": {}
-        }),
-    };
-
-    let resp = handle_tool_call(&state, &req).await;
-    assert!(
-        resp.error.is_none(),
-        "list_addons should succeed without a cluster"
-    );
-    let result = resp.result.expect("should have result");
-    let text = result["content"][0]["text"]
-        .as_str()
-        .expect("should have text");
-    let parsed: serde_json::Value = serde_json::from_str(text).expect("should be valid JSON");
-    let addons = parsed["addons"]
-        .as_array()
-        .expect("should have addons array");
-    let ids: Vec<&str> = addons.iter().filter_map(|a| a["id"].as_str()).collect();
-    assert!(
-        ids.contains(&"postgres"),
-        "catalog should include postgres addon"
-    );
-    assert!(ids.contains(&"redis"), "catalog should include redis addon");
 }
 
 #[tokio::test]
