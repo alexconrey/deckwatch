@@ -20,9 +20,7 @@ use crate::entities::{
     agent_feedback, application_plugin_resources, application_plugins, builds, gitops_configs,
 };
 use crate::handlers::applications;
-use crate::handlers::{
-    application_resources, gitops, ingresses, monitoring, settings, templates,
-};
+use crate::handlers::{application_resources, gitops, ingresses, monitoring, settings, templates};
 use crate::state::AppState;
 use sea_orm::sea_query::{Expr, Func};
 
