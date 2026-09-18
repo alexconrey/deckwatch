@@ -789,3 +789,58 @@ fn is_pending_false_for_state_with_no_status_keys_and_no_db_keys() {
     let state = r#"{"SOME_KEY": "some_value", "ANOTHER_KEY": "another_value"}"#;
     assert!(!is_pending(state));
 }
+
+// ── image_base tests ──────────────────────────────────────────────────────────
+
+#[test]
+fn image_base_strips_tag_from_ghcr_image() {
+    assert_eq!(image_base("ghcr.io/org/app:v1"), "ghcr.io/org/app");
+}
+
+#[test]
+fn image_base_strips_digest_from_ghcr_image() {
+    assert_eq!(
+        image_base("ghcr.io/org/app@sha256:abc123"),
+        "ghcr.io/org/app"
+    );
+}
+
+#[test]
+fn image_base_plain_name_no_tag_no_registry() {
+    assert_eq!(image_base("ubuntu"), "ubuntu");
+}
+
+#[test]
+fn image_base_plain_name_with_tag() {
+    assert_eq!(image_base("ubuntu:22.04"), "ubuntu");
+}
+
+#[test]
+fn image_base_registry_with_port_strips_tag_not_port() {
+    assert_eq!(
+        image_base("registry:5000/org/app:tag"),
+        "registry:5000/org/app"
+    );
+}
+
+#[test]
+fn image_base_registry_with_port_strips_digest() {
+    assert_eq!(
+        image_base("registry:5000/org/app@sha256:abc"),
+        "registry:5000/org/app"
+    );
+}
+
+#[test]
+fn image_base_same_base_different_tags_are_equal() {
+    let a = image_base("ghcr.io/org/app:v1");
+    let b = image_base("ghcr.io/org/app:v2");
+    assert_eq!(a, b);
+}
+
+#[test]
+fn image_base_different_repos_are_not_equal() {
+    let a = image_base("ghcr.io/org/app:v1");
+    let b = image_base("ghcr.io/org/other:v1");
+    assert_ne!(a, b);
+}
