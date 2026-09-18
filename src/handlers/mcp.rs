@@ -2601,6 +2601,12 @@ async fn tool_mcp_update_deployment(
         || args.get("replicas").is_some()
         || args.get("env").is_some()
         || args.get("env_from").is_some()
+        || args.get("command").is_some()
+        || args.get("args").is_some()
+        || args.get("port").is_some()
+        || args.get("ports").is_some()
+        || args.get("resource_limits").is_some()
+        || args.get("resource_requests").is_some()
         || args.get("liveness_probe").is_some()
         || args.get("readiness_probe").is_some()
         || args.get("startup_probe").is_some();
@@ -2614,8 +2620,9 @@ async fn tool_mcp_update_deployment(
 
     if service_account.is_none() && !has_other_updates {
         return Err(
-            "At least one field must be provided: image, replicas, env, env_from, \
-             liveness_probe, readiness_probe, startup_probe, or service_account"
+            "At least one field must be provided: image, replicas, env, env_from, command, \
+             args, port, ports, resource_limits, resource_requests, liveness_probe, \
+             readiness_probe, startup_probe, or service_account"
                 .to_string(),
         );
     }
@@ -2629,7 +2636,7 @@ async fn tool_mcp_update_deployment(
         });
         api.patch(
             name,
-            &kube::api::PatchParams::apply("deckwatch"),
+            &kube::api::PatchParams::default(),
             &kube::api::Patch::Merge(patch),
         )
         .await
@@ -2663,7 +2670,7 @@ async fn tool_mcp_create_pod(
     state: &AppState,
     args: &serde_json::Value,
 ) -> Result<String, String> {
-    use k8s_openapi::api::core::v1::{Container, Pod, PodSpec};
+    use k8s_openapi::api::core::v1::{Container, EnvVar, Pod, PodSpec};
     use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
     use kube::api::PostParams;
     use std::collections::BTreeMap;
@@ -2686,6 +2693,18 @@ async fn tool_mcp_create_pod(
         .unwrap_or("Never")
         .to_string();
 
+    let env: Option<Vec<EnvVar>> = args.get("env").and_then(|v| {
+        v.as_object().map(|map| {
+            map.iter()
+                .map(|(k, val)| EnvVar {
+                    name: k.clone(),
+                    value: val.as_str().map(|s| s.to_string()),
+                    ..Default::default()
+                })
+                .collect()
+        })
+    });
+
     let mut labels = BTreeMap::new();
     labels.insert("app".to_string(), name.to_string());
     labels.insert(
@@ -2706,6 +2725,7 @@ async fn tool_mcp_create_pod(
                 name: name.to_string(),
                 image: Some(image.to_string()),
                 command,
+                env,
                 ..Default::default()
             }],
             restart_policy: Some(restart_policy),
@@ -2714,7 +2734,8 @@ async fn tool_mcp_create_pod(
         ..Default::default()
     };
 
-    let pods_api: kube::Api<Pod> = kube::Api::namespaced(state.kube_client.clone(), ns);
+    // Use state.pods_api() to enforce the namespace allowlist.
+    let pods_api = state.pods_api(ns).map_err(|e| e.to_string())?;
     let created = pods_api
         .create(&PostParams::default(), &pod)
         .await
@@ -2825,6 +2846,7 @@ fn enhanced_create_pod_tool_definition() -> serde_json::Value {
                 "name": { "type": "string", "description": "Pod name" },
                 "image": { "type": "string", "description": "Container image" },
                 "command": { "type": "array", "items": { "type": "string" }, "description": "Command to run (optional)" },
+                "env": { "type": "object", "description": "Environment variables as key-value string pairs (optional)", "additionalProperties": { "type": "string" } },
                 "restart_policy": { "type": "string", "description": "Restart policy (default: Never)", "enum": ["Never", "Always", "OnFailure"] },
                 "service_account": { "type": "string", "description": "Service account name to assign to the pod (optional)" }
             },
