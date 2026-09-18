@@ -58,6 +58,10 @@ async fn build_state() -> AppState {
         ai_rate_limiter: RateLimiter::default(),
         db,
         encryption_key: String::new(),
+        plugins: std::sync::Arc::new(tokio::sync::RwLock::new(vec![])),
+        plugin_patch_fingerprints: std::sync::Arc::new(tokio::sync::Mutex::new(
+            std::collections::HashMap::new(),
+        )),
     }
 }
 
