@@ -111,6 +111,27 @@ async fn handle_initialize(state: &AppState, request: &JsonRpcRequest) -> JsonRp
         instructions_parts.push(global);
     }
 
+    // Fixed operational guidance — always injected, not admin-configurable.
+    // These are constants derived from platform architecture decisions, not
+    // per-environment preferences.
+    let fixed_guidance = [
+        "Before recommending CPU or memory limit increases for any deployment, \
+         always check actual resource utilization first using the get_metrics tool. \
+         Do not recommend increases based on deployment config alone.",
+        "When configuring GitOps (set_gitops), always use HTTPS repository URLs. \
+         Do not use SSH URLs (git@). HTTPS is required for credential-based auth \
+         in this environment.",
+        "Secrets are namespace-scoped. Do not reference or reuse secrets from other \
+         namespaces. If an application needs third-party API credentials, it must have \
+         its own secret in its own namespace.",
+        "When the AWS RDS plugin is enabled for an application, do not add IRSA annotations \
+         (eks.amazonaws.com/role-arn) to service accounts manually. The plugin manages \
+         service account creation and annotation automatically via provision_resource.",
+    ];
+    for guidance in &fixed_guidance {
+        instructions_parts.push(guidance.to_string());
+    }
+
     // Inject per-plugin MCP tuning blocks from admin-saved values.
     {
         let plugins_guard = state.plugins.read().await;
@@ -190,6 +211,42 @@ async fn handle_tools_list(state: &AppState, request: &JsonRpcRequest) -> JsonRp
     });
     tools.push(enhanced_update_deployment_tool_definition());
     tools.push(enhanced_create_pod_tool_definition());
+
+    // Replace the upstream apply_manifest definition with one that clearly
+    // documents YAML/JSON support (the upstream only accepts JSON silently).
+    tools.retain(|t| t.get("name").and_then(|n| n.as_str()) != Some("apply_manifest"));
+    tools.push(serde_json::json!({
+        "name": "apply_manifest",
+        "description": "Apply a Kubernetes manifest. Accepts YAML or JSON. Equivalent to kubectl apply -f.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "namespace": { "type": "string", "description": "Target namespace (uses manifest namespace if not specified)" },
+                "manifest": { "type": "string", "description": "Kubernetes manifest in YAML or JSON format" }
+            },
+            "required": ["manifest"],
+            "additionalProperties": false
+        }
+    }));
+
+    // Replace the upstream exec_pod definition; our implementation is non-interactive
+    // and returns collected output rather than attempting a WebSocket upgrade.
+    tools.retain(|t| t.get("name").and_then(|n| n.as_str()) != Some("exec_pod"));
+    tools.push(serde_json::json!({
+        "name": "exec_pod",
+        "description": "Run a command in a running pod container and return the output. For interactive shells, use the deckwatch UI instead.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "namespace": { "type": "string" },
+                "pod_name": { "type": "string" },
+                "command": { "type": "string", "description": "Command to run (e.g. 'ls /app' or 'cat /etc/hosts')" },
+                "container": { "type": "string", "description": "Container name (required when pod has multiple containers)" }
+            },
+            "required": ["namespace", "pod_name", "command"],
+            "additionalProperties": false
+        }
+    }));
 
     let tools = tools
         .into_iter()
@@ -373,7 +430,7 @@ fn deckwatch_tool_definitions() -> Vec<serde_json::Value> {
                 "properties": {
                     "namespace": { "type": "string" },
                     "deployment_name": { "type": "string" },
-                    "repo_url": { "type": "string" },
+                    "repo_url": { "type": "string", "description": "Git repository URL. Must use HTTPS (not SSH). Example: https://github.com/org/repo" },
                     "branch": { "type": "string" },
                     "dockerfile_path": { "type": "string" },
                     "docker_context": { "type": "string" },
@@ -929,6 +986,10 @@ async fn handle_tool_call(state: &AppState, request: &JsonRpcRequest) -> JsonRpc
         // Intercept update_deployment and create_pod to add service_account support.
         "update_deployment" => Some(tool_mcp_update_deployment(state, args).await),
         "create_pod" => Some(tool_mcp_create_pod(state, args).await),
+        // Intercept apply_manifest to accept YAML or JSON (upstream only handles JSON).
+        "apply_manifest" => Some(tool_mcp_apply_manifest(state, args).await),
+        // Intercept exec_pod to avoid WebSocket upgrade failures in MCP context.
+        "exec_pod" => Some(tool_mcp_exec_pod(state, args).await),
         _ => None,
     };
 
@@ -3169,6 +3230,84 @@ Format the output as a checklist with a checkmark or X for each item, with detai
         }
         _ => error_response(request, -32602, &format!("Unknown prompt: {name}")),
     }
+}
+
+// ── apply_manifest — YAML/JSON transparent wrapper ──────────────────────────
+
+async fn tool_mcp_apply_manifest(
+    state: &AppState,
+    args: &serde_json::Value,
+) -> Result<String, String> {
+    let manifest_str = args["manifest"].as_str().ok_or("manifest is required")?;
+
+    // Parse as YAML (JSON is valid YAML, so this handles both).
+    let parsed: serde_json::Value = serde_yaml::from_str(manifest_str)
+        .map_err(|e| format!("Failed to parse manifest as YAML/JSON: {e}"))?;
+
+    // Rebuild args with the manifest serialised as a JSON string so that the
+    // upstream mcp-k8s handler receives what it actually expects.
+    let mut new_args = args.clone();
+    new_args["manifest"] = serde_json::Value::String(parsed.to_string());
+
+    mcp_k8s_tool(state, "apply_manifest", &new_args).await
+}
+
+// ── exec_pod — non-interactive one-shot command execution ───────────────────
+
+async fn tool_mcp_exec_pod(state: &AppState, args: &serde_json::Value) -> Result<String, String> {
+    use kube::api::AttachParams;
+    use tokio::io::AsyncReadExt;
+
+    let ns = args["namespace"].as_str().ok_or("namespace required")?;
+    let pod_name = args["pod_name"]
+        .as_str()
+        .or_else(|| args["name"].as_str())
+        .ok_or("pod_name required")?;
+    let command = args["command"].as_str().ok_or("command required")?;
+    let container = args["container"].as_str().map(|s| s.to_string());
+
+    let pods_api = state.pods_api(ns).map_err(|e| e.to_string())?;
+
+    let mut params = AttachParams::default()
+        .stdout(true)
+        .stderr(true)
+        .stdin(false);
+    if let Some(c) = container.as_deref() {
+        params = params.container(c);
+    }
+
+    // Split on whitespace so simple commands work without a shell wrapper.
+    // Callers that need shell features should prefix with `sh -c`.
+    let cmd_parts: Vec<&str> = command.split_whitespace().collect();
+
+    let mut attached = pods_api
+        .exec(pod_name, cmd_parts, &params)
+        .await
+        .map_err(|e| format!("exec failed: {e}"))?;
+
+    let mut output = String::new();
+
+    if let Some(mut stdout) = attached.stdout() {
+        let mut buf = Vec::new();
+        stdout.read_to_end(&mut buf).await.ok();
+        output.push_str(&String::from_utf8_lossy(&buf));
+    }
+
+    if let Some(mut stderr) = attached.stderr() {
+        let mut buf = Vec::new();
+        stderr.read_to_end(&mut buf).await.ok();
+        let stderr_text = String::from_utf8_lossy(&buf);
+        if !stderr_text.is_empty() {
+            if !output.is_empty() {
+                output.push('\n');
+            }
+            output.push_str("[stderr]\n");
+            output.push_str(&stderr_text);
+        }
+    }
+
+    let _ = attached.join().await;
+    Ok(output)
 }
 
 // ---------------------------------------------------------------------------

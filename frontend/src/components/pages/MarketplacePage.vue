@@ -264,6 +264,10 @@ async function confirmInstall() {
       config: {},
       inherit_env_keys: [],
       inherit_env_file_keys: {},
+      // Propagate the catalog checksum so deckwatch verifies the download.
+      // When the catalog omits sha256, the field is absent and verification
+      // is skipped (existing behaviour for plugins without a pinned checksum).
+      ...(p.sha256 ? { sha256: p.sha256 } : {}),
     })
     await fetch('/api/settings', {
       method: 'PUT',
