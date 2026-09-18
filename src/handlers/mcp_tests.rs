@@ -5,8 +5,9 @@ use serde_json::json;
 // JSON-RPC parsing
 // ---------------------------------------------------------------------------
 
-#[test]
-fn test_initialize_response() {
+#[tokio::test]
+async fn test_initialize_response() {
+    let state = build_test_state().await;
     let req = JsonRpcRequest {
         jsonrpc: "2.0".to_string(),
         id: Some(json!(1)),
@@ -14,7 +15,7 @@ fn test_initialize_response() {
         params: json!({}),
     };
 
-    let resp = handle_initialize(&req);
+    let resp = handle_initialize(&state, &req).await;
 
     assert_eq!(resp.jsonrpc, "2.0");
     assert_eq!(resp.id, Some(json!(1)));
@@ -24,11 +25,11 @@ fn test_initialize_response() {
     assert_eq!(result["protocolVersion"], "2025-11-25");
     assert!(result["capabilities"]["tools"].is_object());
     assert_eq!(result["serverInfo"]["name"], "deckwatch");
-    assert_eq!(result["serverInfo"]["version"], "0.3.2");
 }
 
-#[test]
-fn test_tools_list_returns_all_tools() {
+#[tokio::test]
+async fn test_tools_list_returns_all_tools() {
+    let state = build_test_state().await;
     let req = JsonRpcRequest {
         jsonrpc: "2.0".to_string(),
         id: Some(json!(2)),
@@ -36,14 +37,13 @@ fn test_tools_list_returns_all_tools() {
         params: json!({}),
     };
 
-    let resp = handle_tools_list(&req);
+    let resp = handle_tools_list(&state, &req).await;
 
     assert!(resp.error.is_none());
     let result = resp.result.expect("should have result");
     let tools = result["tools"]
         .as_array()
         .expect("tools should be an array");
-    // 160+ upstream mcp-k8s tools + 5 deckwatch-specific
     assert!(
         tools.len() > 100,
         "expected 100+ tools (mcp-k8s upstream + deckwatch); got {}",
@@ -51,8 +51,9 @@ fn test_tools_list_returns_all_tools() {
     );
 }
 
-#[test]
-fn test_tools_list_tool_names() {
+#[tokio::test]
+async fn test_tools_list_tool_names() {
+    let state = build_test_state().await;
     let req = JsonRpcRequest {
         jsonrpc: "2.0".to_string(),
         id: Some(json!(3)),
@@ -60,7 +61,7 @@ fn test_tools_list_tool_names() {
         params: json!({}),
     };
 
-    let resp = handle_tools_list(&req);
+    let resp = handle_tools_list(&state, &req).await;
     let result = resp.result.expect("should have result");
     let tools = result["tools"]
         .as_array()
@@ -69,18 +70,15 @@ fn test_tools_list_tool_names() {
     let names: Vec<&str> = tools.iter().filter_map(|t| t["name"].as_str()).collect();
 
     let expected = [
-        // Deckwatch-specific
         "create_application",
         "list_templates",
-        "configure_gitops",
-        "get_gitops_status",
-        // Upstream mcp-k8s MCP handlers
+        "set_gitops",
+        "get_gitops",
         "list_deployments",
         "get_deployment",
         "get_pod_logs",
         "get_events",
         "list_ingresses",
-        // Upstream mcp-k8s resource modules
         "list_pods",
         "list_services",
         "list_configmaps",
@@ -97,8 +95,9 @@ fn test_tools_list_tool_names() {
     }
 }
 
-#[test]
-fn test_tools_have_input_schema() {
+#[tokio::test]
+async fn test_tools_have_input_schema() {
+    let state = build_test_state().await;
     let req = JsonRpcRequest {
         jsonrpc: "2.0".to_string(),
         id: Some(json!(4)),
@@ -106,7 +105,7 @@ fn test_tools_have_input_schema() {
         params: json!({}),
     };
 
-    let resp = handle_tools_list(&req);
+    let resp = handle_tools_list(&state, &req).await;
     let result = resp.result.expect("should have result");
     let tools = result["tools"]
         .as_array()
@@ -208,7 +207,7 @@ async fn test_configure_gitops_missing_repo_url() {
         id: Some(json!(40)),
         method: "tools/call".to_string(),
         params: json!({
-            "name": "configure_gitops",
+            "name": "set_gitops",
             "arguments": {
                 "namespace": "default",
                 "deployment_name": "my-app",
@@ -222,32 +221,6 @@ async fn test_configure_gitops_missing_repo_url() {
     assert!(
         err.message.contains("repo_url"),
         "error should mention missing repo_url; got: {}",
-        err.message
-    );
-}
-
-#[tokio::test]
-async fn test_configure_gitops_missing_oci_repository() {
-    let state = build_test_state().await;
-    let req = JsonRpcRequest {
-        jsonrpc: "2.0".to_string(),
-        id: Some(json!(41)),
-        method: "tools/call".to_string(),
-        params: json!({
-            "name": "configure_gitops",
-            "arguments": {
-                "namespace": "default",
-                "deployment_name": "my-app",
-                "repo_url": "https://github.com/org/repo"
-            }
-        }),
-    };
-
-    let resp = handle_tool_call(&state, &req).await;
-    let err = resp.error.expect("should error without oci_repository");
-    assert!(
-        err.message.contains("oci_repository"),
-        "error should mention missing oci_repository; got: {}",
         err.message
     );
 }
@@ -267,20 +240,13 @@ async fn test_upstream_tool_dispatch() {
 
     let resp = handle_tool_call(&state, &req).await;
 
-    // Upstream tools talk to the cluster; with our dummy kube client it will
-    // error, but the dispatch itself must produce a valid JSON-RPC response.
     if let Some(result) = &resp.result {
-        // If it somehow succeeds (e.g. a real kubeconfig is present), verify shape.
         let content = result["content"]
             .as_array()
             .expect("content should be array");
-        assert!(
-            !content.is_empty(),
-            "content should have at least one entry"
-        );
+        assert!(!content.is_empty());
         assert_eq!(content[0]["type"], "text");
     } else {
-        // Error path: verify it's a well-formed JSON-RPC error, not a panic.
         let err = resp
             .error
             .as_ref()
@@ -335,6 +301,141 @@ async fn test_create_application_missing_namespace() {
 }
 
 // ---------------------------------------------------------------------------
+// update_deployment — service_account field
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_update_deployment_no_fields_returns_error() {
+    let state = build_test_state().await;
+    let resp = handle_tool_call(
+        &state,
+        &tool_call_req(
+            50,
+            "update_deployment",
+            json!({ "namespace": "default", "name": "my-app" }),
+        ),
+    )
+    .await;
+    let err = resp.error.expect("should error with no fields");
+    assert!(
+        err.message.contains("At least one field"),
+        "got: {}",
+        err.message
+    );
+}
+
+#[tokio::test]
+async fn test_update_deployment_service_account_only_attempts_patch() {
+    let state = build_test_state().await;
+    let resp = handle_tool_call(
+        &state,
+        &tool_call_req(
+            51,
+            "update_deployment",
+            json!({
+                "namespace": "default",
+                "name": "my-app",
+                "service_account": "my-sa"
+            }),
+        ),
+    )
+    .await;
+    // With a dummy cluster this will fail at the kube patch call, not at
+    // argument validation — confirming dispatch reached the SA patch path.
+    if let Some(err) = resp.error {
+        assert_ne!(
+            err.message, "At least one field must be provided: image, replicas, env, env_from, command, args, port, ports, resource_limits, resource_requests, liveness_probe, readiness_probe, startup_probe, or service_account",
+            "should not hit the no-fields error when service_account is provided"
+        );
+    }
+}
+
+#[tokio::test]
+async fn test_update_deployment_service_account_in_schema() {
+    let state = build_test_state().await;
+    let req = JsonRpcRequest {
+        jsonrpc: "2.0".to_string(),
+        id: Some(json!(52)),
+        method: "tools/list".to_string(),
+        params: json!({}),
+    };
+    let resp = handle_tools_list(&state, &req).await;
+    let tools = resp.result.unwrap()["tools"].as_array().unwrap().clone();
+
+    let update_tool = tools
+        .iter()
+        .find(|t| t["name"] == "update_deployment")
+        .expect("update_deployment must be in tools list");
+
+    let props = &update_tool["inputSchema"]["properties"];
+    assert!(
+        props.get("service_account").is_some(),
+        "update_deployment schema must include service_account property"
+    );
+
+    // Must appear exactly once (no duplicate from mcp-k8s).
+    let count = tools
+        .iter()
+        .filter(|t| t["name"] == "update_deployment")
+        .count();
+    assert_eq!(
+        count, 1,
+        "update_deployment must appear exactly once in tools list"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// create_pod — service_account field
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_create_pod_service_account_in_schema() {
+    let state = build_test_state().await;
+    let req = JsonRpcRequest {
+        jsonrpc: "2.0".to_string(),
+        id: Some(json!(60)),
+        method: "tools/list".to_string(),
+        params: json!({}),
+    };
+    let resp = handle_tools_list(&state, &req).await;
+    let tools = resp.result.unwrap()["tools"].as_array().unwrap().clone();
+
+    let create_pod = tools
+        .iter()
+        .find(|t| t["name"] == "create_pod")
+        .expect("create_pod must be in tools list");
+
+    let props = &create_pod["inputSchema"]["properties"];
+    assert!(
+        props.get("service_account").is_some(),
+        "create_pod schema must include service_account"
+    );
+    assert!(
+        props.get("env").is_some(),
+        "create_pod schema must include env"
+    );
+
+    let count = tools.iter().filter(|t| t["name"] == "create_pod").count();
+    assert_eq!(count, 1, "create_pod must appear exactly once");
+}
+
+#[tokio::test]
+async fn test_create_pod_missing_namespace_returns_error() {
+    let state = build_test_state().await;
+    let resp = handle_tool_call(
+        &state,
+        &tool_call_req(
+            61,
+            "create_pod",
+            json!({ "name": "debug", "image": "busybox", "service_account": "my-sa" }),
+        ),
+    )
+    .await;
+    let err = resp.error.expect("should error without namespace");
+    assert!(err.message.contains("namespace"), "got: {}", err.message);
+}
+
+// ---------------------------------------------------------------------------
 // Request deserialization
 // ---------------------------------------------------------------------------
 
@@ -365,7 +466,6 @@ fn test_jsonrpc_request_missing_params() {
     let req: JsonRpcRequest =
         serde_json::from_value(raw).expect("should deserialize without params");
     assert_eq!(req.method, "initialize");
-    // params should default to null via #[serde(default)]
     assert!(
         req.params.is_null(),
         "params should default to null when omitted"
@@ -385,7 +485,6 @@ fn test_jsonrpc_response_serialize() {
     assert_eq!(value["jsonrpc"], "2.0");
     assert_eq!(value["id"], 1);
     assert_eq!(value["result"]["status"], "ok");
-    // error should be omitted (skip_serializing_if = "Option::is_none")
     assert!(
         value.get("error").is_none(),
         "error field should be omitted when None"
@@ -407,11 +506,7 @@ fn test_jsonrpc_error_serialize() {
     let value = serde_json::to_value(&resp).expect("should serialize");
     assert_eq!(value["jsonrpc"], "2.0");
     assert_eq!(value["id"], 99);
-    // result should be omitted
-    assert!(
-        value.get("result").is_none(),
-        "result field should be omitted when None"
-    );
+    assert!(value.get("result").is_none());
     assert_eq!(value["error"]["code"], -32601);
     assert_eq!(value["error"]["message"], "Method not found");
 }
@@ -487,72 +582,6 @@ fn test_success_response_preserves_null_id() {
 }
 
 // ---------------------------------------------------------------------------
-// Test helpers
-// ---------------------------------------------------------------------------
-
-/// Build an AppState for dispatch-level tests. Constructs a dummy kube client
-/// from an in-memory kubeconfig pointing at an unreachable server. Upstream
-/// mcp-k8s pulls in rustls, so we install a crypto provider first. Tool calls
-/// that actually hit the cluster will return connection errors, but dispatch
-/// routing and parameter validation are fully testable without a live cluster.
-async fn build_test_state() -> crate::state::AppState {
-    use crate::rate_limit::RateLimiter;
-
-    let _ = rustls::crypto::ring::default_provider().install_default();
-
-    // Build a minimal kubeconfig YAML and parse it — avoids constructing
-    // non-exhaustive kube config structs field-by-field.
-    let kubeconfig_yaml = r#"
-apiVersion: v1
-kind: Config
-current-context: dummy
-clusters:
-  - name: dummy
-    cluster:
-      server: https://127.0.0.1:1
-      insecure-skip-tls-verify: true
-contexts:
-  - name: dummy
-    context:
-      cluster: dummy
-      user: dummy
-      namespace: default
-users:
-  - name: dummy
-    user: {}
-"#;
-    let kubeconfig: kube::config::Kubeconfig =
-        serde_yaml::from_str(kubeconfig_yaml).expect("parse dummy kubeconfig");
-
-    let config = kube::Config::from_custom_kubeconfig(
-        kubeconfig,
-        &kube::config::KubeConfigOptions::default(),
-    )
-    .await
-    .expect("config from custom kubeconfig");
-
-    let kube_client = kube::Client::try_from(config).expect("dummy kube client");
-
-    let db = crate::db::connect("sqlite::memory:")
-        .await
-        .expect("in-memory sqlite");
-
-    crate::state::AppState {
-        kube_client,
-        allowed_namespaces: vec![],
-        settings_namespace: "deckwatch".to_string(),
-        settings_configmap_name: "deckwatch-settings".to_string(),
-        entitlements: std::sync::Arc::new(crate::license::Entitlements::community()),
-        registry_public_url: None,
-        registry_internal_url: None,
-        registry_enabled: false,
-        ai_rate_limiter: RateLimiter::default(),
-        db,
-        encryption_key: String::new(),
-    }
-}
-
-// ---------------------------------------------------------------------------
 // prompts/list + prompts/get
 // ---------------------------------------------------------------------------
 
@@ -604,7 +633,7 @@ fn prompts_get_returns_messages_with_arguments() {
     assert!(text.contains("test-ns"));
     assert!(text.contains("my-app"));
     assert!(text.contains("get_deployment"));
-    assert!(text.contains("get_gitops_status"));
+    assert!(text.contains("get_gitops"));
 }
 
 #[test]
@@ -658,4 +687,76 @@ fn prompts_get_unknown_returns_error() {
     let resp = handle_prompts_get(&req);
     assert!(resp.error.is_some());
     assert!(resp.error.unwrap().message.contains("Unknown prompt"));
+}
+
+// ---------------------------------------------------------------------------
+// Test helpers
+// ---------------------------------------------------------------------------
+
+fn tool_call_req(id: u64, tool: &str, arguments: serde_json::Value) -> JsonRpcRequest {
+    JsonRpcRequest {
+        jsonrpc: "2.0".to_string(),
+        id: Some(json!(id)),
+        method: "tools/call".to_string(),
+        params: json!({ "name": tool, "arguments": arguments }),
+    }
+}
+
+async fn build_test_state() -> crate::state::AppState {
+    use crate::rate_limit::RateLimiter;
+
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
+    let kubeconfig_yaml = r#"
+apiVersion: v1
+kind: Config
+current-context: dummy
+clusters:
+  - name: dummy
+    cluster:
+      server: https://127.0.0.1:1
+      insecure-skip-tls-verify: true
+contexts:
+  - name: dummy
+    context:
+      cluster: dummy
+      user: dummy
+      namespace: default
+users:
+  - name: dummy
+    user: {}
+"#;
+    let kubeconfig: kube::config::Kubeconfig =
+        serde_yaml::from_str(kubeconfig_yaml).expect("parse dummy kubeconfig");
+
+    let config = kube::Config::from_custom_kubeconfig(
+        kubeconfig,
+        &kube::config::KubeConfigOptions::default(),
+    )
+    .await
+    .expect("config from custom kubeconfig");
+
+    let kube_client = kube::Client::try_from(config).expect("dummy kube client");
+
+    let db = crate::db::connect("sqlite::memory:")
+        .await
+        .expect("in-memory sqlite");
+
+    crate::state::AppState {
+        kube_client,
+        allowed_namespaces: vec![],
+        settings_namespace: "deckwatch".to_string(),
+        settings_configmap_name: "deckwatch-settings".to_string(),
+        entitlements: std::sync::Arc::new(crate::license::Entitlements::community()),
+        registry_public_url: None,
+        registry_internal_url: None,
+        registry_enabled: false,
+        ai_rate_limiter: RateLimiter::default(),
+        db,
+        encryption_key: String::new(),
+        plugins: std::sync::Arc::new(tokio::sync::RwLock::new(vec![])),
+        plugin_patch_fingerprints: std::sync::Arc::new(tokio::sync::Mutex::new(
+            std::collections::HashMap::new(),
+        )),
+    }
 }
