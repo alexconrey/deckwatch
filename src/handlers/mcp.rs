@@ -1850,7 +1850,7 @@ async fn tool_generate_local_build(
         "notes": [
             "Run this command from your local repo root to reproduce the Kaniko build locally.",
             "The --no-push flag prevents pushing to the registry (safe for local testing).",
-            format!("To test arm64: change --platform to linux/arm64"),
+            "To test arm64: change --platform to linux/arm64".to_string(),
             format!("Kaniko image: {} (from deckwatch build settings)", bs.kaniko_image),
         ]
     });
