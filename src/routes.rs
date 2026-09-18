@@ -181,6 +181,14 @@ pub fn build_router(
         )
         .route("/api/namespaces/{ns}/cronjobs", get(cronjobs::list))
         .route("/api/namespaces/{ns}/cronjobs/{name}", get(cronjobs::get))
+        .route(
+            "/api/namespaces/{ns}/cronjobs/{name}/trigger",
+            post(cronjobs::trigger),
+        )
+        .route(
+            "/api/namespaces/{ns}/cronjobs/{name}/logs",
+            get(cronjobs::recent_logs),
+        )
         .route("/api/nodes", get(nodes::list_nodes))
         .route(
             "/api/templates",

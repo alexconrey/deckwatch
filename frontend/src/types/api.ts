@@ -641,6 +641,11 @@ export interface PluginConfig {
    *  and injects its content as the config key. Cloud-agnostic: the plugin
    *  decides what to do with the content (e.g. STS token exchange). */
   inherit_env_file_keys: Record<string, string>;
+  /** Expected SHA-256 hex digest of the fetched WASM binary. When set, deckwatch
+   *  verifies the digest after download and rejects the binary on mismatch.
+   *  Populated automatically when installing from the marketplace catalog if the
+   *  catalog entry provides a checksum. */
+  sha256?: string | null;
   mcp_tuning?: Record<string, string>;
 }
 
@@ -1050,6 +1055,9 @@ export interface MarketplaceEntry {
   latest_version: string;
   source: PluginSource;
   allowed_hosts_hint: string[];
+  /** SHA-256 hex digest of the WASM binary for the latest_version.
+   *  When present, deckwatch verifies the download before loading the plugin. */
+  sha256?: string;
 }
 
 export interface MarketplaceCatalog {

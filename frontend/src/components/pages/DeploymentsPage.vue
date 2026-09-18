@@ -21,6 +21,7 @@ import type {
   ConfigMapDetail,
   ServiceAccountSummary,
 } from "@/types/api";
+import type { CronJobLogsResponse } from "@/api/cronjobs";
 import StatusChip from "@/components/common/StatusChip.vue";
 import ReplicaGauge from "@/components/views/deployment/ReplicaGauge.vue";
 import ConfirmDialog from "@/components/common/ConfirmDialog.vue";
@@ -84,6 +85,14 @@ const tab = ref<TabKey>(initialTab);
 const cronjobs = ref<CronJobSummary[]>([]);
 const cronjobsLoading = ref(false);
 const cronjobsError = ref<string | null>(null);
+const cronjobTriggeringName = ref<string | null>(null);
+const cronjobTriggerMessage = ref<string | null>(null);
+const cronjobTriggerIsError = ref(false);
+
+const showLogsDialog = ref(false);
+const logsLoading = ref(false);
+const logsData = ref<CronJobLogsResponse | null>(null);
+const logsError = ref<string | null>(null);
 
 // --- Secrets state ---
 const secrets = ref<SecretSummary[]>([]);
@@ -228,6 +237,7 @@ const cronjobHeaders = [
   { title: "Active", key: "active_count", width: "100px" },
   { title: "Last Scheduled", key: "last_schedule_time", width: "180px" },
   { title: "Age", key: "created_at", width: "140px" },
+  { title: "", key: "actions", width: "120px", sortable: false },
 ];
 
 const secretHeaders = [
@@ -251,6 +261,43 @@ const saHeaders = [
   { title: "Age", key: "created_at", width: "120px" },
   { title: "", key: "actions", width: "80px", sortable: false },
 ];
+
+const triggerCronJob = async (name: string) => {
+  if (!ns.selected) return;
+  cronjobTriggeringName.value = name;
+  cronjobTriggerMessage.value = null;
+  try {
+    const res = await cronjobsApi.trigger(ns.selected, name);
+    cronjobTriggerIsError.value = false;
+    cronjobTriggerMessage.value = `Job "${res.job_name}" created.`;
+  } catch (e) {
+    cronjobTriggerIsError.value = true;
+    cronjobTriggerMessage.value =
+      e instanceof ApiError ? e.body.message
+        : e instanceof Error ? e.message
+          : "Failed to trigger cronjob";
+  } finally {
+    cronjobTriggeringName.value = null;
+  }
+};
+
+const openCronJobLogs = async (name: string) => {
+  if (!ns.selected) return;
+  showLogsDialog.value = true;
+  logsLoading.value = true;
+  logsData.value = null;
+  logsError.value = null;
+  try {
+    logsData.value = await cronjobsApi.getLogs(ns.selected, name);
+  } catch (e) {
+    logsError.value =
+      e instanceof ApiError ? e.body.message
+        : e instanceof Error ? e.message
+          : "Failed to fetch logs";
+  } finally {
+    logsLoading.value = false;
+  }
+};
 
 const fetchCronjobs = async (namespace: string) => {
   if (!namespace) return;
@@ -843,6 +890,27 @@ const deleteSa = async (name: string) => {
             </span>
           </template>
 
+          <template v-slot:item.actions="{ item }">
+            <div class="d-flex ga-1">
+              <v-btn
+                size="small"
+                variant="tonal"
+                color="primary"
+                :loading="cronjobTriggeringName === item.name"
+                title="Run now"
+                icon="mdi-play"
+                @click.stop="triggerCronJob(item.name)"
+              />
+              <v-btn
+                size="small"
+                variant="text"
+                title="View logs"
+                icon="mdi-text-box-outline"
+                @click.stop="openCronJobLogs(item.name)"
+              />
+            </div>
+          </template>
+
           <template v-slot:no-data>
             <div class="text-center py-8 text-secondary">
               <v-icon icon="mdi-clock-outline" size="48" class="mb-2" />
@@ -850,6 +918,16 @@ const deleteSa = async (name: string) => {
             </div>
           </template>
         </v-data-table>
+
+        <v-alert
+          v-if="cronjobTriggerMessage"
+          :type="cronjobTriggerIsError ? 'error' : 'success'"
+          class="mt-3"
+          closable
+          @click:close="cronjobTriggerMessage = null"
+        >
+          {{ cronjobTriggerMessage }}
+        </v-alert>
       </v-window-item>
 
       <!-- Secrets tab -->
@@ -1303,6 +1381,41 @@ const deleteSa = async (name: string) => {
           >
             {{ cmDialogMode === "create" ? "Create" : "Save" }}
           </v-btn>
+        </v-card-actions>
+      </v-card>
+    </v-dialog>
+
+    <!-- CronJob logs dialog -->
+    <v-dialog v-model="showLogsDialog" max-width="900">
+      <v-card>
+        <v-card-title class="d-flex align-center">
+          <v-icon start icon="mdi-text-box-outline" />
+          CronJob Logs
+          <v-spacer />
+          <span v-if="logsData" class="text-caption text-secondary font-mono">
+            {{ logsData.pod_name }}
+          </span>
+        </v-card-title>
+        <v-card-text>
+          <div v-if="logsLoading" class="text-center py-8">
+            <v-progress-circular indeterminate color="primary" />
+          </div>
+          <v-alert v-else-if="logsError" type="error">
+            {{ logsError }}
+          </v-alert>
+          <template v-else-if="logsData">
+            <div class="text-caption text-secondary mb-2">
+              Job: <code>{{ logsData.job_name }}</code>
+            </div>
+            <pre
+              class="text-body-2 bg-surface-variant pa-3 rounded overflow-auto"
+              style="max-height: 480px; white-space: pre-wrap; word-break: break-all"
+            >{{ logsData.logs || "(no output)" }}</pre>
+          </template>
+        </v-card-text>
+        <v-card-actions>
+          <v-spacer />
+          <v-btn variant="text" @click="showLogsDialog = false">Close</v-btn>
         </v-card-actions>
       </v-card>
     </v-dialog>
