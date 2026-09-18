@@ -180,6 +180,17 @@ async fn handle_tools_list(state: &AppState, request: &JsonRpcRequest) -> JsonRp
         tools.push(agent_feedback_tool_definition());
     }
 
+    // Replace mcp-k8s update_deployment and create_pod with deckwatch's
+    // enhanced versions that add service_account support.
+    tools.retain(|t| {
+        !matches!(
+            t.get("name").and_then(|n| n.as_str()),
+            Some("update_deployment") | Some("create_pod")
+        )
+    });
+    tools.push(enhanced_update_deployment_tool_definition());
+    tools.push(enhanced_create_pod_tool_definition());
+
     let tools = tools
         .into_iter()
         .map(|t| inject_mcp_hint(t, &tuning))
@@ -915,6 +926,9 @@ async fn handle_tool_call(state: &AppState, request: &JsonRpcRequest) -> JsonRpc
         "delete_deployment" => Some(tool_mcp_delete_deployment(state, args).await),
         "scale_deployment" => Some(tool_mcp_scale_deployment(state, args).await),
         "restart_deployment" => Some(tool_mcp_restart_deployment(state, args).await),
+        // Intercept update_deployment and create_pod to add service_account support.
+        "update_deployment" => Some(tool_mcp_update_deployment(state, args).await),
+        "create_pod" => Some(tool_mcp_create_pod(state, args).await),
         _ => None,
     };
 
@@ -2572,6 +2586,252 @@ async fn tool_mcp_restart_deployment(
     .await
     .ok();
     Ok(result)
+}
+
+async fn tool_mcp_update_deployment(
+    state: &AppState,
+    args: &serde_json::Value,
+) -> Result<String, String> {
+    let ns = args["namespace"].as_str().ok_or("namespace is required")?;
+    let name = args["name"].as_str().ok_or("name is required")?;
+    let service_account = args["service_account"].as_str().map(|s| s.to_string());
+
+    // Determine whether any mcp-k8s-handled fields were provided.
+    let has_other_updates = args.get("image").is_some()
+        || args.get("replicas").is_some()
+        || args.get("env").is_some()
+        || args.get("env_from").is_some()
+        || args.get("liveness_probe").is_some()
+        || args.get("readiness_probe").is_some()
+        || args.get("startup_probe").is_some();
+
+    let result = if has_other_updates {
+        // Let mcp-k8s handle the standard fields; extra keys are ignored.
+        Some(mcp_k8s_tool(state, "update_deployment", args).await?)
+    } else {
+        None
+    };
+
+    if service_account.is_none() && !has_other_updates {
+        return Err(
+            "At least one field must be provided: image, replicas, env, env_from, \
+             liveness_probe, readiness_probe, startup_probe, or service_account"
+                .to_string(),
+        );
+    }
+
+    // Patch serviceAccountName if requested.
+    if let Some(ref sa) = service_account {
+        let api: kube::Api<k8s_openapi::api::apps::v1::Deployment> =
+            kube::Api::namespaced(state.kube_client.clone(), ns);
+        let patch = serde_json::json!({
+            "spec": { "template": { "spec": { "serviceAccountName": sa } } }
+        });
+        api.patch(
+            name,
+            &kube::api::PatchParams::apply("deckwatch"),
+            &kube::api::Patch::Merge(patch),
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+    }
+
+    audit::log_action(
+        &state.db,
+        "update",
+        "deployment",
+        name,
+        ns,
+        &format!(
+            "MCP: update_deployment{}",
+            service_account
+                .as_deref()
+                .map(|sa| format!(", serviceAccount={sa}"))
+                .unwrap_or_default()
+        ),
+        "",
+    )
+    .await
+    .ok();
+
+    Ok(result.unwrap_or_else(|| {
+        format!("Deployment {name} updated in namespace {ns}")
+    }))
+}
+
+async fn tool_mcp_create_pod(
+    state: &AppState,
+    args: &serde_json::Value,
+) -> Result<String, String> {
+    use k8s_openapi::api::core::v1::{Container, Pod, PodSpec};
+    use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
+    use kube::api::PostParams;
+    use std::collections::BTreeMap;
+
+    let service_account = args["service_account"].as_str().map(|s| s.to_string());
+
+    // If no service_account is needed, delegate entirely to mcp-k8s.
+    if service_account.is_none() {
+        return mcp_k8s_tool(state, "create_pod", args).await;
+    }
+
+    let ns = args["namespace"].as_str().ok_or("namespace is required")?;
+    let name = args["name"].as_str().ok_or("name is required")?;
+    let image = args["image"].as_str().ok_or("image is required")?;
+    let command: Option<Vec<String>> = args
+        .get("command")
+        .and_then(|v| serde_json::from_value(v.clone()).ok());
+    let restart_policy = args["restart_policy"]
+        .as_str()
+        .unwrap_or("Never")
+        .to_string();
+
+    let mut labels = BTreeMap::new();
+    labels.insert("app".to_string(), name.to_string());
+    labels.insert(
+        "app.kubernetes.io/managed-by".to_string(),
+        "deckwatch".to_string(),
+    );
+
+    let pod = Pod {
+        metadata: ObjectMeta {
+            name: Some(name.to_string()),
+            namespace: Some(ns.to_string()),
+            labels: Some(labels),
+            ..Default::default()
+        },
+        spec: Some(PodSpec {
+            service_account_name: service_account,
+            containers: vec![Container {
+                name: name.to_string(),
+                image: Some(image.to_string()),
+                command,
+                ..Default::default()
+            }],
+            restart_policy: Some(restart_policy),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+
+    let pods_api: kube::Api<Pod> = kube::Api::namespaced(state.kube_client.clone(), ns);
+    let created = pods_api
+        .create(&PostParams::default(), &pod)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let result = serde_json::json!({
+        "name": created.metadata.name,
+        "namespace": ns,
+        "phase": created.status.as_ref().and_then(|s| s.phase.clone()).unwrap_or_else(|| "Pending".to_string()),
+    });
+    serde_json::to_string_pretty(&result).map_err(|e| e.to_string())
+}
+
+fn enhanced_update_deployment_tool_definition() -> serde_json::Value {
+    serde_json::json!({
+        "name": "update_deployment",
+        "description": "Update (merge patch) an existing deployment. Supports changing image, replicas, env vars, readiness/liveness/startup probes, and service account.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "namespace": { "type": "string", "description": "Kubernetes namespace" },
+                "name": { "type": "string", "description": "Deployment name" },
+                "image": { "type": "string", "description": "New container image (optional)" },
+                "replicas": { "type": "integer", "description": "New replica count (optional)" },
+                "env": {
+                    "type": "object",
+                    "description": "Environment variables as key-value string pairs (optional, replaces all env vars)",
+                    "additionalProperties": { "type": "string" }
+                },
+                "env_from": {
+                    "type": "array",
+                    "description": "List of sources to populate env vars in bulk. Each item must have either 'secret_ref' or 'config_map_ref' set to the resource name.",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "secret_ref": { "type": "string", "description": "Name of a Secret to load all keys as env vars" },
+                            "config_map_ref": { "type": "string", "description": "Name of a ConfigMap to load all keys as env vars" }
+                        }
+                    }
+                },
+                "liveness_probe": {
+                    "type": "object",
+                    "description": "Liveness probe configuration (optional). If omitted, the existing probe is left unchanged.",
+                    "properties": {
+                        "probe_type": { "type": "string", "enum": ["httpGet", "exec", "tcpSocket"], "description": "Probe mechanism to use" },
+                        "path": { "type": "string", "description": "HTTP path for httpGet probes (e.g. \"/healthz\")" },
+                        "port": { "type": "integer", "description": "Port number for httpGet and tcpSocket probes (default: 80)" },
+                        "command": { "type": "array", "items": { "type": "string" }, "description": "Command and args for exec probes" },
+                        "initial_delay_seconds": { "type": "integer", "description": "Seconds to wait before the first probe (default: 0)" },
+                        "period_seconds": { "type": "integer", "description": "How often to perform the probe in seconds (default: 10)" },
+                        "timeout_seconds": { "type": "integer", "description": "Seconds after which the probe times out (default: 1)" },
+                        "failure_threshold": { "type": "integer", "description": "Consecutive failures before the container is restarted (default: 3)" },
+                        "success_threshold": { "type": "integer", "description": "Consecutive successes required after a failure (default: 1)" }
+                    },
+                    "required": ["probe_type"],
+                    "additionalProperties": false
+                },
+                "readiness_probe": {
+                    "type": "object",
+                    "description": "Readiness probe configuration (optional). If omitted, the existing probe is left unchanged.",
+                    "properties": {
+                        "probe_type": { "type": "string", "enum": ["httpGet", "exec", "tcpSocket"], "description": "Probe mechanism to use" },
+                        "path": { "type": "string", "description": "HTTP path for httpGet probes (e.g. \"/ready\")" },
+                        "port": { "type": "integer", "description": "Port number for httpGet and tcpSocket probes (default: 80)" },
+                        "command": { "type": "array", "items": { "type": "string" }, "description": "Command and args for exec probes" },
+                        "initial_delay_seconds": { "type": "integer", "description": "Seconds to wait before the first probe (default: 0)" },
+                        "period_seconds": { "type": "integer", "description": "How often to perform the probe in seconds (default: 10)" },
+                        "timeout_seconds": { "type": "integer", "description": "Seconds after which the probe times out (default: 1)" },
+                        "failure_threshold": { "type": "integer", "description": "Consecutive failures before the pod is removed from service (default: 3)" },
+                        "success_threshold": { "type": "integer", "description": "Consecutive successes required after a failure (default: 1)" }
+                    },
+                    "required": ["probe_type"],
+                    "additionalProperties": false
+                },
+                "startup_probe": {
+                    "type": "object",
+                    "description": "Startup probe configuration (optional). If omitted, the existing probe is left unchanged.",
+                    "properties": {
+                        "probe_type": { "type": "string", "enum": ["httpGet", "exec", "tcpSocket"], "description": "Probe mechanism to use" },
+                        "path": { "type": "string", "description": "HTTP path for httpGet probes" },
+                        "port": { "type": "integer", "description": "Port number for httpGet and tcpSocket probes (default: 80)" },
+                        "command": { "type": "array", "items": { "type": "string" }, "description": "Command and args for exec probes" },
+                        "initial_delay_seconds": { "type": "integer", "description": "Seconds to wait before the first probe (default: 0)" },
+                        "period_seconds": { "type": "integer", "description": "How often to perform the probe in seconds (default: 10)" },
+                        "timeout_seconds": { "type": "integer", "description": "Seconds after which the probe times out (default: 1)" },
+                        "failure_threshold": { "type": "integer", "description": "Consecutive failures before liveness kicks in (default: 3)" },
+                        "success_threshold": { "type": "integer", "description": "Consecutive successes required after a failure (default: 1)" }
+                    },
+                    "required": ["probe_type"],
+                    "additionalProperties": false
+                },
+                "service_account": { "type": "string", "description": "Service account name to assign to the deployment's pod template (optional)" }
+            },
+            "required": ["namespace", "name"],
+            "additionalProperties": false
+        }
+    })
+}
+
+fn enhanced_create_pod_tool_definition() -> serde_json::Value {
+    serde_json::json!({
+        "name": "create_pod",
+        "description": "Create a standalone pod. Useful for debugging, one-shot tasks, or running a quick container. Supports assigning a service account.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "namespace": { "type": "string", "description": "Kubernetes namespace" },
+                "name": { "type": "string", "description": "Pod name" },
+                "image": { "type": "string", "description": "Container image" },
+                "command": { "type": "array", "items": { "type": "string" }, "description": "Command to run (optional)" },
+                "restart_policy": { "type": "string", "description": "Restart policy (default: Never)", "enum": ["Never", "Always", "OnFailure"] },
+                "service_account": { "type": "string", "description": "Service account name to assign to the pod (optional)" }
+            },
+            "required": ["namespace", "name", "image"],
+            "additionalProperties": false
+        }
+    })
 }
 
 // ── Application plugin association tools ────────────────────────────────────
