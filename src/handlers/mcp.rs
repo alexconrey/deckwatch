@@ -2661,15 +2661,10 @@ async fn tool_mcp_update_deployment(
     .await
     .ok();
 
-    Ok(result.unwrap_or_else(|| {
-        format!("Deployment {name} updated in namespace {ns}")
-    }))
+    Ok(result.unwrap_or_else(|| format!("Deployment {name} updated in namespace {ns}")))
 }
 
-async fn tool_mcp_create_pod(
-    state: &AppState,
-    args: &serde_json::Value,
-) -> Result<String, String> {
+async fn tool_mcp_create_pod(state: &AppState, args: &serde_json::Value) -> Result<String, String> {
     use k8s_openapi::api::core::v1::{Container, EnvVar, Pod, PodSpec};
     use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
     use kube::api::PostParams;

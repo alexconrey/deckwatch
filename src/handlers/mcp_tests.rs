@@ -247,7 +247,10 @@ async fn test_upstream_tool_dispatch() {
         assert!(!content.is_empty());
         assert_eq!(content[0]["type"], "text");
     } else {
-        let err = resp.error.as_ref().expect("should have error when no cluster");
+        let err = resp
+            .error
+            .as_ref()
+            .expect("should have error when no cluster");
         assert_eq!(err.code, -32000);
         assert!(!err.message.is_empty());
     }
@@ -357,10 +360,7 @@ async fn test_update_deployment_service_account_in_schema() {
         params: json!({}),
     };
     let resp = handle_tools_list(&state, &req).await;
-    let tools = resp.result.unwrap()["tools"]
-        .as_array()
-        .unwrap()
-        .clone();
+    let tools = resp.result.unwrap()["tools"].as_array().unwrap().clone();
 
     let update_tool = tools
         .iter()
@@ -378,7 +378,10 @@ async fn test_update_deployment_service_account_in_schema() {
         .iter()
         .filter(|t| t["name"] == "update_deployment")
         .count();
-    assert_eq!(count, 1, "update_deployment must appear exactly once in tools list");
+    assert_eq!(
+        count, 1,
+        "update_deployment must appear exactly once in tools list"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -395,10 +398,7 @@ async fn test_create_pod_service_account_in_schema() {
         params: json!({}),
     };
     let resp = handle_tools_list(&state, &req).await;
-    let tools = resp.result.unwrap()["tools"]
-        .as_array()
-        .unwrap()
-        .clone();
+    let tools = resp.result.unwrap()["tools"].as_array().unwrap().clone();
 
     let create_pod = tools
         .iter()
@@ -406,8 +406,14 @@ async fn test_create_pod_service_account_in_schema() {
         .expect("create_pod must be in tools list");
 
     let props = &create_pod["inputSchema"]["properties"];
-    assert!(props.get("service_account").is_some(), "create_pod schema must include service_account");
-    assert!(props.get("env").is_some(), "create_pod schema must include env");
+    assert!(
+        props.get("service_account").is_some(),
+        "create_pod schema must include service_account"
+    );
+    assert!(
+        props.get("env").is_some(),
+        "create_pod schema must include env"
+    );
 
     let count = tools.iter().filter(|t| t["name"] == "create_pod").count();
     assert_eq!(count, 1, "create_pod must appear exactly once");
@@ -426,13 +432,8 @@ async fn test_create_pod_missing_namespace_returns_error() {
     )
     .await;
     let err = resp.error.expect("should error without namespace");
-    assert!(
-        err.message.contains("namespace"),
-        "got: {}",
-        err.message
-    );
+    assert!(err.message.contains("namespace"), "got: {}", err.message);
 }
-
 
 // ---------------------------------------------------------------------------
 // Request deserialization
