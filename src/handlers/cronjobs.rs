@@ -1,8 +1,10 @@
 use axum::extract::{Path, Query, State};
+use axum::http::StatusCode;
 use axum::Json;
-use k8s_openapi::api::batch::v1::Job;
+use k8s_openapi::api::batch::v1::{CronJob, CronJobSpec, Job, JobSpec, JobTemplateSpec};
+use k8s_openapi::api::core::v1::{Container, PodSpec, PodTemplateSpec};
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
-use kube::api::{ListParams, LogParams, PostParams};
+use kube::api::{DeleteParams, ListParams, LogParams, Patch, PatchParams, PostParams};
 use serde::Deserialize;
 
 use crate::error::AppError;
@@ -169,4 +171,127 @@ pub async fn recent_logs(
         "pod_name": pod_name,
         "logs": logs,
     })))
+}
+
+#[derive(Deserialize)]
+pub struct CreateCronJobRequest {
+    pub name: String,
+    pub schedule: String,
+    pub image: String,
+    pub command: Option<Vec<String>>,
+    pub args: Option<Vec<String>>,
+    pub suspend: Option<bool>,
+    pub restart_policy: Option<String>,
+}
+
+pub async fn create(
+    State(state): State<AppState>,
+    Path(ns): Path<String>,
+    Json(body): Json<CreateCronJobRequest>,
+) -> Result<Json<CronJobSummary>, AppError> {
+    let api = state.cronjobs_api(&ns)?;
+
+    let container = Container {
+        name: body.name.clone(),
+        image: Some(body.image),
+        command: body.command,
+        args: body.args,
+        ..Default::default()
+    };
+
+    let cj = CronJob {
+        metadata: ObjectMeta {
+            name: Some(body.name),
+            namespace: Some(ns),
+            ..Default::default()
+        },
+        spec: Some(CronJobSpec {
+            schedule: body.schedule,
+            suspend: body.suspend,
+            job_template: JobTemplateSpec {
+                spec: Some(JobSpec {
+                    template: PodTemplateSpec {
+                        spec: Some(PodSpec {
+                            restart_policy: Some(
+                                body.restart_policy.unwrap_or_else(|| "OnFailure".to_string()),
+                            ),
+                            containers: vec![container],
+                            ..Default::default()
+                        }),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+
+    let t = K8sTimer::new("cronjobs", "create");
+    let created = api.create(&PostParams::default(), &cj).await;
+    t.finish(created.is_ok());
+    let created = created?;
+    Ok(Json(cronjob_summary(&created)))
+}
+
+#[derive(Deserialize)]
+pub struct UpdateCronJobRequest {
+    pub schedule: Option<String>,
+    pub image: Option<String>,
+    pub suspend: Option<bool>,
+}
+
+pub async fn update(
+    State(state): State<AppState>,
+    Path((ns, name)): Path<(String, String)>,
+    Json(body): Json<UpdateCronJobRequest>,
+) -> Result<Json<CronJobSummary>, AppError> {
+    let api = state.cronjobs_api(&ns)?;
+
+    // Build a partial patch — only include keys the caller provided.
+    let mut spec_patch = serde_json::Map::new();
+    if let Some(schedule) = body.schedule {
+        spec_patch.insert("schedule".to_string(), serde_json::Value::String(schedule));
+    }
+    if let Some(suspend) = body.suspend {
+        spec_patch.insert("suspend".to_string(), serde_json::Value::Bool(suspend));
+    }
+    if let Some(image) = body.image {
+        // Patch the first container's image via the job template path.
+        spec_patch.insert(
+            "jobTemplate".to_string(),
+            serde_json::json!({
+                "spec": {
+                    "template": {
+                        "spec": {
+                            "containers": [{ "name": name, "image": image }]
+                        }
+                    }
+                }
+            }),
+        );
+    }
+
+    let patch = serde_json::json!({ "spec": spec_patch });
+    let t = K8sTimer::new("cronjobs", "patch");
+    let patched = api
+        .patch(&name, &PatchParams::default(), &Patch::Merge(patch))
+        .await;
+    t.finish(patched.is_ok());
+    let patched = patched?;
+    Ok(Json(cronjob_summary(&patched)))
+}
+
+pub async fn delete(
+    State(state): State<AppState>,
+    Path((ns, name)): Path<(String, String)>,
+) -> Result<StatusCode, AppError> {
+    let api = state.cronjobs_api(&ns)?;
+    let t = K8sTimer::new("cronjobs", "delete");
+    let res = api.delete(&name, &DeleteParams::default()).await;
+    t.finish(res.is_ok());
+    res?;
+    Ok(StatusCode::NO_CONTENT)
 }

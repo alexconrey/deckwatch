@@ -5,6 +5,7 @@ import { useNamespaceStore } from "@/stores/namespace";
 import { useDeploymentsStore } from "@/stores/deployments";
 import { usePolling } from "@/composables/usePolling";
 import { cronjobsApi } from "@/api/cronjobs";
+import type { CreateCronJobRequest, UpdateCronJobRequest } from "@/api/cronjobs";
 import { secretsApi } from "@/api/secrets";
 import { configmapsApi } from "@/api/configmaps";
 import { serviceaccountsApi } from "@/api/serviceaccounts";
@@ -93,6 +94,22 @@ const showLogsDialog = ref(false);
 const logsLoading = ref(false);
 const logsData = ref<CronJobLogsResponse | null>(null);
 const logsError = ref<string | null>(null);
+
+// --- CronJob create/edit dialog ---
+const showCronJobDialog = ref(false);
+const cronJobDialogMode = ref<"create" | "edit">("create");
+const cronJobDialogSubmitting = ref(false);
+const cronJobDialogError = ref<string | null>(null);
+const cronJobName = ref("");
+const cronJobSchedule = ref("");
+const cronJobImage = ref("");
+const cronJobCommand = ref("");
+const cronJobSuspend = ref(false);
+
+// --- CronJob delete confirmation ---
+const showCronJobDeleteDialog = ref(false);
+const cronJobDeleteTarget = ref<string | null>(null);
+const cronJobDeleteLoading = ref(false);
 
 // --- Secrets state ---
 const secrets = ref<SecretSummary[]>([]);
@@ -237,7 +254,7 @@ const cronjobHeaders = [
   { title: "Active", key: "active_count", width: "100px" },
   { title: "Last Scheduled", key: "last_schedule_time", width: "180px" },
   { title: "Age", key: "created_at", width: "140px" },
-  { title: "", key: "actions", width: "120px", sortable: false },
+  { title: "", key: "actions", width: "160px", sortable: false },
 ];
 
 const secretHeaders = [
@@ -261,6 +278,92 @@ const saHeaders = [
   { title: "Age", key: "created_at", width: "120px" },
   { title: "", key: "actions", width: "80px", sortable: false },
 ];
+
+const resetCronJobForm = () => {
+  cronJobName.value = "";
+  cronJobSchedule.value = "";
+  cronJobImage.value = "";
+  cronJobCommand.value = "";
+  cronJobSuspend.value = false;
+  cronJobDialogError.value = null;
+  cronJobDialogSubmitting.value = false;
+};
+
+const openCreateCronJob = () => {
+  cronJobDialogMode.value = "create";
+  resetCronJobForm();
+  showCronJobDialog.value = true;
+};
+
+const openEditCronJob = async (item: CronJobSummary) => {
+  cronJobDialogMode.value = "edit";
+  resetCronJobForm();
+  cronJobName.value = item.name;
+  cronJobSchedule.value = item.schedule;
+  cronJobSuspend.value = item.suspend;
+  showCronJobDialog.value = true;
+};
+
+const submitCronJob = async () => {
+  if (!ns.selected) return;
+  cronJobDialogSubmitting.value = true;
+  cronJobDialogError.value = null;
+  try {
+    if (cronJobDialogMode.value === "create") {
+      const body: CreateCronJobRequest = {
+        name: cronJobName.value,
+        schedule: cronJobSchedule.value,
+        image: cronJobImage.value,
+        suspend: cronJobSuspend.value,
+      };
+      const cmd = cronJobCommand.value.trim();
+      if (cmd) {
+        body.command = cmd.split(/\s+/);
+      }
+      await cronjobsApi.create(ns.selected, body);
+    } else {
+      const body: UpdateCronJobRequest = {
+        schedule: cronJobSchedule.value || undefined,
+        image: cronJobImage.value || undefined,
+        suspend: cronJobSuspend.value,
+      };
+      await cronjobsApi.update(ns.selected, cronJobName.value, body);
+    }
+    showCronJobDialog.value = false;
+    await fetchCronjobs(ns.selected);
+  } catch (e) {
+    cronJobDialogError.value =
+      e instanceof ApiError ? e.body.message
+        : e instanceof Error ? e.message
+          : "Failed to save cronjob";
+  } finally {
+    cronJobDialogSubmitting.value = false;
+  }
+};
+
+const openDeleteCronJob = (name: string) => {
+  cronJobDeleteTarget.value = name;
+  showCronJobDeleteDialog.value = true;
+};
+
+const confirmDeleteCronJob = async () => {
+  if (!ns.selected || !cronJobDeleteTarget.value) return;
+  cronJobDeleteLoading.value = true;
+  try {
+    await cronjobsApi.delete(ns.selected, cronJobDeleteTarget.value);
+    showCronJobDeleteDialog.value = false;
+    cronJobDeleteTarget.value = null;
+    await fetchCronjobs(ns.selected);
+  } catch (e) {
+    cronjobsError.value =
+      e instanceof ApiError ? e.body.message
+        : e instanceof Error ? e.message
+          : "Failed to delete cronjob";
+    showCronJobDeleteDialog.value = false;
+  } finally {
+    cronJobDeleteLoading.value = false;
+  }
+};
 
 const triggerCronJob = async (name: string) => {
   if (!ns.selected) return;
@@ -720,6 +823,15 @@ const deleteSa = async (name: string) => {
         Create ConfigMap
       </v-btn>
       <v-btn
+        v-else-if="tab === 'cronjobs'"
+        color="primary"
+        prepend-icon="mdi-plus"
+        :disabled="!ns.selected"
+        @click="openCreateCronJob"
+      >
+        New CronJob
+      </v-btn>
+      <v-btn
         v-else-if="tab === 'serviceaccounts'"
         color="primary"
         prepend-icon="mdi-plus"
@@ -907,6 +1019,21 @@ const deleteSa = async (name: string) => {
                 title="View logs"
                 icon="mdi-text-box-outline"
                 @click.stop="openCronJobLogs(item.name)"
+              />
+              <v-btn
+                size="small"
+                variant="text"
+                title="Edit"
+                icon="mdi-pencil"
+                @click.stop="openEditCronJob(item)"
+              />
+              <v-btn
+                size="small"
+                variant="text"
+                color="error"
+                title="Delete"
+                icon="mdi-delete"
+                @click.stop="openDeleteCronJob(item.name)"
               />
             </div>
           </template>
@@ -1419,6 +1546,90 @@ const deleteSa = async (name: string) => {
         </v-card-actions>
       </v-card>
     </v-dialog>
+
+    <!-- Create/Edit CronJob Dialog -->
+    <v-dialog v-model="showCronJobDialog" max-width="560" persistent>
+      <v-card>
+        <v-card-title>
+          {{ cronJobDialogMode === "create" ? "New CronJob" : `Edit ${cronJobName}` }}
+        </v-card-title>
+        <v-card-text>
+          <v-alert v-if="cronJobDialogError" type="error" class="mb-4" closable>
+            {{ cronJobDialogError }}
+          </v-alert>
+          <v-form @submit.prevent="submitCronJob">
+            <v-text-field
+              v-model="cronJobName"
+              label="Name"
+              :rules="nameRules"
+              :readonly="cronJobDialogMode === 'edit'"
+              autofocus
+              required
+              class="mb-1"
+            />
+            <v-text-field
+              v-model="cronJobSchedule"
+              label="Schedule"
+              placeholder="0 * * * *"
+              hint="Standard cron expression — minute hour day-of-month month day-of-week"
+              persistent-hint
+              required
+              class="mb-1"
+            />
+            <v-text-field
+              v-model="cronJobImage"
+              label="Image"
+              placeholder="example/image:latest"
+              :hint="cronJobDialogMode === 'edit' ? 'Leave blank to keep existing image' : ''"
+              :persistent-hint="cronJobDialogMode === 'edit'"
+              :required="cronJobDialogMode === 'create'"
+              class="mb-1"
+            />
+            <v-text-field
+              v-model="cronJobCommand"
+              label="Command (optional)"
+              hint="Space-separated, e.g. /bin/sh -c 'echo hello'"
+              persistent-hint
+              class="mb-1"
+            />
+            <v-switch
+              v-model="cronJobSuspend"
+              label="Suspend"
+              color="warning"
+              hide-details
+            />
+          </v-form>
+        </v-card-text>
+        <v-card-actions>
+          <v-spacer />
+          <v-btn
+            variant="text"
+            :disabled="cronJobDialogSubmitting"
+            @click="showCronJobDialog = false"
+          >
+            Cancel
+          </v-btn>
+          <v-btn
+            color="primary"
+            variant="flat"
+            :loading="cronJobDialogSubmitting"
+            @click="submitCronJob"
+          >
+            {{ cronJobDialogMode === "create" ? "Create" : "Save" }}
+          </v-btn>
+        </v-card-actions>
+      </v-card>
+    </v-dialog>
+
+    <!-- Delete CronJob Confirmation Dialog -->
+    <ConfirmDialog
+      v-model="showCronJobDeleteDialog"
+      title="Delete CronJob"
+      :message="`Are you sure you want to delete '${cronJobDeleteTarget}'? This action cannot be undone.`"
+      confirm-text="Delete"
+      :loading="cronJobDeleteLoading"
+      @confirm="confirmDeleteCronJob"
+    />
 
     <!-- Deployment row action dialogs -->
     <ConfirmDialog

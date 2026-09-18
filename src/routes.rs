@@ -179,8 +179,16 @@ pub fn build_router(
             "/api/plugins/{name}/upload",
             post(plugins::upload_plugin_wasm),
         )
-        .route("/api/namespaces/{ns}/cronjobs", get(cronjobs::list))
-        .route("/api/namespaces/{ns}/cronjobs/{name}", get(cronjobs::get))
+        .route(
+            "/api/namespaces/{ns}/cronjobs",
+            get(cronjobs::list).post(cronjobs::create),
+        )
+        .route(
+            "/api/namespaces/{ns}/cronjobs/{name}",
+            get(cronjobs::get)
+                .patch(cronjobs::update)
+                .delete(cronjobs::delete),
+        )
         .route(
             "/api/namespaces/{ns}/cronjobs/{name}/trigger",
             post(cronjobs::trigger),
