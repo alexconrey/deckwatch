@@ -213,7 +213,8 @@ pub async fn create(
                     template: PodTemplateSpec {
                         spec: Some(PodSpec {
                             restart_policy: Some(
-                                body.restart_policy.unwrap_or_else(|| "OnFailure".to_string()),
+                                body.restart_policy
+                                    .unwrap_or_else(|| "OnFailure".to_string()),
                             ),
                             containers: vec![container],
                             ..Default::default()
