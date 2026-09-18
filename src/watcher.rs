@@ -1045,6 +1045,116 @@ async fn verify_image_available(http: &reqwest::Client, state: &AppState, image_
     }
 }
 
+/// Strip the tag or digest from an image reference, returning only the
+/// registry + repository path. Port numbers in the registry host are
+/// preserved: "registry:5000/org/app:tag" → "registry:5000/org/app".
+fn image_base(image: &str) -> &str {
+    // Strip digest first (@sha256:...), then tag after last slash
+    // Handles: "registry:5000/org/app:tag" -> "registry:5000/org/app"
+    // Handles: "ghcr.io/org/app@sha256:abc" -> "ghcr.io/org/app"
+    let without_digest = image.split_once('@').map(|(b, _)| b).unwrap_or(image);
+    // Find the last '/' and only strip ':tag' after it
+    if let Some(slash_pos) = without_digest.rfind('/') {
+        let after_slash = &without_digest[slash_pos..];
+        if let Some(colon_pos) = after_slash.find(':') {
+            return &without_digest[..slash_pos + colon_pos];
+        }
+    } else if let Some(colon_pos) = without_digest.find(':') {
+        return &without_digest[..colon_pos];
+    }
+    without_digest
+}
+
+/// Patch any CronJobs in `namespace` whose containers share the same base
+/// image as `new_image`. Uses the container name as the strategic-merge key.
+/// Per-CronJob errors are logged at WARN and do not abort the loop.
+async fn sync_cronjob_images(client: &kube::Client, namespace: &str, new_image: &str) {
+    use k8s_openapi::api::batch::v1::CronJob;
+
+    let api: Api<CronJob> = Api::namespaced(client.clone(), namespace);
+    let cjs = match api.list(&ListParams::default()).await {
+        Ok(list) => list,
+        Err(e) => {
+            tracing::warn!(
+                namespace = %namespace,
+                error = %e,
+                "sync_cronjob_images: failed to list cronjobs"
+            );
+            return;
+        }
+    };
+
+    let new_base = image_base(new_image);
+
+    for cj in cjs.iter() {
+        let cj_name = match cj.metadata.name.as_deref() {
+            Some(n) => n,
+            None => continue,
+        };
+
+        let containers = cj
+            .spec
+            .as_ref()
+            .and_then(|s| s.job_template.spec.as_ref())
+            .and_then(|js| js.template.spec.as_ref())
+            .map(|ps| ps.containers.as_slice())
+            .unwrap_or(&[]);
+
+        for container in containers {
+            let container_image = match container.image.as_deref() {
+                Some(img) => img,
+                None => continue,
+            };
+
+            if image_base(container_image) != new_base {
+                continue;
+            }
+
+            let container_name = &container.name;
+            let patch = serde_json::json!({
+                "spec": {
+                    "jobTemplate": {
+                        "spec": {
+                            "template": {
+                                "spec": {
+                                    "containers": [{
+                                        "name": container_name,
+                                        "image": new_image
+                                    }]
+                                }
+                            }
+                        }
+                    }
+                }
+            });
+
+            match api
+                .patch(cj_name, &PatchParams::default(), &Patch::Merge(patch))
+                .await
+            {
+                Ok(_) => {
+                    tracing::info!(
+                        namespace = %namespace,
+                        cronjob = %cj_name,
+                        container = %container_name,
+                        image = %new_image,
+                        "sync_cronjob_images: patched cronjob container image"
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        namespace = %namespace,
+                        cronjob = %cj_name,
+                        container = %container_name,
+                        error = %e,
+                        "sync_cronjob_images: failed to patch cronjob"
+                    );
+                }
+            }
+        }
+    }
+}
+
 async fn monitor_builds(state: &AppState, http: &reqwest::Client) -> anyhow::Result<()> {
     // Find all gitops configs that have an active build ("building" status).
     let building_configs = gitops_configs::Entity::find()
@@ -1156,6 +1266,8 @@ async fn monitor_builds(state: &AppState, http: &reqwest::Client) -> anyhow::Res
                             &Patch::Strategic(label_patch),
                         )
                         .await;
+
+                    sync_cronjob_images(&state.kube_client, ns, &new_image).await;
 
                     update_gitops_config_field(&state.db, &config.application_id, |active| {
                         active.last_build_status = Set(Some("success".to_string()));
@@ -1269,6 +1381,8 @@ async fn monitor_builds(state: &AppState, http: &reqwest::Client) -> anyhow::Res
                         &Patch::Strategic(label_patch),
                     )
                     .await;
+
+                sync_cronjob_images(&state.kube_client, ns, &new_image).await;
 
                 update_gitops_config_field(&state.db, &config.application_id, |active| {
                     active.last_build_status = Set(Some("success".to_string()));
