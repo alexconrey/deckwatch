@@ -54,6 +54,9 @@ pub enum WebhookError {
 
 /// Providers agree on a common interface so the webhook receiver and poller
 /// can be written once against the trait.
+// async_trait emits `#[must_use]` on methods that already return a
+// `#[must_use]` boxed future; clippy 1.91 flags that on Linux targets.
+#[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait GitProvider: Send + Sync {
     /// Human-readable identifier — used in logs and to disambiguate
