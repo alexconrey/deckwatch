@@ -2263,6 +2263,18 @@ async fn reconcile_pending_resources(state: &AppState) {
             continue;
         }
 
+        // Resources often only become available on a background poll (e.g. an
+        // RDS instance finishing creation), so plugins emit their Kubernetes
+        // objects (IRSA ServiceAccounts, bootstrap Jobs) here. Apply them the
+        // same way the provision/refresh handlers do.
+        if !result.kubernetes_resources.is_empty() {
+            crate::plugins::apply_kubernetes_resources(
+                &result.kubernetes_resources,
+                &state.kube_client,
+            )
+            .await;
+        }
+
         tracing::info!(
             namespace = %ns,
             application = %app_name,
