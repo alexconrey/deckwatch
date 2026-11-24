@@ -28,7 +28,7 @@ pub enum GitHubError {
     /// The token may not be sent to the configured API host. Nothing was sent.
     #[error(transparent)]
     Binding(#[from] BindingError),
-    #[error("GitHub API request failed: {0}")]
+    #[error("GitHub API request failed: {}", super::error_chain(.0))]
     Request(#[from] reqwest::Error),
     #[error("GitHub API returned HTTP {status}: {body}")]
     Status { status: u16, body: String },

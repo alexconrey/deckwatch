@@ -22,6 +22,7 @@ mod kube_ext;
 mod license;
 mod license_middleware;
 mod log_sanitize;
+mod logging;
 mod metrics;
 mod migrations;
 mod notifications;
@@ -36,7 +37,6 @@ mod webhook_tls;
 
 use clap::Parser;
 use tokio::net::TcpListener;
-use tracing_subscriber::EnvFilter;
 
 use config::Config;
 use handlers::registry::RegistryStore;
@@ -49,10 +49,7 @@ pub async fn run() {
     let _ = rustls::crypto::ring::default_provider().install_default();
 
     tracing_subscriber::fmt()
-        .with_env_filter(
-            EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| EnvFilter::new("deckwatch=info,tower_http=info")),
-        )
+        .with_env_filter(logging::env_filter())
         .json()
         .init();
 

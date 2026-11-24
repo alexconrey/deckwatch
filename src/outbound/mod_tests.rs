@@ -155,3 +155,46 @@ fn config_fails_loudly_on_a_bad_bundle_or_flag() {
         Err(OutboundError::InsecureFlag(_))
     ));
 }
+
+#[derive(Debug)]
+struct Layer {
+    msg: &'static str,
+    source: Option<Box<Layer>>,
+}
+
+impl std::fmt::Display for Layer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.msg)
+    }
+}
+
+impl std::error::Error for Layer {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        self.source
+            .as_deref()
+            .map(|e| e as &(dyn std::error::Error + 'static))
+    }
+}
+
+#[test]
+fn error_chain_includes_every_source_once() {
+    let err = Layer {
+        msg: "error sending request for url (https://api.example.com/)",
+        source: Some(Box::new(Layer {
+            msg: "client error (Connect)",
+            source: Some(Box::new(Layer {
+                msg: "invalid peer certificate: UnknownIssuer",
+                source: Some(Box::new(Layer {
+                    // Already part of the message above: not repeated.
+                    msg: "UnknownIssuer",
+                    source: None,
+                })),
+            })),
+        })),
+    };
+    assert_eq!(
+        error_chain(&err),
+        "error sending request for url (https://api.example.com/): client error (Connect): \
+         invalid peer certificate: UnknownIssuer"
+    );
+}

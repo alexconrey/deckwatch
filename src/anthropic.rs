@@ -31,7 +31,7 @@ use reqwest::header::{HeaderMap, HeaderValue, ACCEPT, AUTHORIZATION, CONTENT_TYP
 use serde::Deserialize;
 
 use crate::outbound::{
-    authorize, authorize_aws, BindingError, CredentialSource, Endpoint, EndpointError,
+    authorize, authorize_aws, error_chain, BindingError, CredentialSource, Endpoint, EndpointError,
 };
 
 const ANTHROPIC_MESSAGES_PATH: &str = "/v1/messages";
@@ -292,7 +292,13 @@ impl AnthropicClient {
             .json(&body)
             .send()
             .await
-            .map_err(|e| format!("{} API request failed: {e}", self.provider_name()))?;
+            .map_err(|e| {
+                format!(
+                    "{} API request failed: {}",
+                    self.provider_name(),
+                    error_chain(&e)
+                )
+            })?;
 
         let json = self.success_json(resp).await?;
         Ok(response_text(&json))
@@ -329,7 +335,7 @@ impl AnthropicClient {
             .body(body)
             .send()
             .await
-            .map_err(|e| format!("Bedrock API request failed: {e}"))?;
+            .map_err(|e| format!("Bedrock API request failed: {}", error_chain(&e)))?;
 
         let json = self.success_json(resp).await?;
         Ok(response_text(&json))
@@ -367,7 +373,13 @@ impl AnthropicClient {
             .json(&body)
             .send()
             .await
-            .map_err(|e| format!("{} API request failed: {e}", self.provider_name()))?;
+            .map_err(|e| {
+                format!(
+                    "{} API request failed: {}",
+                    self.provider_name(),
+                    error_chain(&e)
+                )
+            })?;
 
         if !resp.status().is_success() {
             let status = resp.status();
@@ -390,7 +402,8 @@ impl AnthropicClient {
 
         let mut stream = bytes_stream;
         while let Some(chunk_result) = stream.next().await {
-            let chunk = chunk_result.map_err(|e| format!("stream read error: {e}"))?;
+            let chunk =
+                chunk_result.map_err(|e| format!("stream read error: {}", error_chain(&e)))?;
             byte_buf.extend_from_slice(&chunk);
 
             // Process complete lines (delimited by \n).
@@ -590,7 +603,12 @@ pub async fn exchange_sa_key_for_token(
         ])
         .send()
         .await
-        .map_err(|e| upstream(format!("GCP token exchange request failed: {e}")))?;
+        .map_err(|e| {
+            upstream(format!(
+                "GCP token exchange request failed: {}",
+                error_chain(&e)
+            ))
+        })?;
 
     if !resp.status().is_success() {
         let status = resp.status();

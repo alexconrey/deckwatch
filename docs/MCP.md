@@ -300,11 +300,34 @@ claude mcp remove deckwatch-local
 claude mcp add --transport http deckwatch-local http://localhost:8080/mcp
 ```
 
+### 404 from DRA, VolumeAttributesClass or other alpha/beta tools
+
+The upstream mcp-k8s tools for alpha and beta APIs use the newest version in
+the Kubernetes 1.33 API types that deckwatch is built with: DRA
+(`list_resourceclaims`, `list_resourceslices`, `list_deviceclasses`, …) uses
+`resource.k8s.io/v1beta2`, VolumeAttributesClass `storage.k8s.io/v1beta1`,
+ClusterTrustBundle and LeaseCandidate `v1beta1`, and MutatingAdmissionPolicy,
+StorageVersion and StorageVersionMigration `v1alpha1`. Clusters serve those
+versions only when they are enabled with `--runtime-config`. A default 1.35
+cluster such as Zeus serves only the GA versions, so these tools return the
+API server's 404 there. IPAddress and ServiceCIDR tools use the GA
+`networking.k8s.io/v1` and work on every supported cluster.
+
 ### Namespace access denied
 
 The MCP server respects deckwatch's namespace allowlist. If a tool returns
 "namespace not allowed", check the `DECKWATCH_NAMESPACES` environment
 variable on the deckwatch deployment.
+
+### Which tools were called
+
+Deckwatch logs one line per `tools/call`, with the message `mcp tool call`,
+the `tool` name, `status` (`ok` or `error`) and `duration_ms`. Arguments and
+error text are never logged.
+
+```bash
+kubectl logs -n deckwatch deploy/deckwatch | grep '"mcp tool call"'
+```
 
 ---
 

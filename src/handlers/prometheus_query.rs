@@ -337,7 +337,10 @@ pub async fn execute_range(
         Ok(r) => r,
         Err(e) => {
             timer.finish(false);
-            return Err(format!("failed to reach prometheus at {base_url}: {e}"));
+            return Err(format!(
+                "failed to reach prometheus at {base_url}: {}",
+                crate::outbound::error_chain(&e)
+            ));
         }
     };
 

@@ -163,6 +163,24 @@ repository host named in a GitOps config (smart-HTTP and Kaniko) and to a
 plugin's `url` source; those URLs are chosen per repository or plugin and are
 not bound.
 
+## Troubleshooting
+
+Outbound errors include the TLS reason, for example:
+
+```text
+Anthropic API request failed: error sending request for url (https://gateway.example.com/v1/messages): client error (Connect): invalid peer certificate: UnknownIssuer
+```
+
+- *UnknownIssuer*, *unable to get local issuer certificate*, *certificates
+  required to validate this certificate cannot be found*: the server's CA is
+  not trusted. Add it to `DECKWATCH_EXTRA_CA_FILE` (include intermediates the
+  server does not send).
+- *NotValidForName*, *Hostname mismatch*: the certificate does not list the
+  host deckwatch connects to.
+- *Expired*: the server certificate (or one in its chain) has expired.
+- *re-enter the ... in Settings*: a credential binding refusal; nothing was
+  sent. See [Credential binding](#credential-binding).
+
 ## Timeouts, user agent and proxies
 
 Every request carries `User-Agent: deckwatch/<version>` and uses the proxy

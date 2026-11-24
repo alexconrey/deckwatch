@@ -51,6 +51,23 @@ pub const EXTRA_CA_FILE_ENV: &str = "DECKWATCH_EXTRA_CA_FILE";
 /// development and tests only).
 pub const ALLOW_INSECURE_ENDPOINTS_ENV: &str = "DECKWATCH_ALLOW_INSECURE_ENDPOINTS";
 
+/// `err` followed by its sources, joined with ": ". reqwest's `Display` stops
+/// at "error sending request for url (...)"; the reason (unknown issuer,
+/// expired certificate, connection refused) is only in the source chain.
+pub fn error_chain(err: &(dyn std::error::Error + 'static)) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    let mut current = Some(err);
+    while let Some(e) = current {
+        let msg = e.to_string();
+        // Some errors repeat their source's message in their own.
+        if !msg.is_empty() && !parts.iter().any(|p| p.contains(&msg)) {
+            parts.push(msg);
+        }
+        current = e.source();
+    }
+    parts.join(": ")
+}
+
 /// `deckwatch/<version>`, sent on every outbound request.
 pub fn user_agent() -> String {
     format!("deckwatch/{}", env!("CARGO_PKG_VERSION"))
