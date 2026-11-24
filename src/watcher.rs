@@ -1785,6 +1785,9 @@ pub(crate) struct PluginFieldSweep {
     apps_with_resources: Option<BTreeSet<String>>,
     /// The previous sweep hit an API error, so sweep again.
     retry: bool,
+    /// Which plugins provisioned resources for each application in the
+    /// previous cycle, so a release can be reported against them.
+    plugins_by_app: BTreeMap<String, BTreeSet<String>>,
 }
 
 impl PluginFieldSweep {
@@ -1817,6 +1820,7 @@ impl PluginFieldSweep {
 async fn release_stale_plugin_fields(
     state: &AppState,
     apps_with_resources: &BTreeSet<String>,
+    plugins_by_app: &BTreeMap<String, BTreeSet<String>>,
 ) -> bool {
     let scopes: Vec<Option<&str>> = if state.allowed_namespaces.is_empty() {
         vec![None]
@@ -1834,6 +1838,7 @@ async fn release_stale_plugin_fields(
             state,
             scope,
             apps_with_resources,
+            plugins_by_app,
             deployment_fingerprint_key,
         )
         .await;
@@ -1841,6 +1846,7 @@ async fn release_stale_plugin_fields(
             state,
             scope,
             apps_with_resources,
+            plugins_by_app,
             cronjob_fingerprint_key,
         )
         .await;
@@ -1854,6 +1860,7 @@ async fn release_stale_workloads<K>(
     state: &AppState,
     scope: Option<&str>,
     apps_with_resources: &BTreeSet<String>,
+    plugins_by_app: &BTreeMap<String, BTreeSet<String>>,
     fingerprint_key: fn(&str, &str) -> String,
 ) -> bool
 where
@@ -1910,6 +1917,13 @@ where
                     name = %name,
                     "reconcile_application_plugins: released plugin resource fields (no provisioned resources left)"
                 );
+                report_fields_released(
+                    state,
+                    &workload.metadata,
+                    &api_version,
+                    &kind,
+                    plugins_by_app,
+                );
             }
             Err(e) => {
                 tracing::warn!(
@@ -1924,6 +1938,53 @@ where
         }
     }
     released_all
+}
+
+/// Report a release as an `info` event (`plugin.fields_released`) for each
+/// plugin that had provisioned resources in the workload's application last
+/// cycle. A workload that lost its application label, or a release on the
+/// first cycle after startup, can't be attributed and is reported under
+/// `deckwatch`.
+fn report_fields_released(
+    state: &AppState,
+    meta: &ObjectMeta,
+    api_version: &str,
+    kind: &str,
+    plugins_by_app: &BTreeMap<String, BTreeSet<String>>,
+) {
+    let (Some(ns), Some(name)) = (meta.namespace.as_deref(), meta.name.as_deref()) else {
+        return;
+    };
+    let app = meta
+        .labels
+        .as_ref()
+        .and_then(|labels| labels.get(APP_LABEL))
+        .map(|app| format!("{ns}/{app}"));
+    let plugins: Vec<&str> = app
+        .as_ref()
+        .and_then(|app| plugins_by_app.get(app))
+        .map(|plugins| plugins.iter().map(String::as_str).collect())
+        .filter(|plugins: &Vec<&str>| !plugins.is_empty())
+        .unwrap_or_else(|| vec!["deckwatch"]);
+    let mut event = crate::plugin_events::host_event(
+        crate::plugins::EventSeverity::Info,
+        crate::plugin_events::codes::FIELDS_RELEASED,
+        format!(
+            "released the env vars, sidecars and annotations that provisioned resources added \
+             to {kind} {ns}/{name}: its application has no provisioned resources left"
+        ),
+        &crate::plugin_events::SecretScrubber::default(),
+    );
+    event.object = Some(crate::plugins::KubernetesObjectRef {
+        api_version: api_version.to_string(),
+        kind: kind.to_string(),
+        name: name.to_string(),
+    });
+    for plugin in plugins {
+        state
+            .plugin_telemetry
+            .log_events(plugin, "provision", std::slice::from_ref(&event));
+    }
 }
 
 async fn reconcile_application_plugins(state: &AppState, sweep: &mut PluginFieldSweep) {
@@ -1949,9 +2010,18 @@ async fn reconcile_application_plugins(state: &AppState, sweep: &mut PluginField
     let apps_with_resources: BTreeSet<String> =
         rows.iter().map(|row| row.application_id.clone()).collect();
     if sweep.needed(&apps_with_resources) {
-        sweep.retry = !release_stale_plugin_fields(state, &apps_with_resources).await;
+        sweep.retry =
+            !release_stale_plugin_fields(state, &apps_with_resources, &sweep.plugins_by_app).await;
     }
     sweep.apps_with_resources = Some(apps_with_resources);
+    sweep.plugins_by_app.clear();
+    for row in &rows {
+        sweep
+            .plugins_by_app
+            .entry(row.application_id.clone())
+            .or_default()
+            .insert(row.plugin_name.clone());
+    }
 
     if rows.is_empty() {
         return;
@@ -2109,24 +2179,23 @@ async fn reconcile_application_plugins(state: &AppState, sweep: &mut PluginField
                                 .collect(),
                             plugin_outputs: Default::default(),
                             provisioned_resources,
+                            trace_context: None,
                         };
 
+                        let call = crate::plugins::PluginCall::new(
+                            &state.plugin_telemetry,
+                            crate::plugins::Trigger::Reconcile,
+                        )
+                        .namespace(ns)
+                        .application(app_name)
+                        .deployment(&dep_name);
                         for plugin in crate::plugins::sort_by_dependencies(&plugins) {
-                            match crate::plugins::run_plugin(plugin, &ctx) {
-                                Ok(result) => {
-                                    // Warnings are already logged inside run_plugin.
-                                    final_annotations.extend(result.deployment_annotations.clone());
-                                    final_labels.extend(result.deployment_labels.clone());
-                                }
-                                Err(e) => {
-                                    tracing::warn!(
-                                        plugin = %plugin.name,
-                                        namespace = %ns,
-                                        deployment = %dep_name,
-                                        error = %e,
-                                        "reconcile_application_plugins: plugin apply() failed"
-                                    );
-                                }
+                            // The funnel logs failures and warnings in the
+                            // plugin's span.
+                            let outcome = crate::plugins::run_plugin(plugin, &ctx, &call);
+                            if let Some(result) = &outcome.result {
+                                final_annotations.extend(result.deployment_annotations.clone());
+                                final_labels.extend(result.deployment_labels.clone());
                             }
                         }
                     }
@@ -2455,21 +2524,27 @@ async fn reconcile_pending_resources(state: &AppState) {
             namespace: ns.to_string(),
             resource_id: resource_id.clone(),
             fields,
+            trace_context: None,
         };
 
-        let result = match crate::plugins::run_provision(plugin, &req) {
-            Ok(r) => r,
-            Err(e) => {
-                tracing::warn!(
-                    namespace = %ns,
-                    application = %app_name,
-                    plugin = %plugin_name,
-                    resource_id = %resource_id,
-                    error = %e,
-                    "reconcile_pending_resources: provision() failed, will retry next cycle"
-                );
-                continue;
-            }
+        let call = crate::plugins::PluginCall::new(
+            &state.plugin_telemetry,
+            crate::plugins::Trigger::StatusPoll,
+        )
+        .namespace(&ns)
+        .application(&app_name)
+        .resource(&resource_id);
+        let (result, outcome) = crate::plugins::run_provision(plugin, &req, &call).take_result();
+        let Some(result) = result else {
+            tracing::warn!(
+                namespace = %ns,
+                application = %app_name,
+                plugin = %plugin_name,
+                resource_id = %resource_id,
+                error = %outcome.failure_summary(),
+                "reconcile_pending_resources: provision() failed, will retry next cycle"
+            );
+            continue;
         };
 
         let current_state: HashMap<String, String> =
@@ -2540,8 +2615,9 @@ async fn reconcile_pending_resources(state: &AppState) {
         // same way the provision/refresh handlers do.
         if !result.kubernetes_resources.is_empty() {
             crate::plugins::apply_kubernetes_resources(
-                &result.kubernetes_resources,
+                &outcome.k8s_resources(&result.kubernetes_resources),
                 &state.kube_client,
+                &state.plugin_telemetry,
             )
             .await;
         }

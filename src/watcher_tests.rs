@@ -988,6 +988,7 @@ fn plugin_field_sweep_runs_when_an_app_loses_all_resources() {
     let sweep = PluginFieldSweep {
         apps_with_resources: Some(app_set(&["team/shop", "team/blog"])),
         retry: false,
+        ..Default::default()
     };
     assert!(sweep.needed(&app_set(&["team/blog"])));
     assert!(sweep.needed(&app_set(&[])));
@@ -998,6 +999,7 @@ fn plugin_field_sweep_skipped_when_no_app_lost_resources() {
     let sweep = PluginFieldSweep {
         apps_with_resources: Some(app_set(&["team/shop"])),
         retry: false,
+        ..Default::default()
     };
     assert!(!sweep.needed(&app_set(&["team/shop"])));
     assert!(!sweep.needed(&app_set(&["team/shop", "team/blog"])));
@@ -1008,6 +1010,7 @@ fn plugin_field_sweep_retries_after_failure() {
     let sweep = PluginFieldSweep {
         apps_with_resources: Some(app_set(&["team/shop"])),
         retry: true,
+        ..Default::default()
     };
     assert!(sweep.needed(&app_set(&["team/shop"])));
 }
@@ -1381,6 +1384,7 @@ async fn reconcile_test_state(cluster: &FakeCluster) -> AppState {
         encryption_key: String::new(),
         plugins: std::sync::Arc::new(tokio::sync::RwLock::new(vec![])),
         plugin_patch_fingerprints: std::sync::Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+        plugin_telemetry: Default::default(),
     }
 }
 
@@ -1416,6 +1420,40 @@ async fn remove_resource(state: &AppState, id: &str) {
         .exec(&state.db)
         .await
         .expect("delete resource row");
+}
+
+/// The release is reported as an `info` plugin event against the plugin
+/// whose resources the application had.
+#[tokio::test]
+async fn releasing_plugin_fields_is_reported_as_a_plugin_event() {
+    let cluster = FakeCluster::with_objects(vec![shop_deployment(deckwatch_update_entry())]);
+    let state = reconcile_test_state(&cluster).await;
+    let mut sweep = PluginFieldSweep::default();
+    let row = insert_queue_resource(&state, "team", "shop").await;
+    reconcile_application_plugins(&state, &mut sweep).await;
+    cluster.take_requests();
+
+    remove_resource(&state, &row).await;
+    let (_, events) = crate::plugin_fixture::capture::capture_async(reconcile_application_plugins(
+        &state, &mut sweep,
+    ))
+    .await;
+    let released: Vec<_> = events
+        .iter()
+        .filter(|e| {
+            e.target == "deckwatch::plugin_events"
+                && e.fields.get("code").map(String::as_str)
+                    == Some(crate::plugin_events::codes::FIELDS_RELEASED)
+        })
+        .collect();
+    assert_eq!(released.len(), 1, "{events:#?}");
+    assert_eq!(released[0].level, tracing::Level::INFO);
+    assert_eq!(released[0].fields["plugin"], "AWS");
+    assert!(
+        released[0].message.contains("Deployment team/shop-web"),
+        "{}",
+        released[0].message
+    );
 }
 
 #[tokio::test]
@@ -1736,6 +1774,7 @@ async fn live_cluster_release_removes_only_plugin_owned_fields() {
         encryption_key: String::new(),
         plugins: std::sync::Arc::new(tokio::sync::RwLock::new(vec![])),
         plugin_patch_fingerprints: std::sync::Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+        plugin_telemetry: Default::default(),
     };
     crate::db::ensure_application(&state.db, LIVE_NAMESPACE, "shop")
         .await

@@ -27,6 +27,9 @@ mod metrics;
 mod migrations;
 mod notifications;
 pub mod outbound;
+mod plugin_events;
+#[cfg(test)]
+mod plugin_fixture;
 mod plugins;
 mod rate_limit;
 mod routes;
@@ -160,6 +163,7 @@ pub async fn run() {
         plugin_patch_fingerprints: std::sync::Arc::new(tokio::sync::Mutex::new(
             std::collections::HashMap::new(),
         )),
+        plugin_telemetry: plugin_events::PluginTelemetry::new(config.encryption_key.clone()),
     };
 
     migrate_configmap_apps_to_db(&state).await;

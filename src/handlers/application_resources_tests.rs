@@ -340,6 +340,7 @@ async fn test_state(api: &FakeApi) -> AppState {
         plugin_patch_fingerprints: std::sync::Arc::new(tokio::sync::Mutex::new(
             std::collections::HashMap::new(),
         )),
+        plugin_telemetry: Default::default(),
     }
 }
 
@@ -637,9 +638,10 @@ async fn deprovision_without_a_loaded_plugin_deletes_nothing() {
     .await
     .unwrap();
 
-    let deletions = deprovision_resource(&state, &TARGET).await.unwrap();
+    let response = deprovision_resource(&state, &TARGET).await.unwrap();
 
-    assert!(deletions.is_empty());
+    assert!(response.kubernetes_resource_deletions.is_empty());
+    assert!(response.plugin_events.is_empty());
     assert!(api.requests().is_empty());
     assert!(application_plugin_resources::Entity::find()
         .all(&state.db)

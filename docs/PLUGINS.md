@@ -281,7 +281,7 @@ Deckwatch deletes them after `deprovision()` returns, whether the resource was r
 - An object that's already gone counts as deleted.
 - Every object gets an audit entry (action `delete`, outcome in the detail). Refusals and failures are also logged as warnings and counted in `deckwatch_plugin_errors_total` (`k8s_delete_refused`, `k8s_delete_failed`). None of them stops the resource record from being removed.
 
-The MCP tool's response reports each object's outcome in `kubernetes_resource_deletions`.
+The `DELETE …/resources/{plugin}/{resource_id}` response and the MCP tool's response report each object's outcome in `kubernetes_resource_deletions`, next to the plugin's `message` and events.
 
 ---
 
@@ -341,6 +341,57 @@ cargo build --release --target wasm32-unknown-unknown
 
 ---
 
+## Events, warnings and errors
+
+Everything a plugin call reports is turned into **plugin events**, each with a
+severity (`info`, `warning` or `error`), a code, a message, and optionally a
+resource id, a Kubernetes object, a `retryable` flag and a hint:
+
+- **From the plugin.** Structured `events` (SDK 0.10.0, `PluginEvent`) on
+  `PluginResult`, `ResourceProvisionResult` and `ResourceDeprovisionResult`.
+  Use codes of the form `<plugin-name>.<code>`. The legacy `errors`,
+  `warnings` and deprovision `message` strings still work and become events
+  with code `plugin.unspecified`; the SDK's copies of structured events in
+  those fields are recognised and reported once.
+- **From deckwatch.** Failures it detects itself, with reserved codes:
+  `plugin.fetch_failed`, `plugin.checksum_mismatch`, `plugin.load_failed`
+  (bad module, missing export, `min_deckwatch_version`), `plugin.trap` (a
+  panic), `plugin.timeout`, `plugin.output_invalid` (the message names the
+  field, e.g. `env_vars[1].name`), `plugin.k8s_apply_failed` and
+  `plugin.policy_rejected`, plus the informational `plugin.fields_released`
+  (the reconciler removed what an application's provisioned resources had
+  added to a workload, because none are left). A plugin can't use the
+  `plugin.*` namespace: such codes are moved under the plugin's name.
+
+Where they show up:
+
+- **The response of the action that ran the plugin**, warnings included even
+  when it succeeds: `plugin_events` on deployment create and update, and on
+  provision and refresh; `{message, plugin_events,
+  kubernetes_resource_deletions}` from deprovision (the `message` is what the
+  plugin says it did and didn't clean up). A
+  `provision()` that fails outright returns 502 with the events. The MCP
+  tools `provision_resource`, `refresh_resource`, `deprovision_resource`,
+  `validate_plugin` and `enable_plugin` return them too, inside a fence that
+  marks them as untrusted text.
+- **The logs**, as `plugin event:` lines inside the call's `plugin {export}`
+  span, next to the plugin's own `log_*` output (target `extism::pdk`).
+
+Plugin text is untrusted. Before deckwatch returns, logs or stores it, it
+masks the values it passed the plugin for `secret` config fields (in any form:
+plain, the stored ciphertext, JSON-escaped or percent-encoded), redacts
+credentials in URLs, strips control characters, puts each message on one line
+and caps it at 2 KB, and keeps at most 20 events per call. Logging is rate
+limited per plugin; what's over the limit is dropped and counted in
+`deckwatch_plugin_events_dropped_total`.
+
+When deckwatch exports traces, `PluginContext`, `ResourceProvisionRequest`
+and `ResourceDeprovisionRequest` carry `trace_context`, a W3C `traceparent`
+for the call. Forward it with the SDK's `trace_headers()` so the plugin's own
+API calls join the trace.
+
+---
+
 ## Security considerations
 
 ### WASM sandboxing
@@ -389,7 +440,7 @@ Common causes:
 
 - Verify the deployment has the annotation the plugin checks for
 - Check that the annotation value matches exactly (case-sensitive, e.g. `"enabled"` not `"true"`)
-- Look for `plugin apply() failed` in deckwatch logs, which indicates a runtime error inside the WASM
+- Check the `plugin_events` in the deployment create/update response (the UI shows them after saving), or look for `plugin event:` lines in the deckwatch logs. A `plugin.trap`, `plugin.timeout` or `plugin.output_invalid` code means the plugin failed and was skipped.
 
 ### Env vars not appearing after update
 
@@ -405,7 +456,8 @@ This is intentional. If `deckwatch.plugin-env/<name>` or `deckwatch.plugin-sidec
 
 For developers working on deckwatch itself:
 
-- **`src/plugins.rs`** — plugin fetching, WASM execution via extism, env/sidecar merge logic
+- **`src/plugins.rs`** — plugin fetching, WASM execution via extism (every call goes through `call_export`, the funnel), env/sidecar merge logic
+- **`src/plugin_events.rs`** — turning results and failures into plugin events: normalization, secret masking, caps, the LLM fence and the log rate limit
 - **`src/handlers/settings.rs`** — `PluginConfig` and `PluginSource` types, background refresh on settings PUT
 - **`src/state.rs`** — `AppState.plugins: Arc<RwLock<Vec<LoadedPlugin>>>`
 - **`src/handlers/deployments.rs`** — `apply_plugins()` called in both `create` and `update` handlers

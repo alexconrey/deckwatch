@@ -3,6 +3,7 @@ import { computed, onMounted, ref, watch } from "vue";
 import { useRouter } from "vue-router";
 import { applicationsApi } from "@/api/applications";
 import { applicationResourcesApi } from "@/api/application_resources";
+import { pluginEventsOf } from "@/api/client";
 import { pluginsApi } from "@/api/plugins";
 import { usePolling } from "@/composables/usePolling";
 import { useSnackbar } from "@/composables/useSnackbar";
@@ -13,11 +14,15 @@ import type {
   ApplicationGitConfig,
   ApplicationPluginEntry,
   DiagAgent,
+  KubernetesObjectDeletion,
+  PluginEventReport,
   PluginResource,
   PluginSummary,
   ProvisionedResource,
   UpdateApplicationRequest,
 } from "@/types/api";
+import PluginEventList from "@/components/common/PluginEventList.vue";
+import { summarizeEvents, worstSeverity } from "@/utils/pluginEvents";
 import ApplicationHealthChip from "@/components/common/ApplicationHealthChip.vue";
 import StatusChip from "@/components/common/StatusChip.vue";
 import AddMemberDialog from "@/components/common/AddMemberDialog.vue";
@@ -379,6 +384,22 @@ const infraResources = ref<ProvisionedResource[]>([]);
 const infraLoading = ref(false);
 const infraError = ref<string | null>(null);
 
+// What the last provision or removal on this tab reported: the plugin's
+// events and, on removal, its message about what it did and didn't clean
+// up (deckwatch#250). Plugin text: rendered as text only.
+const infraNotice = ref<{
+  title: string;
+  message: string;
+  events: PluginEventReport[];
+  /** Kubernetes objects the plugin asked deckwatch to delete on removal. */
+  deletions?: KubernetesObjectDeletion[];
+} | null>(null);
+const infraNoticeType = computed<"error" | "warning" | "info">(() => {
+  const worst = worstSeverity(infraNotice.value?.events);
+  return worst === "error" ? "error" : worst === "warning" ? "warning" : "info";
+});
+const provisionErrorEvents = ref<PluginEventReport[]>([]);
+
 const infraPlugins = computed<PluginSummary[]>(() =>
   allLoadedPlugins.value.filter((p) => p.resources && p.resources.length > 0),
 );
@@ -456,6 +477,7 @@ async function openProvisionDialog(pluginName: string, resource: PluginResource)
 async function confirmProvision() {
   provisioning.value = true;
   provisionError.value = null;
+  provisionErrorEvents.value = [];
   try {
     const fields: Record<string, string> = {};
     for (const [key, val] of Object.entries(provisionStringFields.value)) {
@@ -470,14 +492,25 @@ async function confirmProvision() {
     );
     infraResources.value.push(newResource);
     showProvisionDialog.value = false;
-    pluginSuccess(`${provisioningResource.value?.label ?? "Resource"} provisioned`);
+    const label = provisioningResource.value?.label ?? "Resource";
+    const events = newResource.plugin_events ?? [];
+    infraNotice.value = events.length
+      ? { title: `${label} provisioned; the plugin reported ${summarizeEvents(events)}`, message: "", events }
+      : null;
+    pluginSuccess(`${label} provisioned`);
   } catch (e) {
     const msg = e instanceof Error ? e.message : "Provisioning failed";
+    const events = pluginEventsOf(e);
     if (showProvisionDialog.value) {
       provisionError.value = msg;
+      provisionErrorEvents.value = events;
     } else {
-      // Empty-field path: dialog was never shown, fall back to snackbar.
+      // Empty-field path: dialog was never shown, fall back to snackbar
+      // (and the tab notice for the plugin's events).
       pluginError(msg);
+      infraNotice.value = events.length
+        ? { title: "Provisioning failed", message: "", events }
+        : null;
     }
   } finally {
     provisioning.value = false;
@@ -497,14 +530,25 @@ async function confirmDeprovision() {
   if (!deprovisionTarget.value) return;
   deprovisioning.value = true;
   try {
-    await applicationResourcesApi.deprovision(
+    const result = await applicationResourcesApi.deprovision(
       props.namespace, props.name,
       deprovisionTarget.value.plugin, deprovisionTarget.value.resource_id,
     );
     infraResources.value = infraResources.value.filter(
       (r) => !(r.plugin_name === deprovisionTarget.value!.plugin && r.resource_id === deprovisionTarget.value!.resource_id),
     );
-    pluginSuccess(`${deprovisionTarget.value.label} record removed`);
+    const label = deprovisionTarget.value.label;
+    const deletions = result.kubernetes_resource_deletions ?? [];
+    infraNotice.value =
+      result.message || result.plugin_events.length || deletions.length
+        ? {
+            title: `${label} record removed`,
+            message: result.message,
+            events: result.plugin_events,
+            deletions,
+          }
+        : null;
+    pluginSuccess(`${label} record removed`);
     showDeprovisionDialog.value = false;
   } catch (e) {
     pluginError(e instanceof Error ? e.message : "Deprovision failed");
@@ -923,6 +967,26 @@ watch(activeTab, async (tab) => {
       <v-alert v-if="infraError" type="error" variant="tonal" density="compact" class="mb-4">
         {{ infraError }}
       </v-alert>
+      <v-alert
+        v-if="infraNotice"
+        :type="infraNoticeType"
+        variant="tonal"
+        class="mb-4"
+        closable
+        data-testid="infra-plugin-notice"
+        @click:close="infraNotice = null"
+      >
+        <div class="font-weight-medium">{{ infraNotice.title }}</div>
+        <div v-if="infraNotice.message" class="text-body-2 mb-1" data-testid="infra-plugin-message">
+          {{ infraNotice.message }}
+        </div>
+        <PluginEventList :events="infraNotice.events" :hide-info="!!infraNotice.message" />
+        <ul v-if="infraNotice.deletions?.length" class="text-caption mt-1 pl-4">
+          <li v-for="d in infraNotice.deletions" :key="`${d.kind}/${d.name}`">
+            {{ d.kind }} {{ d.name }}: {{ d.outcome.replace("_", " ") }}<span v-if="d.reason"> ({{ d.reason }})</span>
+          </li>
+        </ul>
+      </v-alert>
       <v-progress-linear v-if="infraLoading" indeterminate color="primary" class="mb-4" />
 
       <div v-if="infraPlugins.length === 0 && !infraLoading" class="text-center py-8 text-secondary text-body-2">
@@ -1000,6 +1064,7 @@ watch(activeTab, async (tab) => {
               class="mb-4"
             >
               {{ provisionError }}
+              <PluginEventList :events="provisionErrorEvents" class="mt-2" />
             </v-alert>
             <template v-for="field in provisioningResource?.fields ?? []" :key="field.key">
               <!-- Select field -->
@@ -1065,7 +1130,8 @@ watch(activeTab, async (tab) => {
           <v-card-text>
             <p class="text-body-2">
               Remove the <strong>{{ deprovisionTarget?.label }}</strong> record from this application?
-              The cloud resource itself will NOT be deleted and must be cleaned up manually.
+              The plugin decides what happens to the cloud resource itself; its report
+              is shown after removal. Anything it keeps must be cleaned up manually.
             </p>
           </v-card-text>
           <v-card-actions>
