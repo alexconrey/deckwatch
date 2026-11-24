@@ -28,6 +28,10 @@ pub struct PluginSummary {
     pub depends_on: Vec<String>,
     pub config_schema: Vec<ConfigField>,
     pub resources: Vec<crate::plugins::PluginResource>,
+    /// MCP tuning fields the plugin declares. Settings → MCP Tuning renders a
+    /// form section for every plugin with at least one; the values are saved in
+    /// `PluginConfig.mcp_tuning`.
+    pub mcp_tuning_fields: Vec<crate::plugins::McpTuningField>,
     pub wasm_size_bytes: usize,
     /// Lowercase hex SHA-256 of the WASM bytes currently loaded. Compare with
     /// `shasum -a 256 plugin.wasm` to confirm exactly which binary is running.
@@ -46,6 +50,7 @@ impl From<&crate::plugins::LoadedPlugin> for PluginSummary {
             depends_on: p.metadata.depends_on.clone(),
             config_schema: p.metadata.config_schema.clone(),
             resources: p.metadata.resources.clone(),
+            mcp_tuning_fields: p.metadata.mcp_tuning_fields.clone(),
             wasm_size_bytes: p.wasm_bytes.len(),
             sha256: p.sha256.clone(),
             loaded_at: p.loaded_at.clone(),
