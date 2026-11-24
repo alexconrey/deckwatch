@@ -1125,6 +1125,35 @@ async fn apply_one_resource(
     Ok(())
 }
 
+/// Deckwatch's own secrets. Plugin config, including `inherit_env_keys`, is
+/// editable through settings and the MCP `update_plugin_config` tool, so a
+/// plugin must never be able to pull these out of the process environment:
+/// the encryption key decrypts every stored credential, and the database URL
+/// can carry a password.
+const NON_INHERITABLE_ENV: &[&str] = &["DECKWATCH_ENCRYPTION_KEY", "DECKWATCH_DATABASE_URL"];
+
+/// `std::env::var` for `inherit_env_keys` / `inherit_env_file_keys`,
+/// refusing [`NON_INHERITABLE_ENV`].
+fn inherited_env_var(plugin: &str, key: &str) -> Option<String> {
+    inherited_env_var_from(plugin, key, |k| std::env::var(k).ok())
+}
+
+fn inherited_env_var_from(
+    plugin: &str,
+    key: &str,
+    lookup: impl Fn(&str) -> Option<String>,
+) -> Option<String> {
+    if NON_INHERITABLE_ENV.contains(&key) {
+        tracing::warn!(
+            plugin,
+            key,
+            "refusing to pass deckwatch secret env var to plugin"
+        );
+        return None;
+    }
+    lookup(key)
+}
+
 pub fn run_provision(
     plugin: &LoadedPlugin,
     req: &ResourceProvisionRequest,
@@ -1159,13 +1188,13 @@ pub fn run_provision(
         .insert("CURRENT_TIMESTAMP".to_string(), now_ts.to_string());
 
     for key in &plugin.inherit_env_keys {
-        if let Ok(val) = std::env::var(key) {
+        if let Some(val) = inherited_env_var(&plugin.name, key) {
             manifest.config.insert(key.clone(), val);
         }
     }
 
     for (config_key, env_var) in &plugin.inherit_env_file_keys {
-        if let Ok(path) = std::env::var(env_var) {
+        if let Some(path) = inherited_env_var(&plugin.name, env_var) {
             match std::fs::read_to_string(&path) {
                 Ok(content) => {
                     manifest
@@ -1280,12 +1309,12 @@ pub fn run_deprovision(
         .insert("CURRENT_TIMESTAMP".to_string(), now_ts.to_string());
 
     for key in &plugin.inherit_env_keys {
-        if let Ok(val) = std::env::var(key) {
+        if let Some(val) = inherited_env_var(&plugin.name, key) {
             manifest.config.insert(key.clone(), val);
         }
     }
     for (config_key, env_var) in &plugin.inherit_env_file_keys {
-        if let Ok(path) = std::env::var(env_var) {
+        if let Some(path) = inherited_env_var(&plugin.name, env_var) {
             if let Ok(content) = std::fs::read_to_string(&path) {
                 manifest
                     .config
@@ -1380,7 +1409,7 @@ pub fn run_plugin(plugin: &LoadedPlugin, ctx: &PluginContext) -> anyhow::Result<
     // Inject inherited env vars from the deckwatch process environment.
     // Applied after static config so live/rotated values override static entries.
     for key in &plugin.inherit_env_keys {
-        if let Ok(val) = std::env::var(key) {
+        if let Some(val) = inherited_env_var(&plugin.name, key) {
             manifest.config.insert(key.clone(), val);
         }
     }
@@ -1390,7 +1419,7 @@ pub fn run_plugin(plugin: &LoadedPlugin, ctx: &PluginContext) -> anyhow::Result<
     // with the content (e.g. exchange a workload identity token for credentials).
     // Applied last so file contents take final precedence.
     for (config_key, env_var) in &plugin.inherit_env_file_keys {
-        if let Ok(path) = std::env::var(env_var) {
+        if let Some(path) = inherited_env_var(&plugin.name, env_var) {
             match std::fs::read_to_string(&path) {
                 Ok(content) => {
                     manifest
@@ -2288,5 +2317,18 @@ mod tests {
             "existing container image should not be overwritten"
         );
         assert_eq!(pod_spec.containers[1].name, "new-sidecar");
+    }
+
+    #[test]
+    fn inherited_env_var_refuses_deckwatch_secrets() {
+        let env = |k: &str| Some(format!("value-of-{k}"));
+        for key in NON_INHERITABLE_ENV {
+            assert_eq!(inherited_env_var_from("evil", key, env), None, "{key}");
+        }
+        assert_eq!(
+            inherited_env_var_from("aws", "AWS_REGION", env).as_deref(),
+            Some("value-of-AWS_REGION")
+        );
+        assert_eq!(inherited_env_var_from("aws", "UNSET", |_| None), None);
     }
 }
