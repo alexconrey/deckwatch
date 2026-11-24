@@ -108,7 +108,9 @@ Deckwatch exposes the following MCP tools:
 | Tool | Description | Parameters |
 |------|-------------|------------|
 | `create_application` | Create a new deckwatch application with optional seed deployment | `namespace`, `name`, `description` (optional), `template_id` (optional), `create_deployment` (optional, default true) |
-| `list_addons` | List available sidecar addons (Redis, PostgreSQL, Memcached, etc.) with default config | — |
+| `list_plugins` | List configured plugins with enabled/loaded state, source, and the loaded binary's version and SHA-256 | — |
+| `provision_resource` | Provision a plugin-declared resource for an application (e.g. a Redis or PostgreSQL sidecar); its env vars and sidecars are injected into every deployment in the application | `namespace`, `application_name`, `plugin_name`, `resource_id`, `fields` (optional) |
+| `list_application_resources` | List an application's provisioned plugin resources: input fields, state (injected env vars), annotations, and sidecars | `namespace`, `application_name` |
 | `list_templates` | List deployment templates (web-app, worker, cron-job, static-site, custom) with payloads | — |
 | `configure_gitops` | Enable GitOps for a deployment — polls a git repo, builds images with Kaniko, auto-deploys | `namespace`, `deployment_name`, `repo_url`, `oci_repository`, `branch` (optional), `dockerfile_path` (optional), `docker_context` (optional), `token_secret` (optional), `poll_interval_seconds` (optional) |
 | `create_ingress` | Create an Ingress resource (auto-creates backing Service if missing) | `namespace`, `name`, `service_name`, `host` (optional), `service_port` (optional, default 80), `path` (optional, default /), `ingress_class` (optional), `annotations` (optional) |
@@ -175,16 +177,20 @@ Claude Code will:
 2. Call `create_application` with the chosen template
 3. Confirm the application was created with its seed deployment
 
-### Discovering available addons
+### Adding a sidecar to an application
 
 ```
-> what database sidecars can I attach to my deployment?
+> add a redis cache to the checkout application in staging
 ```
 
 Claude Code will:
-1. Call `list_addons` to list the addon catalog
-2. Show you available options (Redis, PostgreSQL, Memcached, etc.)
-3. Explain what each addon provides and its default configuration
+1. Call `list_plugins` to check that a Redis plugin (built from [deckwatch-plugin-redis](https://github.com/alexconrey/deckwatch-plugin-redis)) is configured and loaded
+2. Call `provision_resource` with that plugin's name and the resource ID it declares (`cache` for deckwatch-plugin-redis)
+3. Call `list_application_resources` to confirm the resource and the `REDIS_URL` env var it injects
+
+Resource IDs come from each plugin's metadata; `GET /api/plugins` lists them
+under `resources[].id`. The available sidecar plugins are listed in
+[Deployments](DEPLOYMENTS.md#sidecar-containers-plugins).
 
 ### Setting up GitOps for a deployment
 
@@ -324,14 +330,14 @@ Go to **Settings → MCP Tuning** and fill in the groups you want to enforce.
 | Global | Every MCP session (via `initialize` instructions) |
 | Namespaces | Namespace creation, listing, application creation |
 | Deployments | Deployment CRUD, scaling, restarts |
-| Applications & Addons | Application creation, addon management |
+| Applications | Application creation, listing, restarts, scaling, templates |
 | GitOps & Builds | GitOps config, build triggers, build logs |
 | Ingresses | Ingress CRUD, ingress template management |
 | Pods | Pod listing, log streaming, exec |
 | Secrets | Secret CRUD |
 | Nodes | Node listing, cordon/drain operations |
 | Storage | PVC and StorageClass management |
-| Plugins | Plugin lifecycle (enable, disable, validate) |
+| Plugins | Plugin lifecycle (enable, disable, validate), application associations, provisioned resources |
 
 ### Example: team-based namespace enforcement
 
