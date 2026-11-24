@@ -253,7 +253,8 @@ pub async fn fetch_jaeger_compat(
         Err(e) => {
             timer.finish(false);
             return Err(format!(
-                "failed to reach tracing backend at {base_url}: {e}"
+                "failed to reach tracing backend at {base_url}: {}",
+                crate::outbound::error_chain(&e)
             ));
         }
     };

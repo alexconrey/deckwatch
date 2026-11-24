@@ -821,7 +821,10 @@ async fn fetch_bytes(
         }
     }
 
-    let resp = builder.send().await?;
+    let resp = builder
+        .send()
+        .await
+        .map_err(|e| anyhow::anyhow!("{}", crate::outbound::error_chain(&e)))?;
     let status = resp.status();
     if !status.is_success() {
         return Err(anyhow::anyhow!("HTTP {status} fetching plugin from {url}"));

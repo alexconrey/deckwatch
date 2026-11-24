@@ -286,7 +286,12 @@ pub async fn post_webhook(
     url: &str,
     payload: &serde_json::Value,
 ) -> anyhow::Result<()> {
-    let resp = http.post(url).json(payload).send().await?;
+    let resp = http.post(url).json(payload).send().await.map_err(|e| {
+        anyhow::anyhow!(
+            "webhook request failed: {}",
+            crate::outbound::error_chain(&e)
+        )
+    })?;
     if !resp.status().is_success() {
         let status = resp.status();
         let body = resp.text().await.unwrap_or_default();

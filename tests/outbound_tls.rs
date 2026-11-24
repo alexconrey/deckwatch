@@ -1197,6 +1197,17 @@ async fn anthropic_call(
     client.message("hi").await
 }
 
+/// The error must carry the TLS reason, not just "error sending request".
+/// Wording differs per backend (OpenSSL, Security framework, rustls), so
+/// accept any of `needles`.
+fn assert_tls_reason(err: &str, needles: &[&str]) {
+    let lower = err.to_lowercase();
+    assert!(
+        needles.iter().any(|n| lower.contains(n)),
+        "expected one of {needles:?} in: {err}"
+    );
+}
+
 fn messages_router() -> Router {
     Router::new().route(
         "/v1/messages",
@@ -1226,6 +1237,7 @@ async fn untrusted_ca_without_extra_ca_configured_fails() {
         .await
         .expect_err("untrusted CA");
     assert!(err.contains("API request failed"), "{err}");
+    assert_tls_reason(&err, &["certificate"]);
     assert_eq!(
         upstream.requests().len(),
         1,
@@ -1241,6 +1253,7 @@ async fn certificate_from_an_unknown_ca_fails() {
         .await
         .expect_err("rogue CA");
     assert!(err.contains("API request failed"), "{err}");
+    assert_tls_reason(&err, &["certificate"]);
     assert!(upstream.connections() >= 1, "the client did connect");
     assert!(upstream.requests().is_empty(), "no request may be served");
 }
@@ -1256,6 +1269,15 @@ async fn hostname_mismatch_fails() {
         .await
         .expect_err("hostname mismatch");
     assert!(err.contains("API request failed"), "{err}");
+    assert_tls_reason(
+        &err,
+        &[
+            "host name",
+            "hostname",
+            "not valid for name",
+            "notvalidforname",
+        ],
+    );
     assert!(upstream.connections() >= 1);
     assert!(upstream.requests().is_empty());
 }
@@ -1271,6 +1293,7 @@ async fn expired_certificate_fails() {
         .await
         .expect_err("expired");
     assert!(err.contains("API request failed"), "{err}");
+    assert_tls_reason(&err, &["expired"]);
     assert!(upstream.connections() >= 1);
     assert!(upstream.requests().is_empty());
 }

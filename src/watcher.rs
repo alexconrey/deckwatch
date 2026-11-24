@@ -345,7 +345,13 @@ pub async fn check_remote_head(
         request = request.header("Authorization", format!("Basic {creds}"));
     }
 
-    let resp = request.send().await?.error_for_status()?.text().await?;
+    let resp = request
+        .send()
+        .await
+        .map_err(|e| anyhow::anyhow!("{}", crate::outbound::error_chain(&e)))?
+        .error_for_status()?
+        .text()
+        .await?;
 
     parse_ref_sha(&resp, branch)
 }

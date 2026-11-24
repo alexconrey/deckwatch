@@ -180,7 +180,8 @@ async fn fetch_branches(
         .get(&url)
         .header("Authorization", format!("Basic {creds}"))
         .send()
-        .await?
+        .await
+        .map_err(|e| anyhow::anyhow!("{}", crate::outbound::error_chain(&e)))?
         .error_for_status()?
         .text()
         .await?;
