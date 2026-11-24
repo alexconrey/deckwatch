@@ -24,7 +24,8 @@ use anyhow::{Context, Result};
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine as _;
 use rcgen::{
-    Certificate, CertificateParams, DistinguishedName, DnType, IsCa, KeyPair, KeyUsagePurpose,
+    Certificate, CertificateParams, DistinguishedName, DnType, IsCa, Issuer, KeyPair,
+    KeyUsagePurpose,
 };
 
 /// Layout of the generated material on disk. All three paths live in
@@ -71,6 +72,11 @@ pub fn generate(service_name: &str, namespace: &str, out_dir: &Path) -> Result<W
 
     let ca_key = KeyPair::generate().context("generating CA key")?;
     let ca_cert: Certificate = ca_params.self_signed(&ca_key).context("self-signing CA")?;
+    // rcgen 0.14 signs with an `Issuer` (subject DN, key-identifier method,
+    // key usages + signing key) instead of a `Certificate`. Building it from
+    // the same params/key as the self-signed CA above keeps the server
+    // cert's issuer name byte-identical to the CA subject.
+    let ca_issuer = Issuer::from_params(&ca_params, &ca_key);
 
     // ---- Server cert ------------------------------------------------
     let dns_names = webhook_dns_names(service_name, namespace);
@@ -93,7 +99,7 @@ pub fn generate(service_name: &str, namespace: &str, out_dir: &Path) -> Result<W
 
     let srv_key = KeyPair::generate().context("generating server key")?;
     let srv_cert = srv_params
-        .signed_by(&srv_key, &ca_cert, &ca_key)
+        .signed_by(&srv_key, &ca_issuer)
         .context("signing server cert with CA")?;
 
     // ---- Write to disk ---------------------------------------------
@@ -160,5 +166,120 @@ mod tests {
         assert!(names
             .iter()
             .any(|n| n == "deckwatch-webhook.deckwatch.svc.cluster.local"));
+    }
+
+    /// Decode a single-certificate PEM document to DER.
+    fn cert_pem_to_der(pem: &[u8]) -> Vec<u8> {
+        let (rest, pem) = x509_parser::pem::parse_x509_pem(pem).expect("valid PEM");
+        assert!(rest.iter().all(u8::is_ascii_whitespace), "one PEM block");
+        assert_eq!(pem.label, "CERTIFICATE");
+        pem.contents
+    }
+
+    /// The generated chain must be what the kube-apiserver expects: a
+    /// self-signed CA (the caBundle) that issued a serverAuth cert for
+    /// every in-cluster Service name, both valid for the same ~24h window.
+    #[test]
+    fn server_cert_verifies_against_ca_bundle() {
+        use rustls::client::danger::ServerCertVerifier;
+        use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
+        use x509_parser::prelude::*;
+
+        let (service, namespace) = ("deckwatch-webhook", "deckwatch");
+        let dir = TempDir::new().unwrap();
+        let out = generate(service, namespace, dir.path()).unwrap();
+
+        // caBundle (what the API server trusts) is the PEM written to ca.crt.
+        let bundle_pem = B64.decode(&out.ca_bundle_b64).unwrap();
+        assert_eq!(bundle_pem, std::fs::read(&out.ca_pem_path).unwrap());
+        assert_eq!(bundle_pem, out.ca_pem.as_bytes());
+        let ca_der = cert_pem_to_der(&bundle_pem);
+        let srv_der = cert_pem_to_der(&std::fs::read(&out.server_cert_path).unwrap());
+        let (_, ca) = parse_x509_certificate(&ca_der).unwrap();
+        let (_, srv) = parse_x509_certificate(&srv_der).unwrap();
+
+        // CA: self-issued + self-signed, critical CA:TRUE without a path
+        // length limit, allowed to sign certs and CRLs.
+        assert_eq!(ca.subject(), ca.issuer());
+        ca.verify_signature(None).expect("CA is self-signed");
+        let bc = ca
+            .basic_constraints()
+            .unwrap()
+            .expect("CA basicConstraints");
+        assert!(bc.critical);
+        assert!(bc.value.ca);
+        assert_eq!(bc.value.path_len_constraint, None);
+        let ku = ca.key_usage().unwrap().expect("CA keyUsage").value;
+        assert!(ku.key_cert_sign() && ku.crl_sign() && ku.digital_signature());
+
+        // Server cert: issued and signed by that CA, not a CA itself.
+        assert_eq!(srv.issuer(), ca.subject());
+        srv.verify_signature(Some(ca.public_key()))
+            .expect("server cert is signed by the CA key");
+        assert!(!srv.is_ca());
+        let cn: Vec<_> = srv
+            .subject()
+            .iter_common_name()
+            .map(|cn| cn.as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(cn, [format!("{service}.{namespace}.svc")]);
+        let ku = srv.key_usage().unwrap().expect("server keyUsage").value;
+        assert!(ku.digital_signature() && ku.key_encipherment());
+        assert!(!ku.key_cert_sign());
+        let eku = srv.extended_key_usage().unwrap().expect("server EKU").value;
+        assert!(eku.server_auth);
+        let sans: Vec<String> = srv
+            .subject_alternative_name()
+            .unwrap()
+            .expect("server SAN")
+            .value
+            .general_names
+            .iter()
+            .map(|gn| match gn {
+                GeneralName::DNSName(name) => name.to_string(),
+                other => panic!("unexpected SAN {other:?}"),
+            })
+            .collect();
+        assert_eq!(sans, webhook_dns_names(service, namespace));
+
+        // Same 24h validity window on both certs; not_after is reported.
+        for cert in [&ca, &srv] {
+            let validity = cert.validity();
+            assert_eq!(
+                validity.not_after.timestamp() - validity.not_before.timestamp(),
+                24 * 60 * 60
+            );
+            assert_eq!(validity.not_after.timestamp(), out.not_after_unix);
+        }
+
+        // tls.key is the private half of tls.crt.
+        let srv_key = KeyPair::from_pem(&std::fs::read_to_string(&out.server_key_path).unwrap())
+            .expect("tls.key parses");
+        assert_eq!(
+            srv_key.public_key_raw(),
+            srv.public_key().subject_public_key.data.as_ref()
+        );
+
+        // A TLS client that trusts only the caBundle accepts the serving
+        // cert for every in-cluster name and rejects any other name.
+        let mut roots = rustls::RootCertStore::empty();
+        roots.add(CertificateDer::from(ca_der)).unwrap();
+        let verifier = rustls::client::WebPkiServerVerifier::builder_with_provider(
+            std::sync::Arc::new(roots),
+            std::sync::Arc::new(rustls::crypto::ring::default_provider()),
+        )
+        .build()
+        .unwrap();
+        let leaf = CertificateDer::from(srv_der);
+        for name in webhook_dns_names(service, namespace) {
+            let server_name = ServerName::try_from(name.clone()).unwrap();
+            verifier
+                .verify_server_cert(&leaf, &[], &server_name, &[], UnixTime::now())
+                .unwrap_or_else(|e| panic!("server cert rejected for {name}: {e}"));
+        }
+        let other = ServerName::try_from("deckwatch-webhook.other.svc").unwrap();
+        assert!(verifier
+            .verify_server_cert(&leaf, &[], &other, &[], UnixTime::now())
+            .is_err());
     }
 }

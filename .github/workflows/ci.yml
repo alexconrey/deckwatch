@@ -3,6 +3,21 @@ name: CI
 on:
   pull_request:
     branches: [main]
+  # Also run on every merge to main. Each PR is tested against main as it was
+  # when its CI last ran, so two PRs that pass separately can still break main
+  # together; this catches that right after the merge. It also warms the caches
+  # PR runs restore from: caches saved on main are readable by every PR.
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+# One run per PR at a time (a new push cancels the outdated run). Runs on main
+# are keyed by commit and never cancelled, so every merge gets a result.
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   rust-check:
@@ -10,6 +25,10 @@ jobs:
     runs-on: ubuntu-latest
     env:
       CARGO_TERM_COLOR: always
+      # No debug info for the dev/test profile in CI: faster `cargo test`
+      # builds and links, and a much smaller rust-cache. Panic messages still
+      # report file:line; only backtraces lose line info.
+      CARGO_PROFILE_DEV_DEBUG: 0
     steps:
       - uses: actions/checkout@v7
 
@@ -105,3 +124,27 @@ jobs:
 
       - name: helm lint
         run: helm lint helm/deckwatch --set image.repository=test --set image.tag=test
+
+  docker-build:
+    name: Docker Build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      # Build the release image the way publish.yml does (amd64 only, not
+      # pushed). Until now this Dockerfile was only built when a release tag was
+      # pushed, so a broken image was found only at release time: a rust: image
+      # older than the crates need, or a frontend dependency without a musl
+      # native binding for the node:*-alpine stage. The layer cache is written
+      # only from main and read by PRs, to stay within the repo's cache quota.
+      - name: Build release image (linux/amd64, not pushed)
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          platforms: linux/amd64
+          push: false
+          cache-from: type=gha,scope=ci-docker-amd64
+          cache-to: ${{ github.event_name == 'push' && 'type=gha,scope=ci-docker-amd64,mode=max' || '' }}
