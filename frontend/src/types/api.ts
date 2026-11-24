@@ -1226,6 +1226,30 @@ export interface KubernetesObjectDeletion {
   reason?: string;
 }
 
+/** Health of a plugin call target. */
+export type PluginHealth = "healthy" | "degraded" | "failing";
+
+/**
+ * Current state of one plugin call target: a provisioned resource, a
+ * plugin's apply() for an application (`resource_id` ""), or the plugin
+ * itself (`namespace` and `application` ""). From /api/plugin-status.
+ */
+export interface PluginStatus {
+  namespace: string;
+  application: string;
+  plugin: string;
+  resource_id: string;
+  health: PluginHealth;
+  last_export: string;
+  last_events: PluginEventReport[];
+  trace_id?: string;
+  first_failure_at: string | null;
+  consecutive_failures: number;
+  last_success_at: string | null;
+  last_changed_at: string;
+  updated_at: string;
+}
+
 /** Body of DELETE …/resources/{plugin}/{resource_id}. */
 export interface DeprovisionResponse {
   /** What the plugin says it did and didn't clean up ("" if nothing). */
