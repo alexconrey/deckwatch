@@ -44,7 +44,8 @@ export default defineConfig({
   forbidOnly: !!process.env.CI,
   // One retry in CI shows up as "flaky" in the report instead of hiding it.
   retries: process.env.CI ? 1 : 0,
-  workers: process.env.CI ? 2 : undefined,
+  // GitHub's ubuntu-latest runners have 4 vCPUs; leave one for vite preview.
+  workers: process.env.CI ? 3 : undefined,
   timeout: 60_000,
   reporter: process.env.CI
     ? [["github"], ["list"], ["html", { open: "never" }]]

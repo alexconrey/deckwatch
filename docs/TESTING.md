@@ -1,12 +1,12 @@
 # Testing deckwatch
 
-deckwatch has ~580+ tests across three test suites:
+deckwatch has ~950+ tests across three test suites:
 
 | Suite | Runner | Approx. count | Scope | Cluster required? |
 |---|---|---|---|---|
 | Backend unit | `cargo test` | ~350+ | Pure functions in `src/` (kube_ext, error, config, handler helpers, database models) | No |
 | Frontend unit | `vitest` | ~200+ | API clients, Pinia stores, composables, formatters | No |
-| End-to-end | Playwright | ~30+ | Full app in a real browser | No (mocked) or Yes (live) |
+| End-to-end | Playwright | ~400 | Full app in a real browser: functional specs and visual regression | No (mocked) or Yes (live) |
 
 ## Backend unit tests
 
@@ -148,22 +148,182 @@ Playwright below).
 
 ## End-to-end tests
 
-Playwright drives the app in Chromium / Firefox / WebKit. By default the
-tests **mock the API surface** (see `e2e/fixtures.ts`) so they run
-against a plain `vite` dev server with no backend or Kubernetes cluster
-attached.
+Playwright drives a production build of the frontend (`vite build`,
+served by `vite preview`) in Chromium. Every `/api/**` request is
+answered in the browser from deterministic mock data, so no backend or
+cluster is needed. There are two kinds of specs in `frontend/e2e/`:
+
+| Specs | Location | What they check |
+|---|---|---|
+| Functional | `e2e/*.spec.ts` | Navigation, forms, dialogs, tables, the exact requests the UI sends, keyboard/focus basics |
+| Visual regression | `e2e/visual/*.spec.ts` | A screenshot of every route and key UI state, compared pixel by pixel with the baselines in `e2e/__screenshots__/` |
+
+The visual specs cover every route in the dark and light themes, with
+dialogs, menus and autocompletes open, validation errors, tables with
+data and empty, the diagnostics drawer, and the snackbars and toasts.
+Key pages are also captured at 1200px and 900px wide. Their job is to
+show any unintended change in what users see. A dependency upgrade
+such as a Vuetify major should pass against the existing baselines
+unchanged.
+
+### Running it locally
+
+The visual baselines are only valid in the official Playwright Docker
+image (see "Why a Docker image" below). Run the whole suite there,
+exactly as CI does:
 
 ```bash
 cd frontend
-pnpm exec playwright install    # first-time browser download
-pnpm test:e2e                   # headless
-pnpm test:e2e:ui                # interactive UI mode
-pnpm exec playwright show-report   # after a run
+pnpm test:e2e:docker                                # functional + visual
+pnpm test:e2e:docker --project=visual               # visual only
+pnpm test:e2e:docker e2e/visual/settings.spec.ts    # one file
+pnpm test:e2e:docker -g "namespace switcher"        # by title
 ```
+
+`scripts/e2e-docker.sh` derives the image tag from the
+`@playwright/test` version in `pnpm-lock.yaml`
+(`mcr.microsoft.com/playwright:v<version>-noble`, forced to
+`linux/amd64`). It mounts `frontend/`, keeps a Linux `node_modules` in a
+Docker volume, and passes its arguments to `playwright test`. It needs
+Docker and nothing else. On Apple silicon the image runs under Rosetta.
+
+The functional specs also run directly on the host. Outside the image the
+visual specs skip themselves:
+
+```bash
+cd frontend
+pnpm exec playwright install chromium   # once
+pnpm test:e2e                           # functional specs
+pnpm test:e2e:ui                        # interactive UI mode
+pnpm exec playwright show-report        # HTML report of the last run
+E2E_ALL_BROWSERS=1 pnpm test:e2e        # also Firefox and WebKit
+```
+
+`E2E_VISUAL_FORCE=1` runs the visual specs on the host anyway, which is
+handy for looking at a page while writing a spec. Their screenshots then
+go to `frontend/.e2e-local/` (git-ignored) and never touch the baselines.
+
+### Updating the baselines
+
+A visual failure means the UI now renders differently from the
+baseline. The HTML report (and the `playwright-report` CI artifact)
+shows the expected, actual and diff images side by side.
+
+**Update baselines only for an intentional UI change, and review them in
+the PR.** For example: you changed a component's layout, added a field to a
+form, changed the copy, or adopted a new design.
+
+- Never update baselines to make a failure go away when the change was
+  not intended, for example after a dependency upgrade (Vuetify, Vite,
+  Playwright). A diff there is either a regression to fix in code or a
+  deliberate change to call out in the PR.
+- Commit only the PNGs your change explains. The reviewer checks each
+  changed image (GitHub renders image diffs in "Files changed").
+
+```bash
+cd frontend
+pnpm test:e2e:update-baselines                       # all visual specs
+pnpm test:e2e:update-baselines e2e/visual/settings.spec.ts
+git status e2e/__screenshots__                       # review, then commit
+```
+
+`--update-snapshots` only rewrites screenshots that no longer match (and
+writes missing ones). Deleted or renamed states leave orphaned PNGs
+behind, so remove those by hand.
+
+**Bumping Playwright** changes the browser, so it changes rendering.
+Bump `@playwright/test` and the `e2e` job's container image in
+`.github/workflows/ci.yml` in the same PR. CI fails with a clear message
+if they differ. Then regenerate the baselines with the new image and
+check that the diffs are only rendering noise.
+
+### Why a Docker image
+
+Screenshots depend on fonts, font hinting and the browser build.
+`mcr.microsoft.com/playwright:v<version>-noble` pins all three, and
+the CI job runs in the same image. The baselines were rendered under
+`linux/amd64`, the architecture of GitHub's runners. With Playwright
+1.65.1, the native `linux/arm64` image produced identical screenshots
+for the whole suite, but amd64 remains the reference. `e2e/support/reference-image.ts` detects
+the image from `/ms-playwright/.docker-info` and checks that its Playwright
+version matches the installed one.
+
+### How the runs stay deterministic
+
+- **Data:** `e2e/support/data.ts` is a fixed dataset, and each test gets a
+  fresh copy. `e2e/support/routes.ts` serves every endpoint the
+  frontend calls. An unmocked `/api` request, a request to any other
+  origin, or an uncaught page error fails the test, so a new API call
+  must come with mock data.
+- **Time:** the browser clock is frozen at `FIXED_NOW` with
+  `page.clock.setFixedTime`, so relative ages ("3h", "2d ago") never
+  change. Timers still run; specs that need polling to happen (e.g. two
+  metric samples for a sparkline) advance them with
+  `app.runTimers(ms)`. While a screenshot is taken the timers are paused,
+  so a poll cannot flash a progress bar into it.
+- **Environment:**
+  - viewport 1440x900 (1200 and 900 for the responsive shots);
+  - `deviceScaleFactor` 1;
+  - locale `en-US`, timezone `UTC`;
+  - `reducedMotion: reduce`.
+- **Theme:** seeded through `localStorage`, so the OS colour scheme
+  doesn't matter.
+- **Motion:** CSS transitions, animations and click ripples are switched
+  off, and screenshots use `animations: "disabled"` and a hidden caret.
+- **Settling** (`app.settle()`) waits for:
+  - the page's in-flight fetch count to reach zero and the mocked API to
+    go quiet;
+  - web fonts to load;
+  - running animations and Vue transitions to finish.
+- **Pointer:** `app.snap()` parks the mouse before each shot, so no hover
+  state is captured.
+- **Masked text:** the footer's version string is replaced with
+  `v0.0.0`, so a release doesn't change every screenshot.
+- **Full pages:** the app scrolls `<body>`, not the document, so
+  `fullPage` shots grow the viewport to the content height instead of
+  using Playwright's `fullPage`.
+- **Comparison is strict:** pixelmatch `threshold` 0.05 with
+  `maxDiffPixels: 0`. A 1px shift, a changed shadow or a colour change of
+  a few levels fails the test; only anti-aliasing is ignored.
+
+### Writing specs
+
+Import `test` and `expect` from `e2e/fixtures.ts`, or from
+`e2e/visual/visual-test.ts` for visual specs. Every test gets these
+fixtures:
+
+- `app`:
+  - `app.goto(path)` navigates and waits for the page to settle.
+  - `app.snap(name, { fullPage })` compares a screenshot. The theme and
+    the viewport width (if it isn't 1440) are appended to the file name.
+  - `app.runTimers(ms)` advances the timers.
+  - `app.dialog(title)` finds an open dialog.
+  - `app.namespaceSwitcher()` returns the namespace switcher.
+- `mockApi`:
+  - `mockApi.on(method, path, handler)` overrides one endpoint for one
+    test, e.g. `mockApi.on("GET", "/namespaces/:ns/deployments",
+    apiError(500, "boom"))`.
+  - `mockApi.waitForRequest(method, path)` returns the request the UI
+    sent; assert on its `body` and `query`.
+  - `mockApi.requests(method, path)` lists the recorded calls.
+- `mockState`: the per-test copy of the dataset. Mutate it before
+  `app.goto` to set up a state (an empty list, a disabled feature).
+
+`e2e/support/ui.ts` has locators for Vuetify widgets: `field`,
+`openMenu`, `choose`, `menuItem`, `card`, `row`. The same specs run
+against Vuetify upgrades, so find elements by role, label and text, and
+otherwise only by component root classes (`.v-field`, `.v-card`,
+`.v-list-item`, `.v-overlay--active`).
+
+In visual specs, wrap tests in `eachTheme(() => ...)` to capture both
+themes. Use `fullPage: true` for whole routes, and the default viewport
+shot for dialogs and menus.
 
 ### Live-cluster mode
 
-Point `PLAYWRIGHT_BASE_URL` at a running deckwatch and disable mocks:
+Point `PLAYWRIGHT_BASE_URL` at a running deckwatch and disable the
+mocks. This runs the functional specs only; the visual specs need the
+mocks and skip:
 
 ```bash
 PLAYWRIGHT_BASE_URL=http://deckwatch.example.com \
@@ -171,39 +331,23 @@ PLAYWRIGHT_MOCK_MODE=off \
 pnpm test:e2e
 ```
 
-### Coverage areas
-
-- **Navigation** — `/` → `/deployments` redirect, deployment → pod
-  drill-down, `/cluster` overview, 404 fallback.
-- **CRUD** — create deployment, delete flow (with confirm dialog).
-- **Namespace switching** — the switcher triggers a re-fetch of
-  namespace-scoped resources.
-- **Deployment detail** — replica counts, resource limits/requests,
-  restart action.
-- **Error states** — 500 from the deployments list, 404 on unknown
-  deployment, 403 for forbidden namespaces.
-
 ### CI integration
 
-```yaml
-- uses: actions/setup-node@v4
-  with: { node-version-file: frontend/.nvmrc }
-- run: pnpm install --frozen-lockfile
-  working-directory: frontend
-- run: pnpm exec playwright install --with-deps
-  working-directory: frontend
-- run: pnpm test:e2e
-  working-directory: frontend
-- uses: actions/upload-artifact@v4
-  if: failure()
-  with:
-    name: playwright-report
-    path: frontend/playwright-report/
-```
+The `e2e` job in `.github/workflows/ci.yml`:
 
-`playwright.config.ts` spins up `pnpm dev` automatically if
-`PLAYWRIGHT_BASE_URL` is unset. In CI, that gives you a self-contained
-run.
+1. Runs in the `mcr.microsoft.com/playwright:v<version>-noble` container,
+   with `--ipc=host` for Chromium's shared memory. It first checks that
+   the image matches `@playwright/test` in the lockfile.
+2. Restores the pnpm store. Only pushes to `main` save it.
+3. Installs dependencies, then runs `pnpm exec playwright test`, which
+   builds the app and serves it with `vite preview`.
+4. On failure, uploads the `playwright-report` artifact for 14 days. It
+   contains the HTML report with the expected, actual and diff images,
+   plus `test-results/` with the traces and videos.
+
+Download the artifact, then open the report with
+`pnpm exec playwright show-report path/to/playwright-report`, and a trace
+with `pnpm exec playwright show-trace path/to/trace.zip`.
 
 ## Follow-up cleanups (surfaced while writing tests)
 
