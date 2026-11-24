@@ -84,6 +84,49 @@ spec:
             - name: DECKWATCH_ALLOW_INSECURE_ENDPOINTS
               value: "true"
             {{- end }}
+            {{- /* deckwatch's own telemetry over OTLP/HTTP (docs/TRACING.md). */}}
+            {{- $otlp := (.Values.telemetry | default dict).otlp | default dict }}
+            {{- if $otlp.enabled }}
+            {{- $bundled := and (not $otlp.endpoint) .Values.tracing.enabled }}
+            {{- if not (or $otlp.endpoint $bundled) }}
+            {{- fail "telemetry.otlp.enabled needs telemetry.otlp.endpoint, or tracing.enabled to use the bundled backend" }}
+            {{- end }}
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: {{ $otlp.endpoint | default (printf "http://%s-%s:4318" (include "deckwatch.fullname" .) (.Values.tracing.backend | default "tempo")) | quote }}
+            - name: OTEL_EXPORTER_OTLP_PROTOCOL
+              value: http/protobuf
+            {{- /* The bundled Tempo and Jaeger accept traces only. */}}
+            - name: OTEL_TRACES_EXPORTER
+              value: {{ ternary "otlp" "none" (ne $otlp.traces false) | quote }}
+            - name: OTEL_METRICS_EXPORTER
+              value: {{ ternary "otlp" "none" (and (ne $otlp.metrics false) (not $bundled)) | quote }}
+            - name: OTEL_LOGS_EXPORTER
+              value: {{ ternary "otlp" "none" (and (ne $otlp.logs false) (not $bundled)) | quote }}
+            {{- $headers := $otlp.headers | default dict }}
+            {{- if $headers.secretName }}
+            - name: OTEL_EXPORTER_OTLP_HEADERS
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $headers.secretName | quote }}
+                  key: {{ $headers.key | default "headers" | quote }}
+            {{- end }}
+            - name: OTEL_SERVICE_NAME
+              value: {{ $otlp.serviceName | default "deckwatch" | quote }}
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: OTEL_RESOURCE_ATTRIBUTES
+              value: "k8s.namespace.name=$(POD_NAMESPACE),k8s.pod.name=$(POD_NAME){{ range $key, $value := $otlp.resourceAttributes }},{{ $key }}={{ $value }}{{ end }}"
+            {{- with $otlp.sampler }}
+            - name: OTEL_TRACES_SAMPLER
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with $otlp.samplerArg }}
+            - name: OTEL_TRACES_SAMPLER_ARG
+              value: {{ . | quote }}
+            {{- end }}
+            {{- end }}
             {{- if .Values.registry.enabled }}
             - name: DECKWATCH_REGISTRY_ENABLED
               value: "true"

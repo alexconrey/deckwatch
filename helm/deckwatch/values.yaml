@@ -21,8 +21,9 @@ namespaces: ""
 
 # Log filter, passed to deckwatch as RUST_LOG (tracing EnvFilter syntax, for
 # example "deckwatch=debug,tower_http=info"). Empty uses the built-in default,
-# "deckwatch=info,tower_http=info,mcp_k8s=info,extism::pdk=info": deckwatch,
-# HTTP responses, the embedded mcp-k8s library, and plugin log lines.
+# "deckwatch=info,tower_http=info,mcp_k8s=info,extism::pdk=info,opentelemetry=warn":
+# deckwatch, HTTP responses, the embedded mcp-k8s library, plugin log lines,
+# and OTLP export failures (see telemetry.otlp).
 logFilter: ""
 
 service:
@@ -164,6 +165,40 @@ outbound:
   # http:// to localhost is always accepted. Sets
   # DECKWATCH_ALLOW_INSECURE_ENDPOINTS=true.
   allowInsecureEndpoints: false
+
+# deckwatch's own telemetry: the traces, log lines and metrics of deckwatch
+# itself, including the embedded mcp-k8s library and plugin log lines,
+# exported over OTLP/HTTP (http/protobuf). Off by default. Not to be confused
+# with the `tracing` block above, which runs a backend for your workloads'
+# traces. Export uses the outbound TLS settings, so outbound.extraCaBundle
+# applies. See docs/TRACING.md, "deckwatch's own telemetry".
+telemetry:
+  otlp:
+    enabled: false
+    # OTLP/HTTP base URL (OTEL_EXPORTER_OTLP_ENDPOINT); deckwatch appends
+    # /v1/traces, /v1/logs and /v1/metrics. For example
+    # http://otel-collector.observability:4318. Empty with tracing.enabled
+    # sends traces to the bundled backend (metrics and logs are then off).
+    endpoint: ""
+    # Exporter headers, usually credentials (OTEL_EXPORTER_OTLP_HEADERS,
+    # "name=value,name2=value2"), from a key of an existing Secret.
+    headers:
+      secretName: ""
+      key: headers
+    # Signals to export. A backend that accepts only traces needs metrics and
+    # logs off; deckwatch then attaches its log lines to spans as span events.
+    traces: true
+    metrics: true
+    logs: true
+    # OTEL_SERVICE_NAME.
+    serviceName: deckwatch
+    # Extra OTEL_RESOURCE_ATTRIBUTES, as key: value (no commas or "=" in
+    # values). k8s.namespace.name and k8s.pod.name are always set.
+    resourceAttributes: {}
+    # OTEL_TRACES_SAMPLER and OTEL_TRACES_SAMPLER_ARG, for example
+    # parentbased_traceidratio and "0.25". Empty means parentbased_always_on.
+    sampler: ""
+    samplerArg: ""
 
 encryptionKey:
   # Use an existing Secret for the encryption key instead of generating one.
