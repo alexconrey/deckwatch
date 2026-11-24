@@ -25,6 +25,25 @@ jobs:
           rustc --version --verbose
           cargo --version
 
+      # The release image is built by the Dockerfile's rust:<version> stages,
+      # so CI must compile with the same rustc minor version.
+      - name: Check toolchain matches Dockerfile rust image
+        run: |
+          want=$(rustc --version | sed -E 's/^rustc ([0-9]+\.[0-9]+).*/\1/')
+          images=$(awk 'toupper($1) == "FROM" { for (i = 2; i <= NF; i++) if ($i !~ /^--/) { print $i; break } }' Dockerfile | grep -E '(^|/)rust([:@]|$)' || true)
+          if [ -z "$images" ]; then
+            echo "::error file=Dockerfile::no rust:<version> build stage found"
+            exit 1
+          fi
+          rc=0
+          for image in $images; do
+            case "$image" in
+              *rust:"$want" | *rust:"$want"[.-]*) echo "ok: $image matches rustc $want" ;;
+              *) echo "::error file=Dockerfile::$image does not match rustc $want from rust-toolchain.toml; bump both together"; rc=1 ;;
+            esac
+          done
+          exit "$rc"
+
       - uses: Swatinem/rust-cache@v2
 
       - name: cargo check
