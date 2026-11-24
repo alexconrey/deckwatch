@@ -47,7 +47,7 @@ async-trait = "0.1"
 object_store = { version = "0.11", features = ["aws"] }
 bytes = "1"
 ed25519-dalek = { version = "3", features = ["rand_core"] }
-rcgen = "0.13"
+rcgen = "0.14"
 time = "0.3"
 
 # Database layer — SeaORM supports SQLite / PostgreSQL / MySQL from a single
@@ -64,3 +64,6 @@ extism = "1.41"
 
 [dev-dependencies]
 tempfile = "3"
+# Parses the webhook CA/serving certs in webhook_tls tests. Already in the
+# lockfile via rcgen's optional x509-parser dependency.
+x509-parser = { version = "0.18", features = ["verify"] }
