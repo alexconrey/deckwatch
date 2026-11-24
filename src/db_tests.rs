@@ -77,3 +77,61 @@ async fn test_ensure_application_idempotent() {
         .expect("count failed");
     assert_eq!(count, 1);
 }
+
+#[tokio::test]
+async fn gitops_token_binding_migration_binds_existing_tokens_to_the_default() {
+    use sea_orm::{ConnectionTrait, Database, Statement};
+    use sea_orm_migration::MigratorTrait;
+
+    let db = Database::connect("sqlite::memory:").await.expect("connect");
+    let before = Migrator::migrations().len() - 1;
+    Migrator::up(&db, Some(before as u32))
+        .await
+        .expect("migrate to the previous version");
+
+    let backend = db.get_database_backend();
+    db.execute(Statement::from_string(
+        backend,
+        "INSERT INTO applications (id, name, namespace, description, team, created_at, updated_at) \
+         VALUES ('prod/api', 'api', 'prod', '', '', '2026-01-01 00:00:00', '2026-01-01 00:00:00')",
+    ))
+    .await
+    .expect("insert application");
+    for (id, token) in [("with-token", "'ciphertext'"), ("without-token", "NULL")] {
+        db.execute(Statement::from_string(
+            backend,
+            format!(
+                "INSERT INTO gitops_configs (id, application_id, repo_url, branch, token_secret, \
+                 encrypted_token, git_auth_user, dockerfile_path, docker_context, oci_repository, \
+                 include_paths, exclude_paths, poll_interval_seconds, webhook_enabled, created_at, \
+                 updated_at) VALUES ('{id}', 'prod/api', 'https://github.com/o/r', 'main', '', \
+                 {token}, '', 'Dockerfile', '.', 'r', '', '', 60, false, '2026-01-01 00:00:00', \
+                 '2026-01-01 00:00:00')"
+            ),
+        ))
+        .await
+        .expect("insert gitops config");
+    }
+
+    Migrator::up(&db, None).await.expect("migrate");
+
+    let rows = crate::entities::gitops_configs::Entity::find()
+        .all(&db)
+        .await
+        .expect("query");
+    let binding = |id: &str| {
+        rows.iter()
+            .find(|r| r.id == id)
+            .expect("row")
+            .token_binding
+            .clone()
+    };
+    let bound = binding("with-token").expect("existing token is bound");
+    let parsed: crate::outbound::EndpointBinding =
+        serde_json::from_str(&bound).expect("binding JSON");
+    assert_eq!(
+        parsed,
+        crate::outbound::EndpointBinding::defaults(&[crate::outbound::EndpointId::GithubApi])
+    );
+    assert_eq!(binding("without-token"), None);
+}

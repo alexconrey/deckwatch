@@ -1,6 +1,7 @@
 // Unit tests for DeckwatchSettings serialization in src/handlers/settings.rs
 
 use super::*;
+use crate::outbound::{EndpointBinding, EndpointId, EndpointPolicy, EndpointSettings};
 
 #[test]
 fn test_default_settings_values() {
@@ -347,6 +348,7 @@ fn restore_secrets_keeps_server_managed_credentials() {
         Some(EncryptedCredentials {
             anthropic_api_key: Some(MASKED_VALUE.to_string()),
             gcp_sa_key: Some("attacker-supplied".to_string()),
+            ..Default::default()
         }),
     ] {
         let mut incoming = stored.clone();
@@ -448,6 +450,8 @@ async fn seeded_state(dir: &std::path::Path) -> (AppState, DeckwatchSettings) {
     upsert_settings_to_db(&state.db, &seeded)
         .await
         .expect("seed");
+    // Saving records the default binding on the legacy credentials.
+    bind_legacy_credentials(&mut seeded);
     (state, seeded)
 }
 
@@ -510,4 +514,465 @@ async fn put_without_credentials_does_not_wipe_them() {
         Some("ciphertext-anthropic")
     );
     assert_eq!(creds.gcp_sa_key.as_deref(), Some("ciphertext-gcp"));
+}
+
+// ── endpoints and credential bindings ───────────────────────────────────────
+
+fn ghe_endpoints() -> EndpointSettings {
+    EndpointSettings::default()
+        .with(EndpointId::GithubWeb, "https://ghe.example.com")
+        .with(EndpointId::GithubApi, "https://ghe.example.com/api/v3")
+        .with(EndpointId::GithubRaw, "https://ghe.example.com/raw")
+}
+
+async fn audit_entries(state: &AppState) -> Vec<crate::entities::audit_log::Model> {
+    crate::entities::audit_log::Entity::find()
+        .all(&state.db)
+        .await
+        .expect("audit log")
+}
+
+#[tokio::test]
+async fn get_always_returns_the_endpoints_object() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let (state, _) = seeded_state(tmp.path()).await;
+    let Json(got) = get_settings(State(state)).await.expect("get");
+    assert_eq!(got.endpoints, Some(EndpointSettings::default()));
+}
+
+#[tokio::test]
+async fn put_validates_and_normalizes_endpoints() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let (state, _) = seeded_state(tmp.path()).await;
+
+    let Json(mut payload) = get_settings(State(state.clone())).await.expect("get");
+    payload.endpoints = Some(
+        EndpointSettings::default()
+            .with(
+                EndpointId::AnthropicApi,
+                " https://LLM-Gateway.example.com/anthropic/ ",
+            )
+            .with(EndpointId::GithubApi, "https://api.github.com/"),
+    );
+    let Json(saved) = put_settings(State(state.clone()), Json(payload))
+        .await
+        .expect("put");
+    let expected = EndpointSettings::default().with(
+        EndpointId::AnthropicApi,
+        "https://llm-gateway.example.com/anthropic",
+    );
+    assert_eq!(saved.endpoints.as_ref(), Some(&expected));
+    assert_eq!(
+        load_settings_from_db(&state).await.endpoints,
+        Some(expected)
+    );
+}
+
+#[tokio::test]
+async fn put_rejects_invalid_endpoints_and_keeps_the_stored_ones() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let (state, _) = seeded_state(tmp.path()).await;
+
+    for bad in [
+        "http://llm-gateway.example.com",
+        "https://user:pass@llm-gateway.example.com",
+        "https://llm-gateway.example.com/?key=1",
+        "llm-gateway.example.com",
+    ] {
+        let Json(mut payload) = get_settings(State(state.clone())).await.expect("get");
+        payload.endpoints = Some(EndpointSettings::default().with(EndpointId::AnthropicApi, bad));
+        let err = put_settings(State(state.clone()), Json(payload))
+            .await
+            .err()
+            .unwrap_or_else(|| panic!("{bad} must be rejected"));
+        let AppError::BadRequest(msg) = err else {
+            panic!("expected 400 for {bad}");
+        };
+        assert!(msg.contains("Anthropic API"), "{bad}: {msg}");
+    }
+    assert_eq!(load_settings_from_db(&state).await.endpoints, None);
+}
+
+#[tokio::test]
+async fn put_without_endpoints_keeps_them() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let (state, _) = seeded_state(tmp.path()).await;
+    let Json(mut payload) = get_settings(State(state.clone())).await.expect("get");
+    payload.endpoints = Some(ghe_endpoints());
+    let _ = put_settings(State(state.clone()), Json(payload))
+        .await
+        .expect("put");
+
+    // SettingsPage builds its payload field by field and omits `endpoints`.
+    let Json(mut payload) = get_settings(State(state.clone())).await.expect("get");
+    payload.endpoints = None;
+    payload.prometheus_enabled = false;
+    let _ = put_settings(State(state.clone()), Json(payload))
+        .await
+        .expect("put");
+
+    let stored = load_settings_from_db(&state).await;
+    assert!(!stored.prometheus_enabled);
+    assert_eq!(stored.endpoints, Some(ghe_endpoints()));
+}
+
+#[tokio::test]
+async fn endpoint_changes_are_audit_logged() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let (state, _) = seeded_state(tmp.path()).await;
+    let before = audit_entries(&state).await.len();
+
+    let Json(mut payload) = get_settings(State(state.clone())).await.expect("get");
+    payload.endpoints = Some(ghe_endpoints());
+    let _ = put_settings(State(state.clone()), Json(payload))
+        .await
+        .expect("put");
+
+    let entries = audit_entries(&state).await;
+    let mut endpoint_entries: Vec<_> = entries
+        .iter()
+        .filter(|e| e.resource_name.starts_with("endpoints."))
+        .collect();
+    endpoint_entries.sort_by(|a, b| a.resource_name.cmp(&b.resource_name));
+    assert_eq!(
+        entries.len() - before,
+        4,
+        "3 endpoint entries + the settings update"
+    );
+    let names: Vec<&str> = endpoint_entries
+        .iter()
+        .map(|e| e.resource_name.as_str())
+        .collect();
+    assert_eq!(
+        names,
+        vec![
+            "endpoints.github_api_base",
+            "endpoints.github_raw_base",
+            "endpoints.github_web_base"
+        ]
+    );
+    let api = endpoint_entries[0];
+    assert_eq!(api.action, "update");
+    assert_eq!(api.resource_type, "settings");
+    assert!(
+        api.detail
+            .contains("from the default (https://api.github.com)"),
+        "{}",
+        api.detail
+    );
+    assert!(
+        api.detail.contains("to https://ghe.example.com/api/v3"),
+        "{}",
+        api.detail
+    );
+
+    // Saving the same endpoints again is not a change.
+    let Json(payload) = get_settings(State(state.clone())).await.expect("get");
+    let _ = put_settings(State(state.clone()), Json(payload))
+        .await
+        .expect("put");
+    let again = audit_entries(&state).await;
+    assert_eq!(
+        again
+            .iter()
+            .filter(|e| e.resource_name.starts_with("endpoints."))
+            .count(),
+        3
+    );
+}
+
+#[test]
+fn apply_endpoint_update_reports_resets_to_default() {
+    let stored = DeckwatchSettings {
+        endpoints: Some(ghe_endpoints()),
+        ..Default::default()
+    };
+    let mut incoming = DeckwatchSettings {
+        endpoints: Some(EndpointSettings::default()),
+        ..Default::default()
+    };
+    let changes =
+        apply_endpoint_update(&mut incoming, &stored, &EndpointPolicy::default()).expect("valid");
+    assert_eq!(changes.len(), 3);
+    assert!(changes.iter().all(|c| c.to.is_empty()));
+    assert!(changes[0].describe().contains("to the default"));
+    assert_eq!(incoming.endpoints, None, "all defaults are stored as None");
+}
+
+#[tokio::test]
+async fn put_cannot_forge_credential_bindings() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let (state, seeded) = seeded_state(tmp.path()).await;
+    let attacker = EndpointBinding::capture(
+        &EndpointSettings::default()
+            .with(EndpointId::AnthropicApi, "https://attacker.example")
+            .with(EndpointId::GithubApi, "https://attacker.example"),
+        &[EndpointId::AnthropicApi, EndpointId::GithubApi],
+        &EndpointPolicy::default(),
+    )
+    .expect("capture");
+
+    let Json(mut payload) = get_settings(State(state.clone())).await.expect("get");
+    let creds = payload.credentials.as_mut().expect("credentials");
+    creds.anthropic_api_key_binding = Some(attacker.clone());
+    payload.git_token_secrets[0].binding = Some(attacker.clone());
+    let _ = put_settings(State(state.clone()), Json(payload))
+        .await
+        .expect("put");
+
+    let stored = load_settings_from_db(&state).await;
+    assert_eq!(
+        stored
+            .credentials
+            .expect("credentials")
+            .anthropic_api_key_binding,
+        seeded
+            .credentials
+            .expect("seeded")
+            .anthropic_api_key_binding
+    );
+    assert_eq!(
+        stored.git_token_secrets[0].binding,
+        seeded.git_token_secrets[0].binding
+    );
+}
+
+#[test]
+fn bind_legacy_credentials_binds_only_unbound_secrets_to_defaults() {
+    let mut s = settings_with_secrets();
+    let custom = EndpointBinding::capture(
+        &ghe_endpoints(),
+        GIT_TOKEN_ENDPOINTS,
+        &EndpointPolicy::default(),
+    )
+    .expect("capture");
+    s.credentials.as_mut().expect("creds").gcp_sa_key_binding = Some(custom.clone());
+
+    // anthropic key + git token "gh"; the GCP key is already bound and the
+    // "unset" token has no stored secret.
+    assert_eq!(bind_legacy_credentials(&mut s), 2);
+    let creds = s.credentials.as_ref().expect("creds");
+    assert_eq!(
+        creds.anthropic_api_key_binding,
+        Some(EndpointBinding::defaults(ANTHROPIC_KEY_ENDPOINTS))
+    );
+    assert_eq!(creds.gcp_sa_key_binding, Some(custom));
+    assert_eq!(
+        s.git_token_secrets[0].binding,
+        Some(EndpointBinding::defaults(GIT_TOKEN_ENDPOINTS))
+    );
+    assert_eq!(s.git_token_secrets[1].binding, None);
+    // Idempotent.
+    assert_eq!(bind_legacy_credentials(&mut s), 0);
+}
+
+#[tokio::test]
+async fn startup_migration_records_default_bindings() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let state = handler_test_state(tmp.path()).await;
+    // A settings row written by an earlier version: no bindings.
+    let legacy = serde_json::to_string(&settings_with_secrets()).expect("json");
+    crate::entities::settings::Entity::insert(crate::entities::settings::ActiveModel {
+        key: sea_orm::ActiveValue::Set(DB_SETTINGS_KEY.to_string()),
+        value: sea_orm::ActiveValue::Set(legacy),
+        updated_at: sea_orm::ActiveValue::Set(now_utc()),
+    })
+    .exec(&state.db)
+    .await
+    .expect("insert legacy row");
+
+    bind_legacy_credentials_at_startup(&state).await;
+
+    let stored = load_settings_from_db(&state).await;
+    let creds = stored.credentials.expect("creds");
+    assert_eq!(
+        creds.anthropic_api_key_binding,
+        Some(EndpointBinding::defaults(ANTHROPIC_KEY_ENDPOINTS))
+    );
+    assert_eq!(
+        creds.gcp_sa_key_binding,
+        Some(EndpointBinding::defaults(GCP_KEY_ENDPOINTS))
+    );
+    assert_eq!(
+        creds.anthropic_api_key.as_deref(),
+        Some("ciphertext-anthropic")
+    );
+}
+
+#[tokio::test]
+async fn saving_a_credential_binds_it_to_the_current_endpoints() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let (mut state, _) = seeded_state(tmp.path()).await;
+    state.encryption_key = "test-encryption-key".to_string();
+
+    let Json(mut payload) = get_settings(State(state.clone())).await.expect("get");
+    payload.endpoints = Some(
+        EndpointSettings::default()
+            .with(EndpointId::AnthropicApi, "https://llm-gateway.example.com")
+            .with(EndpointId::GithubApi, "https://ghe.example.com/api/v3"),
+    );
+    let _ = put_settings(State(state.clone()), Json(payload))
+        .await
+        .expect("put");
+
+    let Json(resp) = set_credentials(
+        State(state.clone()),
+        Json(SetCredentialsRequest {
+            anthropic_api_key: Some("sk-ant-new".to_string()),
+            gcp_sa_key: None,
+        }),
+    )
+    .await
+    .expect("set credentials");
+    let binding = resp.anthropic_api_key_binding.expect("binding returned");
+    assert_eq!(
+        binding.origin(EndpointId::AnthropicApi),
+        Some("https://llm-gateway.example.com")
+    );
+    let stored = load_settings_from_db(&state).await;
+    let creds = stored.credentials.as_ref().expect("creds");
+    assert_eq!(creds.anthropic_api_key_binding, Some(binding));
+    // The untouched GCP key keeps its (default) binding.
+    assert_eq!(
+        creds.gcp_sa_key_binding,
+        Some(EndpointBinding::defaults(GCP_KEY_ENDPOINTS))
+    );
+
+    let Json(_) = put_git_token_secret(
+        State(state.clone()),
+        Json(GitTokenSecretRequest {
+            name: "ghe".to_string(),
+            secret_name: None,
+            token: "ghp_new".to_string(),
+        }),
+    )
+    .await
+    .expect("git token");
+    let stored = load_settings_from_db(&state).await;
+    let token = stored
+        .git_token_secrets
+        .iter()
+        .find(|t| t.name == "ghe")
+        .expect("token");
+    let binding = token.binding.as_ref().expect("token binding");
+    assert_eq!(
+        binding.origin(EndpointId::GithubApi),
+        Some("https://ghe.example.com")
+    );
+    assert_eq!(
+        binding.origin(EndpointId::GithubWeb),
+        Some("https://github.com")
+    );
+
+    // Clearing a credential clears its binding.
+    let Json(resp) = set_credentials(
+        State(state.clone()),
+        Json(SetCredentialsRequest {
+            anthropic_api_key: Some(String::new()),
+            gcp_sa_key: None,
+        }),
+    )
+    .await
+    .expect("clear");
+    assert!(resp.anthropic_api_key.is_none());
+    assert!(resp.anthropic_api_key_binding.is_none());
+}
+
+#[test]
+fn outbound_status_flags_credentials_bound_to_another_host() {
+    let mut s = settings_with_secrets();
+    bind_legacy_credentials(&mut s);
+    s.endpoints = Some(
+        EndpointSettings::default()
+            .with(EndpointId::AnthropicApi, "https://llm-gateway.example.com"),
+    );
+    let status = outbound_status(&s, &crate::outbound::OutboundHttp::default());
+
+    assert!(!status.allow_insecure_endpoints);
+    assert!(status.extra_ca.is_none());
+    assert_eq!(status.endpoints.len(), EndpointId::ALL.len());
+    let anthropic = status
+        .endpoints
+        .iter()
+        .find(|e| e.id == EndpointId::AnthropicApi)
+        .expect("anthropic endpoint");
+    assert_eq!(anthropic.default, "https://api.anthropic.com");
+    assert_eq!(anthropic.value, "https://llm-gateway.example.com");
+    assert_eq!(anthropic.host, "llm-gateway.example.com");
+    assert!(anthropic.error.is_none());
+
+    let key = status
+        .credentials
+        .iter()
+        .find(|c| c.credential == "anthropic_api_key")
+        .expect("key status");
+    assert!(!key.usable);
+    assert_eq!(key.bindings[0].bound_host, "api.anthropic.com");
+    assert_eq!(key.bindings[0].configured_host, "llm-gateway.example.com");
+
+    let gcp = status
+        .credentials
+        .iter()
+        .find(|c| c.credential == "gcp_sa_key")
+        .expect("gcp status");
+    assert!(gcp.usable);
+    assert_eq!(gcp.bindings.len(), 2);
+
+    let token = status
+        .credentials
+        .iter()
+        .find(|c| c.credential == "git_token:gh")
+        .expect("git token status");
+    assert!(token.usable);
+    assert_eq!(token.label, "git token 'gh'");
+    // Only tokens with a stored secret are listed.
+    assert!(!status
+        .credentials
+        .iter()
+        .any(|c| c.credential == "git_token:unset"));
+}
+
+#[test]
+fn outbound_status_reports_endpoints_invalid_under_the_current_policy() {
+    let s = DeckwatchSettings {
+        endpoints: Some(
+            EndpointSettings::default().with(EndpointId::GithubApi, "http://ghe.lab.internal"),
+        ),
+        ..Default::default()
+    };
+    let status = outbound_status(&s, &crate::outbound::OutboundHttp::default());
+    let api = status
+        .endpoints
+        .iter()
+        .find(|e| e.id == EndpointId::GithubApi)
+        .expect("github api");
+    assert!(
+        api.error.as_deref().unwrap_or("").contains("http://"),
+        "{api:?}"
+    );
+}
+
+#[tokio::test]
+async fn put_rejects_a_region_that_would_change_the_host() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let (state, _) = seeded_state(tmp.path()).await;
+    let Json(mut payload) = get_settings(State(state.clone())).await.expect("get");
+    payload.ai_provider = AiProviderConfig::VertexAi {
+        project_id: "p".to_string(),
+        region: "evil.example.com/".to_string(),
+        sa_key_secret: "s".to_string(),
+    };
+    assert!(matches!(
+        put_settings(State(state.clone()), Json(payload)).await,
+        Err(AppError::BadRequest(_))
+    ));
+
+    let Json(mut payload) = get_settings(State(state.clone())).await.expect("get");
+    payload.ai_provider = AiProviderConfig::Bedrock {
+        region: "us-gov-west-1".to_string(),
+        model_id: String::new(),
+    };
+    let _ = put_settings(State(state.clone()), Json(payload))
+        .await
+        .expect("a real region is fine");
 }

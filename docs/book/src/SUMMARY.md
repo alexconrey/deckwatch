@@ -18,6 +18,7 @@
 # Operating Deckwatch
 
 - [Settings](../../SETTINGS.md)
+- [Outbound TLS and Endpoints](../../TLS.md)
 - [Authentication](../../AUTH.md)
 - [Deployment Templates](../../TEMPLATES.md)
 - [Rollout History & Rollback](../../ROLLBACK.md)

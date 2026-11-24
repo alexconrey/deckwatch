@@ -167,6 +167,7 @@ pub async fn get_config(
                         get_ann(&dep, "git-token-secret").unwrap_or("").to_string(),
                     ),
                     encrypted_token: sea_orm::ActiveValue::Set(None),
+                    token_binding: sea_orm::ActiveValue::Set(None),
                     git_auth_user: sea_orm::ActiveValue::Set(String::new()),
                     dockerfile_path: sea_orm::ActiveValue::Set(
                         get_ann(&dep, "dockerfile-path")
@@ -348,6 +349,13 @@ pub async fn set_config(
         ),
         _ => None,
     };
+    // Bind a newly saved per-app token to the GitHub API host configured now
+    // (see crate::outbound::binding).
+    let token_binding = if encrypted_token.is_some() {
+        Some(per_app_token_binding(&state).await?)
+    } else {
+        None
+    };
     let git_auth_user = req.git_auth_user.unwrap_or_default();
     let dockerfile_path = req
         .dockerfile_path
@@ -367,11 +375,13 @@ pub async fn set_config(
             active.token_secret = sea_orm::ActiveValue::Set(token_secret.clone());
             if let Some(ref et) = encrypted_token {
                 active.encrypted_token = sea_orm::ActiveValue::Set(Some(et.clone()));
+                active.token_binding = sea_orm::ActiveValue::Set(token_binding.clone());
             } else if !token_secret.is_empty() {
                 // Switching to a shared token_secret — clear any stale
                 // per-app encrypted token so the token_secret path is
                 // used at build time.
                 active.encrypted_token = sea_orm::ActiveValue::Set(None);
+                active.token_binding = sea_orm::ActiveValue::Set(None);
             }
             active.git_auth_user = sea_orm::ActiveValue::Set(git_auth_user.clone());
             active.dockerfile_path = sea_orm::ActiveValue::Set(dockerfile_path);
@@ -396,6 +406,7 @@ pub async fn set_config(
                 branch: sea_orm::ActiveValue::Set(branch),
                 token_secret: sea_orm::ActiveValue::Set(token_secret),
                 encrypted_token: sea_orm::ActiveValue::Set(encrypted_token),
+                token_binding: sea_orm::ActiveValue::Set(token_binding),
                 git_auth_user: sea_orm::ActiveValue::Set(git_auth_user),
                 dockerfile_path: sea_orm::ActiveValue::Set(dockerfile_path),
                 docker_context: sea_orm::ActiveValue::Set(docker_context),
@@ -641,7 +652,7 @@ pub async fn trigger_build(
         String::new()
     };
 
-    let http = reqwest::Client::new();
+    let http = crate::outbound::global().client(crate::outbound::Purpose::Git);
     let auth_user =
         crate::watcher::resolve_git_auth_user(&config_row.git_auth_user, &config_row.repo_url);
     let remote_sha = check_remote_head(
@@ -816,6 +827,24 @@ pub async fn list_job_pods(
         })
         .collect();
     Ok(Json(JobPodListResponse { pods: summaries }))
+}
+
+/// `EndpointBinding` JSON for a per-application git token saved now: the
+/// GitHub API origin from settings.
+async fn per_app_token_binding(state: &AppState) -> Result<String, AppError> {
+    let settings = crate::handlers::settings::load_settings_from_db(state).await;
+    let binding = crate::outbound::EndpointBinding::capture(
+        &settings.endpoints.unwrap_or_default(),
+        &[crate::outbound::EndpointId::GithubApi],
+        &crate::outbound::global().policy(),
+    )
+    .map_err(|e| {
+        AppError::BadRequest(format!(
+            "cannot bind the token to the configured GitHub API endpoint, fix it first: {e}"
+        ))
+    })?;
+    serde_json::to_string(&binding)
+        .map_err(|e| AppError::BadRequest(format!("failed to encode token binding: {e}")))
 }
 
 #[cfg(test)]

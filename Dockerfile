@@ -46,12 +46,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 COPY Cargo.toml Cargo.lock ./
-RUN mkdir src && echo 'fn main(){}' > src/main.rs
+# Dependency-only build: stub binary and library so this layer caches.
+RUN mkdir src && echo 'fn main(){}' > src/main.rs && touch src/lib.rs
 RUN cargo build --release --locked && rm -rf src
 COPY src/ src/
 COPY docs/ docs/
 COPY openapi/ openapi/
-RUN touch src/main.rs && cargo build --release --locked
+RUN touch src/main.rs src/lib.rs && cargo build --release --locked
 
 FROM gcr.io/distroless/cc-debian12
 WORKDIR /app
