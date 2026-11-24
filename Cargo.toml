@@ -12,7 +12,9 @@ tower-http = { version = "0.7", features = ["fs", "compression-gzip", "trace"] }
 
 kube = { version = "4", features = ["ws"] }
 k8s-openapi = { version = "0.28", features = ["v1_32"] }
-mcp-k8s = { git = "https://github.com/alexconrey/mcp-k8s.git", branch = "main" }
+# default-features = false: deckwatch only uses the mcp_k8s library, not the
+# standalone server binary (and its utoipa-swagger-ui / zip build dependencies).
+mcp-k8s = { git = "https://github.com/alexconrey/mcp-k8s.git", branch = "main", default-features = false }
 rustls = { version = "0.23", features = ["ring"] }
 
 serde = { version = "1", features = ["derive"] }
