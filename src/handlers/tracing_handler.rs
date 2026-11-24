@@ -28,8 +28,6 @@
 //! span name, timestamp). Adding Zipkin or a managed backend later means
 //! wiring one more match arm in `fetch_traces`, not changing the UI.
 
-use std::time::Duration;
-
 use axum::extract::{Path, Query, State};
 use axum::Json;
 use serde::{Deserialize, Serialize};
@@ -100,10 +98,9 @@ pub struct ListTracesResponse {
 /// value keeps the UI's initial paint fast and mirrors the design doc.
 const MAX_TRACES_PER_QUERY: u32 = 20;
 
-/// Trace-backend query timeout. Kept short -- the UI polls this, so a
-/// backend that is slow to respond should surface as unavailable rather
-/// than blocking the request path.
-const QUERY_TIMEOUT: Duration = Duration::from_secs(10);
+// The trace-backend query timeout is `outbound::Purpose::Observability`
+// (10 s): the UI polls this, so a slow backend should surface as unavailable
+// rather than block the request path.
 
 pub async fn list_traces(
     State(state): State<AppState>,
@@ -138,10 +135,7 @@ pub async fn list_traces(
         .min(MAX_TRACES_PER_QUERY)
         .max(1);
 
-    let http = reqwest::Client::builder()
-        .timeout(QUERY_TIMEOUT)
-        .build()
-        .map_err(|e| AppError::BadRequest(format!("failed to build http client: {e}")))?;
+    let http = crate::outbound::global().client(crate::outbound::Purpose::Observability);
 
     let kind = BackendKind::parse(&backend_kind);
     match fetch_traces(&http, kind, &query_url, &params.service, limit).await {
@@ -240,7 +234,9 @@ async fn fetch_traces(
 // Jaeger-compat HTTP client (works for Jaeger native and Tempo's shim)
 // ---------------------------------------------------------------------------
 
-async fn fetch_jaeger_compat(
+/// GET `{base_url}/api/traces?service=..&limit=..` (Jaeger JSON, also served
+/// by Tempo's Jaeger shim) and summarize each trace.
+pub async fn fetch_jaeger_compat(
     http: &reqwest::Client,
     base_url: &str,
     service: &str,
@@ -257,7 +253,8 @@ async fn fetch_jaeger_compat(
         Err(e) => {
             timer.finish(false);
             return Err(format!(
-                "failed to reach tracing backend at {base_url}: {e}"
+                "failed to reach tracing backend at {base_url}: {}",
+                crate::outbound::error_chain(&e)
             ));
         }
     };

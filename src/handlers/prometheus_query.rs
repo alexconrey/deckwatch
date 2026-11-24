@@ -25,8 +25,6 @@
 //! - Prometheus unreachable / non-2xx -> 200 with `unavailable_reason` set
 //!   to a human-readable message. UI renders a callout, not a red banner.
 
-use std::time::Duration;
-
 use axum::extract::{Query, State};
 use axum::Json;
 use serde::{Deserialize, Serialize};
@@ -110,9 +108,8 @@ pub struct RangeResponse {
 /// snappy on the frontend. Also serves as a step-clamp lever below.
 const MAX_POINTS: u32 = 2000;
 
-/// Prometheus query timeout. Deckwatch requests should not stack up on a
-/// shared observability backend.
-const QUERY_TIMEOUT: Duration = Duration::from_secs(10);
+// The query timeout (10 s, so deckwatch requests do not stack up on a shared
+// observability backend) is `outbound::Purpose::Observability`.
 
 pub async fn query_range(
     State(state): State<AppState>,
@@ -152,10 +149,7 @@ pub async fn query_range(
     let range_secs = (params.end - params.start) as u32;
     let step = clamp_step(params.step, range_secs);
 
-    let http = reqwest::Client::builder()
-        .timeout(QUERY_TIMEOUT)
-        .build()
-        .map_err(|e| AppError::BadRequest(format!("failed to build http client: {e}")))?;
+    let http = crate::outbound::global().client(crate::outbound::Purpose::Observability);
 
     let mut warnings = Vec::new();
 
@@ -315,7 +309,9 @@ struct PromMatrix {
     values: Vec<(f64, String)>,
 }
 
-async fn execute_range(
+/// POST a PromQL range query (form-encoded) to `{base_url}/api/v1/query_range`
+/// and convert the matrix result into per-pod series.
+pub async fn execute_range(
     http: &reqwest::Client,
     base_url: &str,
     query: &str,
@@ -341,7 +337,10 @@ async fn execute_range(
         Ok(r) => r,
         Err(e) => {
             timer.finish(false);
-            return Err(format!("failed to reach prometheus at {base_url}: {e}"));
+            return Err(format!(
+                "failed to reach prometheus at {base_url}: {}",
+                crate::outbound::error_chain(&e)
+            ));
         }
     };
 

@@ -19,6 +19,12 @@ serviceAccount:
 # Empty string = all namespaces.
 namespaces: ""
 
+# Log filter, passed to deckwatch as RUST_LOG (tracing EnvFilter syntax, for
+# example "deckwatch=debug,tower_http=info"). Empty uses the built-in default,
+# "deckwatch=info,tower_http=info,mcp_k8s=info,extism::pdk=info": deckwatch,
+# HTTP responses, the embedded mcp-k8s library, and plugin log lines.
+logFilter: ""
+
 service:
   type: ClusterIP
   port: 80
@@ -140,6 +146,24 @@ prometheus:
 
 tracing:
   enabled: false
+
+# Outbound HTTPS from deckwatch: AI providers, GitHub and other git hosts,
+# plugin downloads, notification webhooks, Prometheus, tracing, S3.
+# See docs/TLS.md.
+outbound:
+  # Extra CA certificates trusted in addition to the system roots (a private
+  # CA, or a TLS-inspecting proxy's CA). The PEM bundle under `key` is mounted
+  # read-only and passed to deckwatch as DECKWATCH_EXTRA_CA_FILE. Set
+  # secretName or configMapName, not both. A missing key, or a bundle that is
+  # unreadable or not PEM certificates, stops the pod at startup.
+  extraCaBundle:
+    secretName: ""
+    configMapName: ""
+    key: ca.crt
+  # Accept http:// endpoints for any host. Local development and tests only;
+  # http:// to localhost is always accepted. Sets
+  # DECKWATCH_ALLOW_INSECURE_ENDPOINTS=true.
+  allowInsecureEndpoints: false
 
 encryptionKey:
   # Use an existing Secret for the encryption key instead of generating one.

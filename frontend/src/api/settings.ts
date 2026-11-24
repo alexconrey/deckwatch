@@ -1,6 +1,7 @@
 import { apiFetch } from "./client";
 import type {
   DeckwatchSettings,
+  OutboundStatus,
   SetCredentialsRequest,
   SetCredentialsResponse,
 } from "@/types/api";
@@ -22,4 +23,7 @@ export const settingsApi = {
 
   testNotification: () =>
     apiFetch<void>("/notifications/test", { method: "POST" }),
+
+  /** Endpoint defaults, credential bindings and the TLS/endpoint policy. */
+  outbound: () => apiFetch<OutboundStatus>("/settings/outbound"),
 };

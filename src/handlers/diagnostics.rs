@@ -11,9 +11,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 
-use crate::anthropic::AnthropicClient;
 use crate::error::AppError;
-use crate::handlers::settings::{load_settings_from_db, AiProviderConfig};
 use crate::log_sanitize::{sanitize_logs, wrap_prompt};
 use crate::metrics;
 use crate::state::AppState;
@@ -109,111 +107,6 @@ pub enum DiagStatus {
     Failed,
 }
 
-/// Read a single key from a Kubernetes Secret.
-async fn read_secret_key(
-    state: &AppState,
-    ns: &str,
-    secret_name: &str,
-    data_key: &str,
-) -> Result<String, AppError> {
-    let secrets_api = state.secrets_api(ns)?;
-    let secret = secrets_api.get(secret_name).await.map_err(|_| {
-        AppError::BadRequest(
-            "AI provider credentials are not configured. \
-             Go to Settings \u{2192} AI Providers to set up your API key."
-                .to_string(),
-        )
-    })?;
-    let value = secret
-        .data
-        .as_ref()
-        .and_then(|d| d.get(data_key))
-        .map(|v| String::from_utf8_lossy(&v.0).to_string())
-        .ok_or_else(|| {
-            AppError::BadRequest(format!(
-                "Secret '{secret_name}' is missing the '{data_key}' key"
-            ))
-        })?;
-    Ok(value)
-}
-
-/// Try to read a credential from the encrypted DB store first; fall back to
-/// the Kubernetes Secret if no DB credential is configured (or the encryption
-/// key is not set). This lets operators manage API keys via the Settings UI
-/// while remaining backward-compatible with existing Secret-based deployments.
-async fn read_credential(
-    state: &AppState,
-    ns: &str,
-    credential_type: &str,
-) -> Result<String, AppError> {
-    let settings = load_settings_from_db(state).await;
-    if let Some(creds) = &settings.credentials {
-        let encrypted = match credential_type {
-            "anthropic" => creds.anthropic_api_key.as_deref(),
-            "gcp_sa" => creds.gcp_sa_key.as_deref(),
-            _ => None,
-        };
-        if let Some(enc) = encrypted {
-            if let Ok(decrypted) = crate::crypto::decrypt(&state.encryption_key, enc) {
-                return Ok(decrypted);
-            }
-        }
-    }
-    // Fallback to K8s Secret.
-    let (secret_name, data_key) = match credential_type {
-        "anthropic" => ("deckwatch-anthropic-api-key", "api-key"),
-        "gcp_sa" => ("deckwatch-gcp-sa-key", "gcp-sa-key"),
-        _ => {
-            return Err(AppError::BadRequest(format!(
-                "Unknown credential type: {credential_type}"
-            )))
-        }
-    };
-    read_secret_key(state, ns, secret_name, data_key).await
-}
-
-/// Build an `AnthropicClient` configured for the provider selected in settings.
-async fn build_ai_client(state: &AppState, ns: &str) -> Result<AnthropicClient, AppError> {
-    let settings = load_settings_from_db(state).await;
-    match &settings.ai_provider {
-        AiProviderConfig::Native { api_key_secret } => {
-            // Try DB-stored encrypted credential first, then env-var override,
-            // then the configured K8s Secret name.
-            let key = match read_credential(state, ns, "anthropic").await {
-                Ok(k) => k,
-                Err(_) => {
-                    let secret_name = std::env::var("DECKWATCH_DIAG_CLAUDE_SECRET")
-                        .unwrap_or_else(|_| api_key_secret.clone());
-                    read_secret_key(state, ns, &secret_name, "api-key").await?
-                }
-            };
-            Ok(AnthropicClient::native(key))
-        }
-        AiProviderConfig::VertexAi {
-            project_id,
-            region,
-            sa_key_secret,
-        } => {
-            let sa_json = match read_credential(state, ns, "gcp_sa").await {
-                Ok(k) => k,
-                Err(_) => read_secret_key(state, ns, sa_key_secret, "gcp-sa-key").await?,
-            };
-            let token = crate::anthropic::exchange_sa_key_for_token(&sa_json)
-                .await
-                .map_err(|e| AppError::BadRequest(format!("GCP token exchange failed: {e}")))?;
-            Ok(AnthropicClient::vertex(
-                project_id.clone(),
-                region.clone(),
-                token,
-            ))
-        }
-        AiProviderConfig::Bedrock { region, model_id } => {
-            // Bedrock uses IRSA -- no secret needed, just region + model.
-            Ok(AnthropicClient::bedrock(region.clone(), model_id.clone()))
-        }
-    }
-}
-
 /// Create a diagnostic and stream the AI response back via SSE.
 ///
 /// Replaces the previous K8s Job-based approach with a direct Anthropic
@@ -239,7 +132,13 @@ pub async fn create_diagnostic(
 
     // Build the AI client before we start streaming so a missing secret
     // returns a clean JSON error rather than an SSE error event.
-    let ai_client = build_ai_client(&state, &ns).await?;
+    let ai_client = crate::ai_provider::build_client(
+        &state,
+        crate::outbound::global(),
+        &ns,
+        &["DECKWATCH_DIAG_CLAUDE_SECRET"],
+    )
+    .await?;
 
     // Sanitize + hard-truncate before we ever hand the text to an LLM.
     let sanitized = sanitize_logs(&req.logs);
