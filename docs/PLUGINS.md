@@ -32,6 +32,7 @@ Deckwatch supports external plugins — compiled WASM binaries hosted in Git rep
 | Env var injection | Shipped | Static values, `secretKeyRef`, `configMapKeyRef` |
 | Sidecar injection | Shipped | |
 | Kubernetes resource creation | Shipped | CRDs, ExternalSecrets, CronJobs, etc. via server-side apply |
+| Kubernetes object deletion on deprovision | Shipped (SDK v0.10.0) | `deprovision()` returns `delete_kubernetes_resources`; deckwatch deletes ServiceAccounts and Jobs in the application's namespace. See [Deleting Kubernetes objects on deprovision](#deleting-kubernetes-objects-on-deprovision) |
 | ServiceAccount binding | Shipped (SDK v0.3.0) | Plugin declares `service_account_name`; deckwatch sets it on the pod template |
 | Plugin dependency resolution | Shipped (SDK v0.4.0) | `metadata()` export, `provides`/`depends_on`, topological sort, output threading |
 | Plugin networking (`allowed_hosts`) | Shipped | Controls which URLs the plugin can reach via extism HTTP host function |
@@ -256,6 +257,34 @@ These annotations are how deckwatch knows what to clean up if a plugin is disabl
 
 ---
 
+## Deleting Kubernetes objects on deprovision
+
+A plugin can't delete Kubernetes objects itself. When a provisioned resource is removed, deckwatch calls the plugin's `deprovision()` export, and the plugin can list objects for deckwatch to delete in `delete_kubernetes_resources` (SDK v0.10.0):
+
+```json
+{
+  "errors": [],
+  "message": "Deleted IAM role team-shop-rds",
+  "delete_kubernetes_resources": [
+    { "api_version": "batch/v1", "kind": "Job", "name": "shop-db-bootstrap-1a2b3c4d" },
+    { "api_version": "v1", "kind": "ServiceAccount", "name": "shop-db-bootstrap" }
+  ]
+}
+```
+
+Deckwatch deletes them after `deprovision()` returns, whether the resource was removed through the API or the MCP `deprovision_resource` tool:
+
+- Only in the application's namespace. An entry has no namespace field; a `namespace` key is ignored.
+- Only `v1` `ServiceAccount` and `batch/v1` `Job`. Other kinds, and invalid object names, are refused.
+- Jobs first, with background propagation so their pods are deleted too; then ServiceAccounts.
+- A ServiceAccount that a Deployment, CronJob or Job in the namespace still uses is kept, because deleting it would stop new pods from being created. The namespace's `default` ServiceAccount is never deleted.
+- An object that's already gone counts as deleted.
+- Every object gets an audit entry (action `delete`, outcome in the detail). Refusals and failures are also logged as warnings and counted in `deckwatch_plugin_errors_total` (`k8s_delete_refused`, `k8s_delete_failed`). None of them stops the resource record from being removed.
+
+The `DELETE …/resources/{plugin}/{resource_id}` response and the MCP tool's response report each object's outcome in `kubernetes_resource_deletions`, next to the plugin's `message` and events.
+
+---
+
 ## Writing a plugin
 
 See [deckwatch-plugin-sdk](https://github.com/alexconrey/deckwatch-plugin-sdk) for the SDK crate and full development guide.
@@ -336,8 +365,9 @@ Where they show up:
 
 - **The response of the action that ran the plugin**, warnings included even
   when it succeeds: `plugin_events` on deployment create and update, and on
-  provision and refresh; `{message, plugin_events}` from deprovision (the
-  `message` is what the plugin says it did and didn't clean up). A
+  provision and refresh; `{message, plugin_events,
+  kubernetes_resource_deletions}` from deprovision (the `message` is what the
+  plugin says it did and didn't clean up). A
   `provision()` that fails outright returns 502 with the events. The MCP
   tools `provision_resource`, `refresh_resource`, `deprovision_resource`,
   `validate_plugin` and `enable_plugin` return them too, inside a fence that

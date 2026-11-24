@@ -691,12 +691,58 @@ paths:
     put:
       tags: [Settings]
       summary: Update deckwatch settings
+      description: |
+        Secrets come back masked on GET; masked values are restored from the
+        stored copy. `credentials` and git token bindings are server-managed
+        and ignored here. Omitting `endpoints` keeps the stored endpoints.
+        Every endpoint change is written to the audit log.
       requestBody:
         required: true
         content:
           application/json:
             schema: { $ref: "#/components/schemas/DeckwatchSettings" }
-      responses: { "200": { description: Updated } }
+      responses:
+        "200": { description: Updated }
+        "400": { description: "Invalid endpoint (scheme, userinfo, query, host) or AI provider region" }
+
+  /api/settings/credentials:
+    post:
+      tags: [Settings]
+      summary: Encrypt and store AI provider credentials
+      description: |
+        Only the keys present are changed; `""` clears a key. Each saved key
+        is bound to the endpoint origins configured at that moment and is
+        never sent to any other host. After an endpoint change the key must be
+        saved again to be used with the new host.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/SetCredentialsRequest" }
+      responses:
+        "200":
+          description: Masked values and bindings
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SetCredentialsResponse" }
+        "400": { description: "DECKWATCH_ENCRYPTION_KEY unset, or the configured endpoint is invalid" }
+
+  /api/settings/outbound:
+    get:
+      tags: [Settings]
+      summary: Endpoint defaults, credential bindings and outbound TLS policy
+      description: |
+        For the Settings page: every configurable endpoint with its default
+        and effective value, each stored credential with the hosts it is bound
+        to (and whether they still match), whether
+        `DECKWATCH_ALLOW_INSECURE_ENDPOINTS` is set, and the extra CA bundle
+        from `DECKWATCH_EXTRA_CA_FILE`. See docs/TLS.md.
+      responses:
+        "200":
+          description: Outbound status
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/OutboundStatus" }
 
   # ------------------------------------------- plugin-provisioned resources
   /api/namespaces/{ns}/applications/{name}/resources:
@@ -1155,7 +1201,7 @@ components:
 
     DeprovisionResponse:
       type: object
-      required: [message, plugin_events]
+      required: [message, plugin_events, kubernetes_resource_deletions]
       properties:
         message:
           type: string
@@ -1163,6 +1209,18 @@ components:
         plugin_events:
           type: array
           items: { $ref: "#/components/schemas/PluginEventReport" }
+        kubernetes_resource_deletions:
+          type: array
+          description: The objects the plugin's deprovision() asked deckwatch to delete, and what happened to each.
+          items:
+            type: object
+            properties:
+              api_version: { type: string }
+              kind: { type: string }
+              name: { type: string }
+              namespace: { type: string }
+              outcome: { type: string, enum: [deleted, not_found, refused, failed] }
+              reason: { type: string, description: Why it was refused or failed }
 
     PluginFailedError:
       type: object
@@ -1262,6 +1320,121 @@ components:
             properties:
               name: { type: string }
               url:  { type: string }
+        git_token_secrets:
+          type: array
+          items:
+            type: object
+            properties:
+              name:        { type: string }
+              secret_name: { type: string }
+              namespace:   { type: string }
+              encrypted_token:
+                type: string
+                nullable: true
+                description: '"configured" when a token is stored; the value is never returned.'
+              binding:
+                allOf: [{ $ref: "#/components/schemas/EndpointBinding" }]
+                nullable: true
+                description: GitHub endpoint origins the stored token is bound to. Server-managed.
+        credentials:
+          allOf: [{ $ref: "#/components/schemas/EncryptedCredentials" }]
+          nullable: true
+        endpoints:
+          allOf: [{ $ref: "#/components/schemas/EndpointSettings" }]
+          description: Always present on GET. Omit on PUT to keep the stored endpoints.
+
+    EndpointId:
+      type: string
+      enum: [anthropic_api, vertex_token, vertex_api, bedrock, github_api, github_web, github_raw]
+
+    EndpointSettings:
+      type: object
+      description: |
+        Upstream endpoint overrides; empty = default. https:// only (http:// for
+        loopback hosts, or any host when DECKWATCH_ALLOW_INSECURE_ENDPOINTS=true),
+        no userinfo, query or fragment. `{region}` may appear in the host of
+        `vertex_api_base` and `bedrock_endpoint`.
+      properties:
+        anthropic_api_base: { type: string, example: "https://api.anthropic.com" }
+        vertex_token_url:   { type: string, example: "https://oauth2.googleapis.com/token" }
+        vertex_api_base:    { type: string, example: "https://{region}-aiplatform.googleapis.com" }
+        bedrock_endpoint:   { type: string, example: "https://bedrock-runtime.{region}.amazonaws.com" }
+        github_api_base:    { type: string, example: "https://ghe.example.com/api/v3" }
+        github_web_base:    { type: string, example: "https://ghe.example.com" }
+        github_raw_base:    { type: string, example: "https://ghe.example.com/raw" }
+
+    EndpointBinding:
+      type: object
+      description: Endpoint origins (`scheme://host[:port]`) a stored credential may be sent to, recorded when it was saved.
+      additionalProperties: { type: string }
+      example: { anthropic_api: "https://api.anthropic.com" }
+
+    EncryptedCredentials:
+      type: object
+      properties:
+        anthropic_api_key: { type: string, nullable: true, description: '"configured" when set' }
+        gcp_sa_key:        { type: string, nullable: true, description: '"configured" when set' }
+        anthropic_api_key_binding: { $ref: "#/components/schemas/EndpointBinding" }
+        gcp_sa_key_binding:        { $ref: "#/components/schemas/EndpointBinding" }
+
+    SetCredentialsRequest:
+      type: object
+      properties:
+        anthropic_api_key: { type: string }
+        gcp_sa_key:        { type: string }
+
+    SetCredentialsResponse:
+      type: object
+      properties:
+        anthropic_api_key: { type: string, nullable: true }
+        gcp_sa_key:        { type: string, nullable: true }
+        anthropic_api_key_binding: { $ref: "#/components/schemas/EndpointBinding" }
+        gcp_sa_key_binding:        { $ref: "#/components/schemas/EndpointBinding" }
+
+    OutboundStatus:
+      type: object
+      required: [allow_insecure_endpoints, extra_ca, endpoints, credentials]
+      properties:
+        allow_insecure_endpoints: { type: boolean }
+        extra_ca:
+          type: object
+          nullable: true
+          properties:
+            file:         { type: string, example: /etc/deckwatch/extra-ca/ca.crt }
+            certificates: { type: integer }
+        endpoints:
+          type: array
+          items:
+            type: object
+            required: [id, setting, label, default, value, effective, host, error]
+            properties:
+              id:        { $ref: "#/components/schemas/EndpointId" }
+              setting:   { type: string, example: anthropic_api_base }
+              label:     { type: string, example: Anthropic API }
+              default:   { type: string, example: "https://api.anthropic.com" }
+              value:     { type: string, description: 'Configured override ("" = default)' }
+              effective: { type: string }
+              host:      { type: string, example: api.anthropic.com }
+              error:     { type: string, nullable: true }
+        credentials:
+          type: array
+          items:
+            type: object
+            required: [credential, label, bindings, usable]
+            properties:
+              credential: { type: string, example: anthropic_api_key }
+              label:      { type: string, example: Anthropic API key }
+              usable:     { type: boolean }
+              bindings:
+                type: array
+                items:
+                  type: object
+                  required: [endpoint, bound_host, configured_host, matches]
+                  properties:
+                    endpoint:        { $ref: "#/components/schemas/EndpointId" }
+                    bound_host:      { type: string }
+                    configured_host: { type: string }
+                    matches:         { type: boolean }
 
     McpTuningField:
       type: object

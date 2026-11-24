@@ -4,6 +4,13 @@ version = "0.6.7"
 edition = "2021"
 publish = false
 
+# The server is a library plus a thin binary (src/main.rs calls
+# deckwatch::run) so integration tests in tests/ can call real code paths.
+[lib]
+path = "src/lib.rs"
+# Doc comments are prose, not examples.
+doctest = false
+
 [dependencies]
 axum = { version = "0.8", features = ["ws"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "fs", "sync", "time"] }
@@ -77,6 +84,13 @@ extism = "1.41"
 
 [dev-dependencies]
 tempfile = "3"
+# TLS mock upstreams in tests/outbound_tls.rs. Already in the lockfile via
+# kube and reqwest 0.13.
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
+# RSA key generation for the Vertex AI service-account test (ring cannot
+# generate RSA keys). Already compiled in through rustls' default features;
+# no default features so no new crates enter the lockfile.
+aws-lc-rs = { version = "1", default-features = false, features = ["aws-lc-sys", "alloc"] }
 # Parses the webhook CA/serving certs in webhook_tls tests. Already in the
 # lockfile via rcgen's optional x509-parser dependency.
 x509-parser = { version = "0.18", features = ["verify"] }

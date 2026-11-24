@@ -28,7 +28,7 @@
 use std::sync::Arc;
 
 use bytes::Bytes;
-use object_store::aws::{AmazonS3, AmazonS3Builder};
+use object_store::aws::AmazonS3;
 use object_store::path::Path as OPath;
 // object_store 0.13 moved head/get/put/delete/copy to `ObjectStoreExt`;
 // `list_with_delimiter` is still on `ObjectStore`.
@@ -84,9 +84,13 @@ impl S3Backend {
         // empty; `key_for` handles both cases.
         let prefix = cfg.prefix.trim_matches('/').to_string();
 
-        let mut builder = AmazonS3Builder::from_env()
-            .with_bucket_name(&cfg.bucket)
-            .with_region(&cfg.region);
+        // Same as AmazonS3Builder::from_env(), plus deckwatch's extra
+        // trusted CAs (DECKWATCH_EXTRA_CA_FILE) for on-prem S3 endpoints.
+        let mut builder = crate::outbound::amazon_s3_builder_from_env(
+            crate::outbound::global().object_store_client_options(),
+        )
+        .with_bucket_name(&cfg.bucket)
+        .with_region(&cfg.region);
 
         if !cfg.endpoint.is_empty() {
             builder = builder.with_endpoint(&cfg.endpoint);

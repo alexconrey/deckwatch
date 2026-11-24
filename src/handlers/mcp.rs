@@ -800,6 +800,7 @@ fn deckwatch_tool_definitions() -> Vec<serde_json::Value> {
             "name": "deprovision_resource",
             "description": "Deprovision (tear down) a plugin-managed infrastructure resource from an application. \
         WARNING: This calls the plugin's deprovision() function, which tears down the underlying cloud infrastructure (e.g. deletes an RDS instance or S3 bucket) and removes the injected env vars from all application deployments. \
+        Deckwatch also deletes the Kubernetes objects the plugin asks for (ServiceAccounts and Jobs in the application's namespace only; a ServiceAccount still used by a workload is kept) and reports each one in kubernetes_resource_deletions. \
         This action is destructive and may result in data loss — confirm with the user before proceeding.",
             "inputSchema": {
                 "type": "object",
@@ -2120,11 +2121,7 @@ async fn tool_enable_plugin(state: &AppState, args: &serde_json::Value) -> Resul
     // Load the plugin now, so the result says whether it works: fetch,
     // checksum, metadata() and version-check problems come back as events.
     // Other loaded plugins are left alone.
-    let snap = settings::DeckwatchSettings {
-        plugins: vec![enabled_cfg],
-        git_token_secrets: s.git_token_secrets.clone(),
-        ..Default::default()
-    };
+    let snap = settings::plugin_fetch_settings(state, vec![enabled_cfg]).await;
     let reloaded = crate::plugins::fetch_plugins(&snap, state).await;
     let loaded = !reloaded.is_empty();
     {
@@ -2314,14 +2311,7 @@ async fn tool_update_plugin_config(
         let state_clone = state.clone();
         let plugins_cfg = s.plugins.clone();
         tokio::spawn(async move {
-            let git_token_secrets = settings::load_settings_from_db(&state_clone)
-                .await
-                .git_token_secrets;
-            let snap = settings::DeckwatchSettings {
-                plugins: plugins_cfg,
-                git_token_secrets,
-                ..Default::default()
-            };
+            let snap = settings::plugin_fetch_settings(&state_clone, plugins_cfg).await;
             let loaded = crate::plugins::fetch_plugins(&snap, &state_clone).await;
             tracing::info!(count = loaded.len(), "plugins reloaded after config update");
             *state_clone.plugins.write().await = loaded;
@@ -2660,14 +2650,14 @@ async fn tool_deprovision_resource(
         .as_str()
         .ok_or("resource_id is required")?;
 
-    let Json(response) = application_resources::deprovision(
-        State(state.clone()),
-        axum::extract::Path((
-            ns.to_string(),
-            app_name.to_string(),
-            plugin_name.to_string(),
-            resource_id.to_string(),
-        )),
+    let response = application_resources::deprovision_resource(
+        state,
+        &application_resources::DeprovisionTarget {
+            namespace: ns,
+            application: app_name,
+            plugin: plugin_name,
+            resource_id,
+        },
     )
     .await
     .map_err(handler_error)?;
@@ -2685,6 +2675,7 @@ async fn tool_deprovision_resource(
         } else {
             "see the plugin events below"
         },
+        "kubernetes_resource_deletions": response.kubernetes_resource_deletions,
     })
     .to_string();
     Ok(with_plugin_output(text, &response.plugin_events))

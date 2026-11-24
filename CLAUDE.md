@@ -33,8 +33,11 @@ registry, AI diagnostics, and an MCP server for Claude Code integration.
 ## Directory Layout
 
 ```
-src/                              # Rust backend
-  main.rs                         # Entrypoint, config, DB connect, watcher spawn
+src/                              # Rust backend (library + thin binary)
+  main.rs                         # Binary: calls deckwatch::run()
+  lib.rs                          # run(): config, DB connect, watcher spawn; module tree
+  outbound/                       # All outbound HTTP: client factory, extra CAs,
+                                  #   endpoint settings, credential binding (docs/TLS.md)
   config.rs                       # CLI config (clap) with env var fallbacks
   state.rs                        # AppState: kube::Client + DB + namespace list
   routes.rs                       # Axum router (public_api + private_api)
@@ -183,7 +186,8 @@ cd frontend && pnpm install && pnpm dev
 ### Running tests
 
 ```bash
-cargo test                                    # Backend (~580+ tests)
+cargo test                                    # Backend (~880+ tests)
+cargo test --test outbound_tls                # Outbound HTTPS contract tests (TLS mocks)
 cd frontend && npx vitest run                 # Frontend (~70+ tests)
 ```
 

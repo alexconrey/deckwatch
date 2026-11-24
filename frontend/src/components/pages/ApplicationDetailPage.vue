@@ -14,6 +14,7 @@ import type {
   ApplicationGitConfig,
   ApplicationPluginEntry,
   DiagAgent,
+  KubernetesObjectDeletion,
   PluginEventReport,
   PluginResource,
   PluginSummary,
@@ -390,6 +391,8 @@ const infraNotice = ref<{
   title: string;
   message: string;
   events: PluginEventReport[];
+  /** Kubernetes objects the plugin asked deckwatch to delete on removal. */
+  deletions?: KubernetesObjectDeletion[];
 } | null>(null);
 const infraNoticeType = computed<"error" | "warning" | "info">(() => {
   const worst = worstSeverity(infraNotice.value?.events);
@@ -535,9 +538,15 @@ async function confirmDeprovision() {
       (r) => !(r.plugin_name === deprovisionTarget.value!.plugin && r.resource_id === deprovisionTarget.value!.resource_id),
     );
     const label = deprovisionTarget.value.label;
+    const deletions = result.kubernetes_resource_deletions ?? [];
     infraNotice.value =
-      result.message || result.plugin_events.length
-        ? { title: `${label} record removed`, message: result.message, events: result.plugin_events }
+      result.message || result.plugin_events.length || deletions.length
+        ? {
+            title: `${label} record removed`,
+            message: result.message,
+            events: result.plugin_events,
+            deletions,
+          }
         : null;
     pluginSuccess(`${label} record removed`);
     showDeprovisionDialog.value = false;
@@ -972,6 +981,11 @@ watch(activeTab, async (tab) => {
           {{ infraNotice.message }}
         </div>
         <PluginEventList :events="infraNotice.events" :hide-info="!!infraNotice.message" />
+        <ul v-if="infraNotice.deletions?.length" class="text-caption mt-1 pl-4">
+          <li v-for="d in infraNotice.deletions" :key="`${d.kind}/${d.name}`">
+            {{ d.kind }} {{ d.name }}: {{ d.outcome.replace("_", " ") }}<span v-if="d.reason"> ({{ d.reason }})</span>
+          </li>
+        </ul>
       </v-alert>
       <v-progress-linear v-if="infraLoading" indeterminate color="primary" class="mb-4" />
 
