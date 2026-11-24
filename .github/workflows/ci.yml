@@ -49,6 +49,12 @@ jobs:
       - name: cargo check
         run: cargo check --locked
 
+      # Also type-check tests (and any benches/examples) so test-only breakage
+      # is caught. Tests are not run yet because `cargo test` has known
+      # failures being fixed separately; add `cargo test --locked` once it passes.
+      - name: cargo check (all targets)
+        run: cargo check --locked --all-targets
+
       - name: cargo clippy
         run: cargo clippy -- -D warnings
 
