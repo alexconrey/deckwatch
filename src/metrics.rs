@@ -251,7 +251,9 @@ pub fn record_gitops_build(namespace: &str, deployment: &str, status: &str) {
 }
 
 /// Record a single MCP JSON-RPC request.
-/// - `method` is the JSON-RPC method (e.g. `tools/call`, `initialize`)
+/// - `method` is the JSON-RPC method (e.g. `tools/call`, `initialize`), or
+///   `_OTHER` for one outside the MCP specification: the client picks it, so
+///   pass it through `handlers::mcp_telemetry::metric_method`
 /// - `status` is `ok` or `error`
 pub fn record_mcp_request(method: &str, status: &str, duration_s: f64) {
     counter!(
@@ -368,9 +370,11 @@ pub fn record_build_duration(namespace: &str, deployment: &str, status: &str, du
     .record(duration_s);
 }
 
-/// Record a deckwatch-native MCP tool invocation (e.g. `create_application`).
-/// K8s-passthrough tools are instrumented by the mcp-k8s library itself via
-/// `mcp_k8s_tool_calls_total` / `mcp_k8s_tool_call_duration_seconds`.
+/// Record an MCP tool call deckwatch served itself (e.g. `create_application`,
+/// `exec_pod`). Calls mcp-k8s runs are counted by the library itself in
+/// `mcp_k8s_tool_calls_total` / `mcp_k8s_tool_call_duration_seconds`,
+/// including the intercepted tools deckwatch hands on (`create_deployment`),
+/// so every call is counted exactly once across the two.
 pub fn record_mcp_tool_call(tool: &str, status: &str, duration_s: f64) {
     counter!(
         "deckwatch_mcp_tool_calls_total",

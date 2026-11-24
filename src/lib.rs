@@ -37,6 +37,8 @@ mod webhook_tls;
 
 use clap::Parser;
 use tokio::net::TcpListener;
+use tracing_subscriber::layer::SubscriberExt as _;
+use tracing_subscriber::util::SubscriberInitExt as _;
 
 use config::Config;
 use handlers::registry::RegistryStore;
@@ -48,9 +50,11 @@ use state::AppState;
 pub async fn run() {
     let _ = rustls::crypto::ring::default_provider().install_default();
 
-    tracing_subscriber::fmt()
-        .with_env_filter(logging::env_filter())
-        .json()
+    // JSON logs on stdout. Metric events (mcp-k8s's duration histogram) are
+    // kept out of them but not filtered globally: a metrics layer needs them.
+    tracing_subscriber::registry()
+        .with(logging::env_filter())
+        .with(logging::json_layer(std::io::stdout))
         .init();
 
     metrics::init();
@@ -447,3 +451,6 @@ pub mod testing {
 
 #[cfg(test)]
 mod integration_tests;
+
+#[cfg(test)]
+mod test_tracing;
