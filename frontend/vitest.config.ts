@@ -12,6 +12,13 @@ export default defineConfig({
   },
   test: {
     environment: "happy-dom",
+    // Node 25+ puts its own localStorage/sessionStorage on globalThis, and
+    // they are undefined unless --localstorage-file is set. Vitest 4 then
+    // keeps them instead of happy-dom's Storage (vitest-dev/vitest#10867,
+    // fixed in Vitest 5), so turn Node's off in test workers. Node 24 also
+    // accepts this spelling (it would reject --no-webstorage). Remove this
+    // after upgrading to Vitest 5.
+    execArgv: ["--no-experimental-webstorage"],
     server: {
       deps: {
         inline: ["vuetify"],
