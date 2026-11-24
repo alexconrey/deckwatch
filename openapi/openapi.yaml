@@ -1156,7 +1156,8 @@ components:
             `warnings` and `message` strings), `plugin.fetch_failed`,
             `plugin.checksum_mismatch`, `plugin.load_failed`, `plugin.trap`,
             `plugin.timeout`, `plugin.output_invalid`, `plugin.k8s_apply_failed`,
-            `plugin.policy_rejected`.
+            `plugin.policy_rejected`, and the informational
+            `plugin.fields_released`.
           example: aws.assume_role_failed
         message: { type: string }
         resource_id: { type: string, description: The plugin resource id the event is about }

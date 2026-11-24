@@ -358,8 +358,10 @@ resource id, a Kubernetes object, a `retryable` flag and a hint:
   (bad module, missing export, `min_deckwatch_version`), `plugin.trap` (a
   panic), `plugin.timeout`, `plugin.output_invalid` (the message names the
   field, e.g. `env_vars[1].name`), `plugin.k8s_apply_failed` and
-  `plugin.policy_rejected`. A plugin can't use the `plugin.*` namespace: such
-  codes are moved under the plugin's name.
+  `plugin.policy_rejected`, plus the informational `plugin.fields_released`
+  (the reconciler removed what an application's provisioned resources had
+  added to a workload, because none are left). A plugin can't use the
+  `plugin.*` namespace: such codes are moved under the plugin's name.
 
 Where they show up:
 
