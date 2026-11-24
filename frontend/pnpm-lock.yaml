@@ -19,26 +19,26 @@ importers:
         version: 4.6.1
       pinia:
         specifier: ^4.1.0
-        version: 4.1.0(@vue/devtools-api@8.2.1)(typescript@5.7.3)(vue@3.5.46(typescript@5.7.3))
+        version: 4.1.0(@vue/devtools-api@8.2.1)(typescript@6.0.3)(vue@3.5.46(typescript@6.0.3))
       vue:
         specifier: ^3.5.46
-        version: 3.5.46(typescript@5.7.3)
+        version: 3.5.46(typescript@6.0.3)
       vue-chartjs:
         specifier: ^5.3.7
-        version: 5.3.7(chart.js@4.6.1)(vue@3.5.46(typescript@5.7.3))
+        version: 5.3.7(chart.js@4.6.1)(vue@3.5.46(typescript@6.0.3))
       vue-router:
         specifier: ^4.6.5
-        version: 4.6.5(vue@3.5.46(typescript@5.7.3))
+        version: 4.6.5(vue@3.5.46(typescript@6.0.3))
       vuetify:
         specifier: ^3.13.8
-        version: 3.13.8(typescript@5.7.3)(vite-plugin-vuetify@2.1.3)(vue@3.5.46(typescript@5.7.3))
+        version: 3.13.8(typescript@6.0.3)(vite-plugin-vuetify@2.1.3)(vue@3.5.46(typescript@6.0.3))
       web-vitals:
         specifier: ^6.2.3
         version: 6.2.3
     devDependencies:
       '@pinia/testing':
         specifier: ^2.0.2
-        version: 2.0.2(pinia@4.1.0(@vue/devtools-api@8.2.1)(typescript@5.7.3)(vue@3.5.46(typescript@5.7.3)))
+        version: 2.0.2(pinia@4.1.0(@vue/devtools-api@8.2.1)(typescript@6.0.3)(vue@3.5.46(typescript@6.0.3)))
       '@playwright/test':
         specifier: ^1.65.1
         version: 1.65.1
@@ -47,31 +47,31 @@ importers:
         version: 26.6.6
       '@vitejs/plugin-vue':
         specifier: ^6.0.11
-        version: 6.0.11(vite@6.4.6(@types/node@26.6.6))(vue@3.5.46(typescript@5.7.3))
+        version: 6.0.11(vite@6.4.6(@types/node@26.6.6))(vue@3.5.46(typescript@6.0.3))
       '@vitest/coverage-v8':
         specifier: ^4.1.12
         version: 4.1.12(vitest@4.1.12)
       '@vue/test-utils':
         specifier: ^2.6.0
-        version: 2.6.0(@vue/compiler-dom@3.5.46)(@vue/server-renderer@3.5.46)(vue@3.5.46(typescript@5.7.3))
+        version: 2.6.0(@vue/compiler-dom@3.5.46)(@vue/server-renderer@3.5.46)(vue@3.5.46(typescript@6.0.3))
       happy-dom:
         specifier: ^21.0.4
         version: 21.0.4
       typescript:
-        specifier: ~5.7.3
-        version: 5.7.3
+        specifier: ~6.0.3
+        version: 6.0.3
       vite:
         specifier: ^6.4.6
         version: 6.4.6(@types/node@26.6.6)
       vite-plugin-vuetify:
         specifier: ^2.1.3
-        version: 2.1.3(supports-color@7.2.0)(vite@6.4.6(@types/node@26.6.6))(vue@3.5.46(typescript@5.7.3))(vuetify@3.13.8)
+        version: 2.1.3(supports-color@7.2.0)(vite@6.4.6(@types/node@26.6.6))(vue@3.5.46(typescript@6.0.3))(vuetify@3.13.8)
       vitest:
         specifier: ^4.1.12
         version: 4.1.12(@types/node@26.6.6)(@vitest/coverage-v8@4.1.12)(happy-dom@21.0.4)(vite@6.4.6(@types/node@26.6.6))
       vue-tsc:
         specifier: ^2.2.12
-        version: 2.2.12(typescript@5.7.3)
+        version: 2.2.12(typescript@6.0.3)
 
 packages:
 
@@ -868,8 +868,8 @@ packages:
     resolution: {integrity: sha512-LgO3D9yZJjApUiuUfl9iFAwrtaX4+lok3wJIqttGoKCHlWUqHqbQpnxCf82L8FjgKsh4iGo78hqJwgL8F6To2A==}
     engines: {node: '>=14.0.0'}
 
-  typescript@5.7.3:
-    resolution: {integrity: sha512-84MVSjMEHP+FQRPy3pX9sTVV/INIex71s9TL2Gm5FG/WG1SqXeKyZ0k7/blY/4FdOzI12CBy1vGc4og/eus0fw==}
+  typescript@6.0.3:
+    resolution: {integrity: sha512-y2TvuxSZPDyQakkFRPZHKFm+KKVqIisdg9/CZwm9ftvKXLP8NRWj38/ODjNbr43SsoXqNuAisEf1GdCxqWcdBw==}
     engines: {node: '>=14.17'}
     hasBin: true
 
@@ -1149,10 +1149,10 @@ snapshots:
 
   '@one-ini/wasm@0.2.1': {}
 
-  '@pinia/testing@2.0.2(pinia@4.1.0(@vue/devtools-api@8.2.1)(typescript@5.7.3)(vue@3.5.46(typescript@5.7.3)))':
+  '@pinia/testing@2.0.2(pinia@4.1.0(@vue/devtools-api@8.2.1)(typescript@6.0.3)(vue@3.5.46(typescript@6.0.3)))':
     dependencies:
       nostics: 1.4.0
-      pinia: 4.1.0(@vue/devtools-api@8.2.1)(typescript@5.7.3)(vue@3.5.46(typescript@5.7.3))
+      pinia: 4.1.0(@vue/devtools-api@8.2.1)(typescript@6.0.3)(vue@3.5.46(typescript@6.0.3))
 
   '@playwright/test@1.65.1':
     dependencies:
@@ -1259,11 +1259,11 @@ snapshots:
     dependencies:
       '@types/node': 26.6.6
 
-  '@vitejs/plugin-vue@6.0.11(vite@6.4.6(@types/node@26.6.6))(vue@3.5.46(typescript@5.7.3))':
+  '@vitejs/plugin-vue@6.0.11(vite@6.4.6(@types/node@26.6.6))(vue@3.5.46(typescript@6.0.3))':
     dependencies:
       '@rolldown/pluginutils': 1.1.1
       vite: 6.4.6(@types/node@26.6.6)
-      vue: 3.5.46(typescript@5.7.3)
+      vue: 3.5.46(typescript@6.0.3)
 
   '@vitest/coverage-v8@4.1.12(vitest@4.1.12)':
     dependencies:
@@ -1326,13 +1326,13 @@ snapshots:
 
   '@volar/source-map@2.4.15': {}
 
-  '@volar/typescript@2.4.15(typescript@5.7.3)':
+  '@volar/typescript@2.4.15(typescript@6.0.3)':
     dependencies:
       '@volar/language-core': 2.4.15
       path-browserify: 1.0.1
       vscode-uri: 3.2.0
     optionalDependencies:
-      typescript: 5.7.3
+      typescript: 6.0.3
 
   '@vue/compiler-core@3.5.46':
     dependencies:
@@ -1384,7 +1384,7 @@ snapshots:
 
   '@vue/devtools-shared@8.2.1': {}
 
-  '@vue/language-core@2.2.12(typescript@5.7.3)':
+  '@vue/language-core@2.2.12(typescript@6.0.3)':
     dependencies:
       '@volar/language-core': 2.4.15
       '@vue/compiler-dom': 3.5.46
@@ -1395,7 +1395,7 @@ snapshots:
       muggle-string: 0.4.1
       path-browserify: 1.0.1
     optionalDependencies:
-      typescript: 5.7.3
+      typescript: 6.0.3
 
   '@vue/reactivity@3.5.46':
     dependencies:
@@ -1421,20 +1421,20 @@ snapshots:
 
   '@vue/shared@3.5.46': {}
 
-  '@vue/test-utils@2.6.0(@vue/compiler-dom@3.5.46)(@vue/server-renderer@3.5.46)(vue@3.5.46(typescript@5.7.3))':
+  '@vue/test-utils@2.6.0(@vue/compiler-dom@3.5.46)(@vue/server-renderer@3.5.46)(vue@3.5.46(typescript@6.0.3))':
     dependencies:
       '@vue/compiler-dom': 3.5.46
       js-beautify: 2.0.3
-      vue: 3.5.46(typescript@5.7.3)
+      vue: 3.5.46(typescript@6.0.3)
       vue-component-type-helpers: 3.3.14
     optionalDependencies:
       '@vue/server-renderer': 3.5.46
 
-  '@vuetify/loader-shared@2.1.2(vue@3.5.46(typescript@5.7.3))(vuetify@3.13.8)':
+  '@vuetify/loader-shared@2.1.2(vue@3.5.46(typescript@6.0.3))(vuetify@3.13.8)':
     dependencies:
       upath: 2.0.1
-      vue: 3.5.46(typescript@5.7.3)
-      vuetify: 3.13.8(typescript@5.7.3)(vite-plugin-vuetify@2.1.3)(vue@3.5.46(typescript@5.7.3))
+      vue: 3.5.46(typescript@6.0.3)
+      vuetify: 3.13.8(typescript@6.0.3)(vite-plugin-vuetify@2.1.3)(vue@3.5.46(typescript@6.0.3))
 
   abbrev@5.0.0: {}
 
@@ -1655,13 +1655,13 @@ snapshots:
 
   picomatch@4.0.7: {}
 
-  pinia@4.1.0(@vue/devtools-api@8.2.1)(typescript@5.7.3)(vue@3.5.46(typescript@5.7.3)):
+  pinia@4.1.0(@vue/devtools-api@8.2.1)(typescript@6.0.3)(vue@3.5.46(typescript@6.0.3)):
     dependencies:
       '@vue/devtools-api': 8.2.1
       nostics: 1.4.0
-      vue: 3.5.46(typescript@5.7.3)
+      vue: 3.5.46(typescript@6.0.3)
     optionalDependencies:
-      typescript: 5.7.3
+      typescript: 6.0.3
 
   playwright-core@1.65.1: {}
 
@@ -1734,20 +1734,20 @@ snapshots:
 
   tinyrainbow@3.2.0: {}
 
-  typescript@5.7.3: {}
+  typescript@6.0.3: {}
 
   undici-types@8.9.0: {}
 
   upath@2.0.1: {}
 
-  vite-plugin-vuetify@2.1.3(supports-color@7.2.0)(vite@6.4.6(@types/node@26.6.6))(vue@3.5.46(typescript@5.7.3))(vuetify@3.13.8):
+  vite-plugin-vuetify@2.1.3(supports-color@7.2.0)(vite@6.4.6(@types/node@26.6.6))(vue@3.5.46(typescript@6.0.3))(vuetify@3.13.8):
     dependencies:
-      '@vuetify/loader-shared': 2.1.2(vue@3.5.46(typescript@5.7.3))(vuetify@3.13.8)
+      '@vuetify/loader-shared': 2.1.2(vue@3.5.46(typescript@6.0.3))(vuetify@3.13.8)
       debug: 4.4.3(supports-color@7.2.0)
       upath: 2.0.1
       vite: 6.4.6(@types/node@26.6.6)
-      vue: 3.5.46(typescript@5.7.3)
-      vuetify: 3.13.8(typescript@5.7.3)(vite-plugin-vuetify@2.1.3)(vue@3.5.46(typescript@5.7.3))
+      vue: 3.5.46(typescript@6.0.3)
+      vuetify: 3.13.8(typescript@6.0.3)(vite-plugin-vuetify@2.1.3)(vue@3.5.46(typescript@6.0.3))
     transitivePeerDependencies:
       - supports-color
 
@@ -1794,25 +1794,25 @@ snapshots:
 
   vscode-uri@3.2.0: {}
 
-  vue-chartjs@5.3.7(chart.js@4.6.1)(vue@3.5.46(typescript@5.7.3)):
+  vue-chartjs@5.3.7(chart.js@4.6.1)(vue@3.5.46(typescript@6.0.3)):
     dependencies:
       chart.js: 4.6.1
-      vue: 3.5.46(typescript@5.7.3)
+      vue: 3.5.46(typescript@6.0.3)
 
   vue-component-type-helpers@3.3.14: {}
 
-  vue-router@4.6.5(vue@3.5.46(typescript@5.7.3)):
+  vue-router@4.6.5(vue@3.5.46(typescript@6.0.3)):
     dependencies:
       '@vue/devtools-api': 6.6.4
-      vue: 3.5.46(typescript@5.7.3)
+      vue: 3.5.46(typescript@6.0.3)
 
-  vue-tsc@2.2.12(typescript@5.7.3):
+  vue-tsc@2.2.12(typescript@6.0.3):
     dependencies:
-      '@volar/typescript': 2.4.15(typescript@5.7.3)
-      '@vue/language-core': 2.2.12(typescript@5.7.3)
-      typescript: 5.7.3
+      '@volar/typescript': 2.4.15(typescript@6.0.3)
+      '@vue/language-core': 2.2.12(typescript@6.0.3)
+      typescript: 6.0.3
 
-  vue@3.5.46(typescript@5.7.3):
+  vue@3.5.46(typescript@6.0.3):
     dependencies:
       '@vue/compiler-dom': 3.5.46
       '@vue/compiler-sfc': 3.5.46
@@ -1820,14 +1820,14 @@ snapshots:
       '@vue/server-renderer': 3.5.46
       '@vue/shared': 3.5.46
     optionalDependencies:
-      typescript: 5.7.3
+      typescript: 6.0.3
 
-  vuetify@3.13.8(typescript@5.7.3)(vite-plugin-vuetify@2.1.3)(vue@3.5.46(typescript@5.7.3)):
+  vuetify@3.13.8(typescript@6.0.3)(vite-plugin-vuetify@2.1.3)(vue@3.5.46(typescript@6.0.3)):
     dependencies:
-      vue: 3.5.46(typescript@5.7.3)
+      vue: 3.5.46(typescript@6.0.3)
     optionalDependencies:
-      typescript: 5.7.3
-      vite-plugin-vuetify: 2.1.3(supports-color@7.2.0)(vite@6.4.6(@types/node@26.6.6))(vue@3.5.46(typescript@5.7.3))(vuetify@3.13.8)
+      typescript: 6.0.3
+      vite-plugin-vuetify: 2.1.3(supports-color@7.2.0)(vite@6.4.6(@types/node@26.6.6))(vue@3.5.46(typescript@6.0.3))(vuetify@3.13.8)
 
   web-vitals@6.2.3: {}
 
