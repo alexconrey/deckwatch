@@ -99,6 +99,8 @@ describe("ConfigField type shape", () => {
       provides: ["s3", "rds"],
       depends_on: [],
       wasm_size_bytes: 1024,
+      resources: [],
+      mcp_tuning_fields: [],
       config_schema: [
         {
           key: "AWS_REGION",
@@ -125,6 +127,8 @@ describe("ConfigField type shape", () => {
       provides: [],
       depends_on: [],
       wasm_size_bytes: 512,
+      resources: [],
+      mcp_tuning_fields: [],
       config_schema: [],
     };
     expect(summary.config_schema).toHaveLength(0);
@@ -160,6 +164,8 @@ const MOCK_PLUGINS: PluginSummary[] = [
     provides: [],
     depends_on: [],
     wasm_size_bytes: 2048,
+    resources: [],
+    mcp_tuning_fields: [],
     config_schema: [
       {
         key: "AWS_REGION",

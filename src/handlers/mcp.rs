@@ -2733,8 +2733,9 @@ async fn tool_mcp_update_deployment(
 
     // Patch serviceAccountName if requested.
     if let Some(ref sa) = service_account {
-        let api: kube::Api<k8s_openapi::api::apps::v1::Deployment> =
-            kube::Api::namespaced(state.kube_client.clone(), ns);
+        // deployments_api enforces the namespace allowlist; building the Api
+        // directly let a service_account-only update reach any namespace.
+        let api = state.deployments_api(ns).map_err(|e| e.to_string())?;
         let patch = serde_json::json!({
             "spec": { "template": { "spec": { "serviceAccountName": sa } } }
         });

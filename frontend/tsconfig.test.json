@@ -1,0 +1,16 @@
+{
+  // Type-checks the app plus its unit and e2e tests (`pnpm run typecheck:test`).
+  // tsconfig.json stays app-only so `pnpm build` is unaffected.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    // `node` is for the Playwright specs, which run in Node and read process.env.
+    "types": ["vite/client", "node"]
+  },
+  "include": [
+    "src/**/*.ts",
+    "src/**/*.d.ts",
+    "src/**/*.vue",
+    "tests/**/*.ts",
+    "e2e/**/*.ts"
+  ]
+}

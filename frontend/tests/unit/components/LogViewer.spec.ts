@@ -5,6 +5,13 @@ import * as components from "vuetify/components";
 import * as directives from "vuetify/directives";
 import LogViewer from "@/components/common/LogViewer.vue";
 
+// useAiSettings, imported via DiagnoseButton, fetches /api/settings as soon
+// as it is imported. Stubbing DiagnoseButton doesn't stop the import, so mock
+// the API it calls.
+vi.mock("@/api/settings", () => ({
+  settingsApi: { get: vi.fn().mockResolvedValue({}) },
+}));
+
 const vuetify = createVuetify({ components, directives });
 
 // Minimal EventSource stub so the component doesn't error during mount.

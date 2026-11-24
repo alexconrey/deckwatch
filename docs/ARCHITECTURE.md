@@ -78,7 +78,8 @@ src/                            # Rust backend
     gitops.rs                   # per-deployment gitops config + manual trigger
     webhooks.rs                 # POST /api/webhooks/git — inbound Git webhook receiver
     settings.rs                 # GET/PUT /api/settings (DB-backed)
-    addons.rs                   # hardcoded addon catalog + attach/detach
+    plugins.rs                  # /api/plugins: loaded plugins, schema, config, WASM upload
+    application_resources.rs    # plugin-provisioned resources per application
     templates.rs                # deployment templates CRUD
     monitoring.rs               # Prometheus integration toggle
 frontend/                       # Vite + Vue 3 + Vuetify 4 + TS + Pinia
@@ -221,7 +222,7 @@ Deckwatch uses SeaORM with SQLite by default (configurable to PostgreSQL or MySQ
 | `Kube(Api(err))` | passthrough (usually 404, 409, 422) | K8s API rejection |
 | `Kube(other)` | 502 | Network / auth to kubernetes |
 | `NamespaceNotAllowed` | 403 | `AppState::check_namespace` |
-| `NotFound` | 404 | Explicit lookups (addon id, container name) |
+| `NotFound` | 404 | Explicit lookups (plugin name, container name) |
 | `BadRequest` | 400 | Validation, YAML parse, missing config |
 
 ## Frontend state model
@@ -272,24 +273,10 @@ The only access control is `--namespaces` (env: `DECKWATCH_NAMESPACES`). If unse
 - **Helm:** `helm/deckwatch/` — templates for Deployment (single replica by default), Service, Ingress (optional), ServiceAccount + ClusterRoleBinding (for kube API access).
 - **Local dev:** k3d + `docker build` + `k3d image import` + `helm upgrade`. Frontend can also be run standalone via `pnpm dev` (proxies `/api` to the backend via Vite dev server config).
 
-## Add-on catalog
-
-Addons (`src/handlers/addons.rs`) are a hardcoded catalog in Rust:
-- redis (redis:7-alpine)
-- memcached (memcached:1.6-alpine)
-- nginx-proxy (nginx:1.27-alpine)
-- fluent-bit (fluent/fluent-bit:3.1)
-- otel-collector (otel/opentelemetry-collector:latest)
-- postgres (postgres:16-alpine) — **persistent storage addon**
-
-Attaching an addon appends a container to the Deployment's PodSpec and annotates the pod template with `deckwatch.addon/<container-name>=<addon-id>` (used by detach to find the container by addon id).
-
-The **postgres** addon additionally provisions a PersistentVolumeClaim (`{deployment}-{container}-data`) and mounts it at `/var/lib/postgresql/data`. The PVC size defaults to `1Gi` and can be customized via the `storage` field on `AttachAddonRequest`. Detaching the addon removes both the volume from the pod spec and deletes the PVC from the cluster. Injected env vars: `PG_HOST=localhost`, `PGDATA=/var/lib/postgresql/data/pgdata`, `POSTGRES_DB=app`, `POSTGRES_USER=app`, `POSTGRES_PASSWORD=changeme`.
-
 ## What is NOT in the codebase (deliberate scope)
 
 - No StatefulSet / DaemonSet management.
-- No standalone PersistentVolumeClaim UI (PVCs are managed automatically by the postgres addon).
+- No standalone PersistentVolumeClaim UI.
 - No Service / ConfigMap / Secret CRUD (Secrets are read-only via the gitops trigger; there's no way to create them in-app — see UX_IMPROVEMENTS.md §C2).
 - No Events feed (see §H6).
 - No RBAC / user auth (see §C1).
@@ -322,17 +309,20 @@ deployment create/update (src/handlers/deployments.rs)
        └─ merge SidecarSpec → pod containers[]
 ```
 
+Plugins can also declare provisionable resources, which are applied per application instead of per deployment. Provisioning one from the application's **Infrastructure** tab (`POST /api/namespaces/{ns}/applications/{name}/resources/{plugin}/{resource_id}`) calls the plugin's `provision()` export and stores the result in the `application_plugin_resources` table. On each watcher cycle, `reconcile_application_plugins()` server-side-applies the stored env vars and sidecars to every Deployment and CronJob labelled `deckwatch.io/application=<app>`. The Redis, Memcached, nginx proxy, Fluent Bit, PostgreSQL and OpenTelemetry Collector sidecars are plugins of this kind: [deckwatch-plugin-redis](https://github.com/alexconrey/deckwatch-plugin-redis), [deckwatch-plugin-memcached](https://github.com/alexconrey/deckwatch-plugin-memcached), [deckwatch-plugin-nginx-proxy](https://github.com/alexconrey/deckwatch-plugin-nginx-proxy), [deckwatch-plugin-fluent-bit](https://github.com/alexconrey/deckwatch-plugin-fluent-bit), [deckwatch-plugin-postgresql](https://github.com/alexconrey/deckwatch-plugin-postgresql) and [deckwatch-plugin-otel](https://github.com/alexconrey/deckwatch-plugin-otel).
+
 Key files:
 - `src/plugins.rs` — fetch, cache, execute, and merge plugin results
 - `src/handlers/settings.rs` — `PluginConfig` / `PluginSource` types; background re-fetch on PUT
 - `src/state.rs` — `AppState.plugins: Arc<RwLock<Vec<LoadedPlugin>>>`
+- `src/handlers/application_resources.rs` — provision, refresh, and deprovision application resources
+- `src/watcher.rs` — `reconcile_application_plugins()`
 
 ## Extension points
 
 For future contributors:
 - **New K8s resource type:** add a factory in `state.rs`, a summary/detail in `kube_ext.rs`, a handler file in `handlers/`, a route in `routes.rs`, an api client in `frontend/src/api/`, a types stanza in `frontend/src/types/api.ts`.
-- **New addon (built-in sidecar):** append to the `catalog()` vec in `src/handlers/addons.rs`. For org-specific sidecars, prefer writing an external plugin instead.
-- **New external plugin:** write a Rust crate targeting `wasm32-unknown-unknown` using `deckwatch-plugin-sdk` and `extism-pdk`. See `docs/PLUGINS.md`.
+- **New sidecar or external plugin:** write a Rust crate targeting `wasm32-unknown-unknown` using `deckwatch-plugin-sdk` and `extism-pdk`. See `docs/PLUGINS.md`.
 - **New polled page:** call `usePolling(refreshFn, intervalMs)` in `<script setup>`.
 - **New app-template (once P0 lands):** likely a YAML/JSON in a ConfigMap loaded on startup, mapped to a form defaults preset in `DeploymentForm.vue`.
 

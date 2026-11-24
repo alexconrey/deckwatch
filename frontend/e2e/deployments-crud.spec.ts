@@ -8,16 +8,17 @@ test.describe("Deployment CRUD", () => {
       /\/api\/namespaces\/[^/]+\/deployments$/,
       async (route) => {
         if (route.request().method() === "POST") {
-          createBody = JSON.parse(route.request().postData() ?? "{}");
+          const body = JSON.parse(route.request().postData() ?? "{}") as Record<string, unknown>;
+          createBody = body;
           return route.fulfill({
             status: 201,
             contentType: "application/json",
             body: JSON.stringify({
-              name: createBody.name,
+              name: body.name,
               namespace: "default",
-              image: createBody.image,
+              image: body.image,
               replicas: {
-                desired: (createBody.replicas as number) ?? 1,
+                desired: (body.replicas as number) ?? 1,
                 ready: 0,
                 available: 0,
                 updated: 0,

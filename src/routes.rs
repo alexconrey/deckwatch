@@ -2,7 +2,6 @@ use axum::extract::FromRequest;
 use axum::routing::{get, post};
 use axum::Router;
 use tower_http::compression::CompressionLayer;
-use tower_http::cors::CorsLayer;
 use tower_http::services::{ServeDir, ServeFile};
 use tower_http::trace::{DefaultOnResponse, TraceLayer};
 use tracing::Level;
@@ -480,7 +479,12 @@ pub fn build_router(
         .fallback_service(spa)
         .layer(axum::middleware::from_fn(metrics::track_http))
         .layer(CompressionLayer::new())
-        .layer(CorsLayer::permissive())
+        // No CORS layer: the SPA is same-origin, and other origins must not be
+        // able to read API responses. Cross-site writes and WebSocket upgrades,
+        // which CORS does not stop, are rejected here.
+        .layer(axum::middleware::from_fn(
+            crate::cross_origin::reject_cross_site,
+        ))
         .layer(
             TraceLayer::new_for_http()
                 .make_span_with(|request: &axum::http::Request<_>| {
@@ -786,3 +790,7 @@ fn split_ui_path(rest: &str) -> Option<UiAction> {
     }
     None
 }
+
+#[cfg(test)]
+#[path = "routes_tests.rs"]
+mod routes_tests;
