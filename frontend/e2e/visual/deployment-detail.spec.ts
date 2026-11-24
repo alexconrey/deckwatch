@@ -1,6 +1,7 @@
 import type { Locator, Page } from "@playwright/test";
 import type { App } from "../support/app";
 import { eachTheme, expect, test } from "./visual-test";
+import { apiError, ok } from "../support/mock-api";
 import { card, field, openMenu } from "../support/ui";
 
 /**
@@ -91,15 +92,22 @@ eachTheme(() => {
       await app.snap("deployment-detail/labels-editor", { fullPage: true, locator: labels });
     });
 
-    test("resource metrics details", async ({ app, page }) => {
+    test("resource metrics details", async ({ app, page, mockState }) => {
+      // The charts draw one x-axis label per sample, so the sample count must
+      // be exact. Serve two samples (mount + the forced poll) and fail every
+      // later poll: a failed poll adds no sample and shows no error, so a slow
+      // run where a real-time poll fires before the screenshot still has two.
+      let served = 0;
+      app.api.on("GET", POD_METRICS, () => {
+        served += 1;
+        if (served > 2) return apiError(503, "metrics-server sample withheld by the test");
+        return ok({ pods: mockState.podMetrics.filter((p) => p.name.startsWith("web-")) });
+      });
       await openDeployment(app);
       await page.getByRole("button", { name: "View details" }).click();
       const metrics = card(page, "Resource Metrics");
       await expect(metrics.getByText("3 pods")).toBeVisible();
       await expect(metrics.locator("canvas")).toHaveCount(4);
-      // The charts draw one x-axis label per sample: exactly two polls (mount
-      // + the forced one) must have happened, or the axis would differ.
-      expect(app.api.requests("GET", POD_METRICS)).toHaveLength(2);
       await app.snap("deployment-detail/metrics-details", { fullPage: true, locator: metrics });
     });
 
