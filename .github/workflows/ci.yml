@@ -8,14 +8,22 @@ jobs:
   rust-check:
     name: Rust Check
     runs-on: ubuntu-latest
+    env:
+      CARGO_TERM_COLOR: always
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Rust 1.91
-        uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: "1.91"
-          components: clippy, rustfmt
+      # rust-toolchain.toml is the single source of truth for the toolchain.
+      # rustup gives it precedence over `rustup default`, so a separate
+      # toolchain-install action only installs a toolchain that cargo then
+      # ignores (that is how CI used to build with the runner's preinstalled
+      # stable). With no arguments, `rustup toolchain install` (rustup >= 1.28)
+      # installs the toolchain, profile and components that file pins.
+      - name: Install Rust toolchain from rust-toolchain.toml
+        run: |
+          rustup toolchain install --no-self-update
+          rustc --version --verbose
+          cargo --version
 
       - uses: Swatinem/rust-cache@v2
 

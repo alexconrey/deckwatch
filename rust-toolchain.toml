@@ -1,2 +1,12 @@
+# Pinned Rust toolchain for local builds and CI (ci.yml installs exactly what
+# this file pins, via `rustup toolchain install`).
+#
+# KEEP IN SYNC with the `rust:<version>-bookworm` image tags in the Dockerfile,
+# which build the release image. CI fails if they differ, so bump both in the
+# same PR. While this said "stable", CI compiled with the newest stable rustc
+# while the release image used an older one, so a dependency that raised its
+# minimum Rust version broke the release build without CI noticing.
 [toolchain]
-channel = "stable"
+channel = "1.99"
+components = ["clippy", "rustfmt"]
+profile = "minimal"
