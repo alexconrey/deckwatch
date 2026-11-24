@@ -7,13 +7,13 @@ test.describe("Namespace selection", () => {
     await expect(page.getByTestId("namespace-switcher")).toContainText("default");
   });
 
-  test("switching namespaces re-fetches deployments and remembers the choice", async ({ page, mockApi }) => {
+  test("switching namespaces re-fetches deployments and remembers the choice", async ({ app, page, mockApi }) => {
     await page.goto("/deployments");
     await mockApi.waitForRequest("GET", "/namespaces/default/deployments");
 
     // The switcher is the v-autocomplete with data-testid="namespace-switcher"
     // (layouts/AppLayout.vue); its menu entries are role="option".
-    await page.getByTestId("namespace-switcher").locator("input").click();
+    await app.namespaceSwitcher().click();
     await page.getByRole("option", { name: "team-a" }).click();
 
     await mockApi.waitForRequest("GET", "/namespaces/team-a/deployments");

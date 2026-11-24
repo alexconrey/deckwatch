@@ -170,9 +170,12 @@ export class App {
     });
   }
 
-  /** The namespace switcher's text input in the app bar. */
+  /**
+   * The namespace switcher's text input in the app bar. Found by role, not
+   * as "the input": Vuetify 4 also renders a hidden input inside it.
+   */
   namespaceSwitcher(): Locator {
-    return this.page.getByTestId("namespace-switcher").locator("input");
+    return this.page.getByTestId("namespace-switcher").getByRole("combobox", { name: "Namespace", exact: true });
   }
 
   /** The open overlay content (dialog, menu, drawer...) that is on top. */
