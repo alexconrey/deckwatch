@@ -17,6 +17,8 @@ export interface SnapOptions {
   fullPage?: boolean;
   /** Extra elements to paint over (inherently variable content). */
   mask?: Locator[];
+  /** Keep an open tooltip in the shot instead of waiting for it to close. */
+  allowTooltip?: boolean;
 }
 
 /**
@@ -59,13 +61,15 @@ export class App {
   }
 
   /**
-   * Wait until nothing is still changing: no mocked request in flight, web
-   * fonts loaded, no running animation or Vue transition, then two frames for
-   * Vue to flush.
+   * Wait until nothing is still changing: no fetch in flight (counted in the
+   * page, see fixtures.ts) and the mocked API quiet, web fonts loaded, no
+   * running animation or Vue transition, then two frames for Vue to flush.
    */
   async settle(): Promise<void> {
     await this.api.waitForQuiet();
     await this.page.waitForFunction(() => {
+      const fetches = (window as unknown as { __e2eFetchesInFlight?: number }).__e2eFetchesInFlight;
+      if (fetches) return false;
       if (document.fonts.status !== "loaded") return false;
       const busy = document
         .getAnimations()
@@ -93,13 +97,22 @@ export class App {
    * Compare a screenshot with its baseline in e2e/__screenshots__.
    *
    * The file name gets the theme and, for non-default widths, the viewport
-   * width, so `snap("resources/deployments")` in the dark theme at 1440px
-   * is `resources/deployments-dark.png`.
+   * width. Playwright turns the "/" into "-", so `snap("resources/deployments")`
+   * in the dark theme at 1440px is `resources-deployments-dark.png` in the
+   * spec's folder under e2e/__screenshots__.
    *
-   * Timers are paused while the screenshot is taken, so a polling refresh
-   * cannot flash a progress bar into the capture.
+   * Before the shot the mouse is parked in the top-left corner (the app bar
+   * background, or the scrim when an overlay is open). The pointer would
+   * otherwise rest on the last clicked control, and whether Chromium has
+   * applied its hover state by then varies from run to run. Timers are
+   * paused while the screenshot is taken, so a polling refresh cannot flash
+   * a progress bar into the capture.
    */
   async snap(name: string, options: SnapOptions = {}): Promise<void> {
+    await this.page.mouse.move(0, 0);
+    if (!options.allowTooltip) {
+      await expect(this.page.locator(".v-tooltip.v-overlay--active")).toHaveCount(0);
+    }
     await this.settle();
     await this.normalizeVariableText();
     const width = this.page.viewportSize()?.width ?? DEFAULT_VIEWPORT.width;

@@ -35,6 +35,8 @@ export interface Fixtures {
 
 export const useMocks = process.env.PLAYWRIGHT_MOCK_MODE !== "off";
 
+// Ripples are click feedback that Vuetify removes on a timer up to ~550ms
+// after the click; they are never part of a resting UI state.
 const NO_MOTION_CSS = `
 *, *::before, *::after {
   transition: none !important;
@@ -42,6 +44,7 @@ const NO_MOTION_CSS = `
   caret-color: transparent !important;
 }
 html { scroll-behavior: auto !important; }
+.v-ripple__container { display: none !important; }
 `;
 
 export const test = base.extend<Fixtures>({
@@ -63,6 +66,24 @@ export const test = base.extend<Fixtures>({
         localStorage.setItem("deckwatch-theme", themeName);
       }
     }, THEME_NAMES[theme]);
+    // Count the page's in-flight fetches. App.settle() waits for zero, which
+    // also covers a request the page has started but the route handler has
+    // not seen yet (e.g. a poll fired by clock.runFor). Event streams and
+    // beacons do not go through fetch, so they never hold this up.
+    await page.addInitScript(() => {
+      const realFetch = window.fetch.bind(window);
+      let inFlight = 0;
+      Object.defineProperty(window, "__e2eFetchesInFlight", { get: () => inFlight });
+      window.fetch = (...args: Parameters<typeof fetch>) => {
+        inFlight += 1;
+        const done = () => {
+          inFlight -= 1;
+        };
+        const response = realFetch(...args);
+        response.then(done, done);
+        return response;
+      };
+    });
     await page.addInitScript((css: string) => {
       const install = () => {
         const style = document.createElement("style");
