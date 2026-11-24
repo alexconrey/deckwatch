@@ -13,6 +13,8 @@ import AgentFeedbackPage from "@/components/pages/AgentFeedbackPage.vue";
 import AuditLogPage from "@/components/pages/AuditLogPage.vue";
 import MarketplacePage from "@/components/pages/MarketplacePage.vue";
 import ConfirmDialog from "@/components/common/ConfirmDialog.vue";
+import OutboundEndpointsSection from "@/components/settings/OutboundEndpointsSection.vue";
+import { bindingState, emptyEndpoints, fieldFor } from "@/utils/endpoints";
 import type {
   AiProviderConfig,
   AiProviderType,
@@ -23,6 +25,7 @@ import type {
   DeckwatchSettings,
   DeploymentTemplate,
   EncryptedCredentials,
+  EndpointSettings,
   GitRepository,
   GitTokenSecret,
   GitTokenSecretRequest,
@@ -151,7 +154,7 @@ const aiCodexEnabled = ref(true);
 const AI_PROVIDER_OPTIONS: { value: AiProviderType; title: string; description: string }[] = [
   { value: "native", title: "Anthropic (Native)", description: "Direct API via api.anthropic.com" },
   { value: "vertex_ai", title: "Google Vertex AI", description: "Anthropic models via GCP Vertex AI" },
-  { value: "bedrock", title: "AWS Bedrock", description: "Anthropic models via AWS Bedrock (coming soon)" },
+  { value: "bedrock", title: "AWS Bedrock", description: "Anthropic models via AWS Bedrock" },
 ];
 
 const aiProvider = ref<AiProviderConfig>({
@@ -170,6 +173,27 @@ const credentialStatus = ref<EncryptedCredentials>({
 const anthropicKeyInput = ref("");
 const gcpSaKeyInput = ref("");
 const savingCredentials = ref(false);
+
+// Endpoint overrides (Settings → Advanced → Endpoints). Saved with the rest
+// of the settings document; empty strings mean "use the default".
+const endpoints = ref<EndpointSettings>(emptyEndpoints());
+const endpointsSection = ref<InstanceType<typeof OutboundEndpointsSection> | null>(null);
+
+// Where each stored AI credential may be sent, against the endpoints as
+// currently edited. The server enforces this; the UI only explains it.
+const anthropicBinding = computed(() =>
+  bindingState(
+    fieldFor("anthropic_api"),
+    credentialStatus.value.anthropic_api_key_binding,
+    endpoints.value,
+  ),
+);
+const gcpBindings = computed(() =>
+  (["vertex_token", "vertex_api"] as const).map((id) =>
+    bindingState(fieldFor(id), credentialStatus.value.gcp_sa_key_binding, endpoints.value),
+  ),
+);
+const gcpBindingMatches = computed(() => gcpBindings.value.every((b) => b.matches));
 
 const storageClasses = ref<StorageClassSummary[]>([]);
 const defaultStorageClass = ref<string | null>(null);
@@ -555,6 +579,7 @@ function applySettings(s: DeckwatchSettings) {
     anthropic_api_key: null,
     gcp_sa_key: null,
   };
+  endpoints.value = { ...emptyEndpoints(), ...(s.endpoints ?? {}) };
   defaultStorageClass.value = s.default_storage_class ?? null;
 }
 
@@ -635,6 +660,7 @@ function buildPayload(): DeckwatchSettings {
     plugins: plugins.value,
     mcp_tuning: mcpTuning.value,
     marketplace_url: marketplaceUrl.value,
+    endpoints: endpoints.value,
   };
 }
 
@@ -697,6 +723,7 @@ async function save() {
     // settings succeed, we still want the user to see the templates error.
     const updated = await settingsApi.update(buildPayload());
     applySettings(updated);
+    void endpointsSection.value?.refresh();
     // Refresh the module-cached AI toggles so DiagnoseButton / AiFixButton
     // pick up the new enabled state without a page reload.
     void refreshAiSettings();
@@ -755,6 +782,7 @@ async function saveAdvanced() {
   try {
     const updated = await settingsApi.update(buildPayload());
     applySettings(updated);
+    void endpointsSection.value?.refresh();
     snackbarMessage.value = "Advanced settings saved";
     snackbarColor.value = "success";
     snackbar.value = true;
@@ -785,7 +813,10 @@ async function saveCredentials() {
     credentialStatus.value = {
       anthropic_api_key: result.anthropic_api_key,
       gcp_sa_key: result.gcp_sa_key,
+      anthropic_api_key_binding: result.anthropic_api_key_binding ?? null,
+      gcp_sa_key_binding: result.gcp_sa_key_binding ?? null,
     };
+    void endpointsSection.value?.refresh();
     // Clear inputs after successful save.
     anthropicKeyInput.value = "";
     gcpSaKeyInput.value = "";
@@ -810,7 +841,10 @@ async function clearCredential(key: "anthropic_api_key" | "gcp_sa_key") {
     credentialStatus.value = {
       anthropic_api_key: result.anthropic_api_key,
       gcp_sa_key: result.gcp_sa_key,
+      anthropic_api_key_binding: result.anthropic_api_key_binding ?? null,
+      gcp_sa_key_binding: result.gcp_sa_key_binding ?? null,
     };
+    void endpointsSection.value?.refresh();
     snackbarMessage.value = "Credential removed";
     snackbarColor.value = "success";
     snackbar.value = true;
@@ -1949,6 +1983,21 @@ onMounted(load);
                 >Configured</v-chip>
                 <v-chip v-else size="small" color="warning" variant="tonal">Not set</v-chip>
               </div>
+              <div
+                v-if="credentialStatus.anthropic_api_key"
+                class="text-caption mb-2"
+                :class="anthropicBinding.matches ? 'text-medium-emphasis' : 'text-warning'"
+                data-testid="anthropic-key-binding"
+              >
+                <template v-if="anthropicBinding.matches">
+                  Saved for {{ anthropicBinding.boundHost }}
+                </template>
+                <template v-else>
+                  Saved for {{ anthropicBinding.boundHost }}, but the Anthropic API endpoint is
+                  now {{ anthropicBinding.configuredHost }}. The key is not sent there; enter it
+                  again to use it with the new host.
+                </template>
+              </div>
               <v-text-field
                 v-model="anthropicKeyInput"
                 label="API key"
@@ -2004,6 +2053,18 @@ onMounted(load);
                 >Configured</v-chip>
                 <v-chip v-else size="small" color="warning" variant="tonal">Not set</v-chip>
               </div>
+              <div
+                v-if="credentialStatus.gcp_sa_key"
+                class="text-caption mb-2"
+                :class="gcpBindingMatches ? 'text-medium-emphasis' : 'text-warning'"
+                data-testid="gcp-key-binding"
+              >
+                Saved for {{ gcpBindings.map((b) => b.boundHost).join(" and ") }}<template
+                  v-if="!gcpBindingMatches"
+                >, but the Vertex AI endpoints are now
+                  {{ gcpBindings.map((b) => b.configuredHost).join(" and ") }}. The key is not
+                  used there; enter it again to use it with the new hosts.</template>
+              </div>
               <v-textarea
                 v-model="gcpSaKeyInput"
                 label="Service account JSON key"
@@ -2030,8 +2091,9 @@ onMounted(load);
           <!-- Bedrock: region, model -->
           <template v-if="aiProvider.type === 'bedrock'">
             <v-alert type="info" variant="tonal" class="mb-4">
-              AWS Bedrock support is coming soon. SigV4 request signing is
-              required and not yet implemented.
+              Bedrock requests are signed (SigV4) with the deckwatch pod's AWS
+              identity: IRSA, EKS Pod Identity or environment credentials. No key
+              is stored. The reply arrives in one piece instead of streaming.
             </v-alert>
             <v-row>
               <v-col cols="12" md="6">
@@ -3306,9 +3368,11 @@ onMounted(load);
               />
             </v-col>
           </v-row>
+          <v-divider class="my-6" />
+          <OutboundEndpointsSection ref="endpointsSection" v-model="endpoints" />
           <v-row class="mt-4">
             <v-col>
-              <v-btn color="primary" @click="saveAdvanced">Save</v-btn>
+              <v-btn color="primary" data-testid="advanced-save" @click="saveAdvanced">Save</v-btn>
             </v-col>
           </v-row>
         </div>
