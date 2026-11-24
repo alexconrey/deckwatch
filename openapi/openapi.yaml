@@ -1069,10 +1069,27 @@ components:
               name: { type: string }
               url:  { type: string }
 
+    McpTuningField:
+      type: object
+      description: >-
+        An operator-tunable MCP guidance field declared by a plugin. Values are
+        saved in the plugin's `mcp_tuning` settings.
+      required: [key, label, description, placeholder]
+      properties:
+        key:
+          type: string
+          description: Matched against keys in the plugin's `mcp_tuning` settings.
+          example: naming_convention
+        label:       { type: string, example: Resource naming convention }
+        description: { type: string, description: Help text shown below the field. }
+        placeholder: { type: string, description: Example value shown as the input placeholder. }
+        default:
+          type: string
+          description: Value pre-filled in the form. Omitted when the plugin declares none.
     PluginSummary:
       type: object
       description: A WASM plugin currently loaded in memory.
-      required: [name, version, description, provides, depends_on, config_schema, resources, wasm_size_bytes, sha256, loaded_at]
+      required: [name, version, description, provides, depends_on, config_schema, resources, mcp_tuning_fields, wasm_size_bytes, sha256, loaded_at]
       properties:
         name:            { type: string, example: aws }
         version:
@@ -1084,6 +1101,12 @@ components:
         depends_on:      { type: array, items: { type: string } }
         config_schema:   { type: array, items: { type: object } }
         resources:       { type: array, items: { type: object } }
+        mcp_tuning_fields:
+          type: array
+          description: >-
+            MCP tuning fields the plugin declares. Settings → MCP Tuning renders a
+            section for each plugin with at least one. Empty when it declares none.
+          items: { $ref: "#/components/schemas/McpTuningField" }
         wasm_size_bytes: { type: integer, description: Size of the loaded WASM binary }
         sha256:
           type: string
