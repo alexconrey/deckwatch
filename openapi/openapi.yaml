@@ -34,7 +34,6 @@ tags:
   - name: GitOps
   - name: Git
   - name: Diagnostics
-  - name: Addons
   - name: Templates
   - name: Settings
   - name: Plugins
@@ -502,32 +501,7 @@ paths:
       tags: [CronJobs]
       responses: { "200": { description: OK } }
 
-  # -------------------------------------------------------------- addons / templates
-  /api/addons:
-    get:
-      tags: [Addons]
-      summary: List addon catalog
-      responses: { "200": { description: OK } }
-  /api/namespaces/{ns}/deployments/{name}/addons/{addon_id}:
-    parameters:
-      - $ref: "#/components/parameters/Namespace"
-      - $ref: "#/components/parameters/Name"
-      - in: path
-        name: addon_id
-        required: true
-        schema: { type: string }
-    post:
-      tags: [Addons]
-      summary: Attach an addon to a deployment
-      responses: { "200": { description: OK } }
-    patch:
-      tags: [Addons]
-      summary: Update attached addon config
-      responses: { "200": { description: OK } }
-    delete:
-      tags: [Addons]
-      summary: Detach an addon
-      responses: { "204": { description: Detached } }
+  # -------------------------------------------------------------- templates
   /api/templates:
     get:
       tags: [Templates]
