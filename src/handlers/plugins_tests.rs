@@ -106,3 +106,12 @@ fn summary_sends_empty_mcp_tuning_fields_when_none_declared() {
     let json = serde_json::to_value(PluginSummary::from(&loaded("aws", "0.7.2", b"x"))).unwrap();
     assert_eq!(json["mcp_tuning_fields"], serde_json::json!([]));
 }
+/// Known-answer test: plugin checksum pins are compared against this output,
+/// so it must stay `shasum -a 256` format across sha2 upgrades.
+#[test]
+fn sha256_hex_known_answer() {
+    assert_eq!(
+        crate::plugins::sha256_hex(b"abc"),
+        "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+    );
+}

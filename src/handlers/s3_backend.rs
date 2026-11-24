@@ -555,7 +555,7 @@ impl S3Backend {
 fn digest_bytes(bytes: &[u8]) -> String {
     let mut h = Sha256::new();
     h.update(bytes);
-    format!("sha256:{:x}", h.finalize())
+    format!("sha256:{}", crate::crypto::hex_lower(&h.finalize()))
 }
 
 /// Map an object_store error into an io::Error so the axum handlers can

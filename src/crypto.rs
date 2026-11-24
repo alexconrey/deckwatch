@@ -88,6 +88,19 @@ pub fn decrypt(key_str: &str, encrypted: &str) -> Result<String, String> {
     String::from_utf8(plaintext).map_err(|e| format!("decrypted bytes are not valid UTF-8: {e}"))
 }
 
+/// Lowercase hex encoding, e.g. for SHA-256 digests (`shasum -a 256` format).
+///
+/// sha2 0.11's digest output no longer implements `LowerHex`, so the old
+/// `format!("{:x}", digest)` pattern goes through this instead.
+pub(crate) fn hex_lower(bytes: &[u8]) -> String {
+    use std::fmt::Write;
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        let _ = write!(out, "{b:02x}");
+    }
+    out
+}
+
 /// Derive a 256-bit key from an arbitrary-length passphrase using SHA-256.
 fn derive_key(passphrase: &str) -> [u8; 32] {
     let mut hasher = Sha256::new();
@@ -101,6 +114,23 @@ fn derive_key(passphrase: &str) -> [u8; 32] {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hex_lower_encodes_bytes() {
+        assert_eq!(hex_lower(&[]), "");
+        assert_eq!(hex_lower(&[0x00, 0x0f, 0xa0, 0xff]), "000fa0ff");
+    }
+
+    /// Known-answer test: the key derivation must not change across sha2
+    /// upgrades, or every stored credential becomes undecryptable.
+    #[test]
+    fn derive_key_is_sha256_of_passphrase() {
+        // SHA-256("abc"), FIPS 180-2.
+        assert_eq!(
+            hex_lower(&derive_key("abc")),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+    }
 
     #[test]
     fn round_trip() {
