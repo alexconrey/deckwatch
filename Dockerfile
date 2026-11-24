@@ -1,4 +1,5 @@
-FROM node:24-alpine AS frontend-builder
+# Keep the Node major in step with frontend/.nvmrc, which CI builds with.
+FROM node:26-alpine AS frontend-builder
 RUN npm install -g pnpm@11
 WORKDIR /app
 COPY frontend/package.json frontend/pnpm-lock.yaml frontend/pnpm-workspace.yaml ./

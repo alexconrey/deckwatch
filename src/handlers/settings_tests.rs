@@ -37,17 +37,19 @@ fn test_ai_providers_default_true() {
 
 #[test]
 fn test_roundtrip_serialization() {
-    let mut settings = DeckwatchSettings::default();
-    settings.allowed_namespaces = vec!["team-a".to_string(), "team-b".to_string()];
-    settings.prometheus_enabled = false;
-    settings.ai_claude_enabled = false;
+    let settings = DeckwatchSettings {
+        allowed_namespaces: vec!["team-a".to_string(), "team-b".to_string()],
+        prometheus_enabled: false,
+        ai_claude_enabled: false,
+        ..Default::default()
+    };
 
     let json = serde_json::to_string(&settings).expect("serialize failed");
     let deserialized: DeckwatchSettings = serde_json::from_str(&json).expect("deserialize failed");
 
     assert_eq!(deserialized.allowed_namespaces, settings.allowed_namespaces);
-    assert_eq!(deserialized.prometheus_enabled, false);
-    assert_eq!(deserialized.ai_claude_enabled, false);
+    assert!(!deserialized.prometheus_enabled);
+    assert!(!deserialized.ai_claude_enabled);
     // DeckwatchSettings::default() uses Rust Default (false for bool), not
     // serde defaults, so ai_codex_enabled round-trips as false.
     assert_eq!(deserialized.ai_codex_enabled, settings.ai_codex_enabled);
@@ -88,12 +90,14 @@ fn test_build_architectures_disabled_entry_preserved() {
 
 #[test]
 fn test_build_architectures_roundtrip() {
-    let mut settings = DeckwatchSettings::default();
-    settings.build_architectures = vec![BuildArchitecture {
-        platform: "linux/amd64".into(),
-        arch: "amd64".into(),
-        enabled: true,
-    }];
+    let settings = DeckwatchSettings {
+        build_architectures: vec![BuildArchitecture {
+            platform: "linux/amd64".into(),
+            arch: "amd64".into(),
+            enabled: true,
+        }],
+        ..Default::default()
+    };
     let json = serde_json::to_string(&settings).unwrap();
     let deserialized: DeckwatchSettings = serde_json::from_str(&json).unwrap();
     assert_eq!(deserialized.build_architectures.len(), 1);
@@ -212,9 +216,13 @@ fn test_build_settings_backwards_compat() {
 
 #[test]
 fn test_build_settings_custom_kaniko_image_roundtrip() {
-    let mut settings = DeckwatchSettings::default();
-    settings.build_settings = default_build_settings();
-    settings.build_settings.kaniko_image = "custom-registry.io/kaniko:v1.20.0".into();
+    let settings = DeckwatchSettings {
+        build_settings: BuildSettings {
+            kaniko_image: "custom-registry.io/kaniko:v1.20.0".into(),
+            ..default_build_settings()
+        },
+        ..Default::default()
+    };
     let json = serde_json::to_string(&settings).unwrap();
     let deserialized: DeckwatchSettings = serde_json::from_str(&json).unwrap();
     assert_eq!(
@@ -489,7 +497,7 @@ async fn put_without_credentials_does_not_wipe_them() {
 
     let Json(mut payload) = get_settings(State(state.clone())).await.expect("get");
     payload.credentials = None;
-    put_settings(State(state.clone()), Json(payload))
+    let _ = put_settings(State(state.clone()), Json(payload))
         .await
         .expect("put");
 

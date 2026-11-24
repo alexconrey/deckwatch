@@ -1,493 +1,361 @@
-# Deckwatch — Distributed Tracing Integration Design
+# Distributed Tracing
 
-**Status:** Design proposal
-**Owner:** Platform / Deckwatch
-**Related design docs:** `docs/PROMETHEUS_INTEGRATION.md` (opt-in monitoring pattern), `docs/ARCHITECTURE.md`
-**Prototype targets:** `src/handlers/addons.rs` (extend catalog with `otel-collector`), `helm/deckwatch/` (new tracing backend sub-chart or values-gated deployment), frontend `<TracesTab>` and `<TraceLink>` widgets (new)
+Deckwatch does not store traces itself. Tracing involves three parts, each configured
+separately:
 
----
+| Part | What it does | Where it is configured |
+|---|---|---|
+| **Tracing backend** | Stores spans (Grafana Tempo or Jaeger) | Your own installation, or the bundled Helm option ([§4](#4-deploying-the-backend)) |
+| **Collector sidecar** | Receives spans from the application and forwards them to the backend | The [`deckwatch-plugin-otel`](https://github.com/alexconrey/deckwatch-plugin-otel) plugin ([§5](#5-the-opentelemetry-collector-plugin)) |
+| **Trace queries** | Lets deckwatch list recent traces and link into the backend's UI | The `tracing` block of deckwatch's settings ([§6](#6-trace-queries-and-deep-links)) |
 
-## 1. Problem
+```
+ pod ──────────────────────────────────────────┐
+ │ app container ──OTLP──▶ otel-collector       │──OTLP──▶ Tempo / Jaeger
+ │ (OTEL_* env)  localhost (127.0.0.1 only)     │              ▲      ▲
+ └──────────────────────────────────────────────┘              │      │
+          deckwatch ── query_url: GET /api/traces?service= ────┘      │  (Jaeger)
+          browser ──── ui_url deep link (Grafana Explore / Jaeger UI) ┘
+```
 
-Deckwatch's metrics story is well-defined: Phase 1 point-in-time via metrics-
-server, Phase 2 client ring buffer, Phase 3 Prometheus (`PROMETHEUS_INTEGRATION.md`).
-Logs are already surfaced per-pod. The missing pillar is **traces** —
-distributed request context that lets operators answer "why is this request
-slow?" or "which downstream call failed?" without SSH-ing into containers.
+## 1. What you get
 
-Today deckwatch users have no path to enabling tracing on a managed workload
-without hand-rolling:
-- A tracing collector sidecar (or DaemonSet) manifest.
-- The tracing backend itself (Jaeger, Tempo, or Zipkin).
-- OTLP endpoint env vars into their app.
-- A UI to actually view traces (Jaeger UI, Grafana, or ad-hoc port-forwards).
+- **One switch per workload.** Enabling the plugin for a deployment, or for a whole
+  application, adds an OpenTelemetry Collector sidecar. It also points the application's
+  OpenTelemetry SDK at that sidecar through the standard `OTEL_*` environment variables.
+- **No application changes beyond instrumentation.** The application has to emit
+  OpenTelemetry spans ([§7](#7-instrumenting-applications)). The plugin handles where those
+  spans go.
+- **Backend-agnostic export.** The collector exports OTLP, so moving from Tempo to Jaeger or
+  to a managed backend only means changing the plugin's exporter settings.
 
-This design closes that gap using the exact same opt-in pattern that worked
-for Prometheus:
+## 2. Quick start
 
-1. A shared **cluster tracing backend** (Jaeger or Grafana Tempo) deployed
-   once by the deckwatch operator, plumbed into deckwatch settings.
-2. A per-deployment **`otel-collector` addon** that injects an OpenTelemetry
-   Collector sidecar and the OTLP env vars the app needs to emit spans.
-3. A deckwatch UI **trace viewer / trace-link** that turns pod logs and
-   deployment events into deep-links into the tracing backend.
+1. Have a backend that accepts OTLP ([§4](#4-deploying-the-backend)).
+2. Install `deckwatch-plugin-otel` and set its **Exporter endpoint** to the backend's OTLP
+   endpoint ([§5.1](#51-install-and-configure)).
+3. Enable it for a deployment (annotation `deckwatch.io/otel: enabled`,
+   [§5.2](#52-enable-for-a-deployment)) or for an application (the **OpenTelemetry
+   Collector** infrastructure resource, [§5.3](#53-enable-for-an-application)).
+4. Point deckwatch's `tracing` settings at the backend's query API and UI
+   ([§6](#6-trace-queries-and-deep-links)).
+5. Instrument the application ([§7](#7-instrumenting-applications)).
 
-## 2. Scope
+## 3. Choosing a backend
 
-**In scope:**
-
-- The `otel-collector` sidecar addon (catalog entry + wiring) — this is
-  the shippable core.
-- Recommendation on tracing backend (Jaeger vs Tempo), rationale, and how
-  deckwatch would deploy it.
-- Env-var injection strategy (OTLP endpoint, service name, exporter kind).
-- Sidecar-config strategy: how the collector knows where the backend lives.
-- UI integration: minimal trace-link from Pod/Deployment views to the
-  backend UI; a deeper embedded viewer as a Phase 2.
-- Effort estimate, split into shippable slices.
-
-**Out of scope:**
-
-- Tail-based sampling / advanced pipeline transforms in the collector.
-  Ship the head-based-sample default and revisit.
-- Log-to-trace correlation via `traceparent` extraction from container
-  logs. Nice-to-have, ships once the base viewer works.
-- Metrics forwarding through the collector. Deckwatch already has a
-  Prometheus story; adding another metrics path would just duplicate it.
-- Trace-based alerting (SLO burn from spans). Not our job.
-
-## 3. Backend recommendation: **Grafana Tempo** as default, Jaeger as escape hatch
-
-Both are OSS, both accept OTLP, both are production-proven. Here is the tradeoff
-that matters for deckwatch:
+Both backends accept OTLP from the collector. They differ in what deckwatch itself can query.
 
 | Concern | Grafana Tempo | Jaeger |
 |---|---|---|
-| Storage backend | Object storage (S3, GCS, Azure blob) — cheap, no operational overhead | Cassandra / Elasticsearch / OpenSearch — needs a DB team or a hosted service |
-| Deployment complexity | Single Helm chart, stateless queriers over object-store | Multiple components (collector, query, ingester), stateful DB |
-| Search/query interface | TraceQL (Grafana-native), plus Jaeger-API compat shim | Rich Jaeger UI with service graph, dependencies view |
-| Native visualization | None built-in — expects Grafana Explore panel | First-class UI shipped with the binary |
-| Existing deckwatch alignment | Deckwatch already recommends S3 for a registry (`docs/S3_REGISTRY.md`) — S3 already available in most target clusters | Would add a DB dependency |
-| OTLP ingestion | Native | Native (since 1.35) |
-| Multitenancy | Native, cheap | Requires all-in on the operator |
-| Retention control | TTL knobs at compactor level, per-tenant | DB-schema retention (harder, DB-specific) |
+| Storage | Object storage (S3, GCS, Azure Blob) or local disk | Cassandra, Elasticsearch/OpenSearch, or in-memory |
+| Operations | A single binary, or stateless components over object storage | Several components plus a database for production |
+| UI | None built in; uses Grafana Explore | Ships its own UI |
+| deckwatch trace queries ([§6.1](#61-trace-query-proxy)) | Not supported: Tempo has no `/api/traces?service=` endpoint | `/api/traces` on port 16686 |
+| deckwatch deep links ([§6.2](#62-deep-links)) | Grafana Explore | Jaeger UI |
 
-**Recommendation: default to Tempo.** Its S3-backed storage matches the
-"single deployment, no DB to babysit" ethos that deckwatch already leans into
-for its registry. It is also the pragmatic pick if the cluster already runs
-Grafana (many do, since deckwatch's Prometheus integration produces the
-metrics Grafana consumes).
+**Tempo is the default.** Deckwatch treats a blank or unknown `backend_kind` as `tempo`. Its
+object-storage model avoids running a database, and it fits clusters that already run Grafana.
+Choose **Jaeger** if you already operate it, want its UI without Grafana, or want deckwatch's
+trace query API to work.
 
-**Jaeger stays as an option** for shops that already run it, or that want the
-native Jaeger UI without adding Grafana. The addon side of this design is
-backend-agnostic — the collector exports OTLP either way — so switching
-backends is a values.yaml change, not a code change.
+## 4. Deploying the backend
 
-### 3.1 Why an OpenTelemetry Collector *sidecar*, not direct app-to-backend
+### 4.1 Bring your own (recommended for production)
 
-Three reasons the addon injects a collector instead of pointing the app
-straight at the backend:
+Install Tempo or Jaeger however you normally install infrastructure (the upstream Helm charts,
+Argo CD, Terraform), or use a managed backend such as Grafana Cloud or Honeycomb. Then:
 
-1. **Protocol translation & fan-out.** Apps often already emit spans in a
-   proprietary flavor (Jaeger Thrift, Zipkin JSON, Datadog). A per-app
-   collector accepts all of them and normalizes to OTLP. Switching backend
-   later is zero-touch on the app.
-2. **Buffering and batching.** The collector batches spans (default: every
-   1s or 8192 spans) and holds a small in-memory queue across restarts of
-   the backend. Direct-to-backend apps just drop spans on any backend
-   hiccup.
-3. **Local retry.** If the backend is temporarily unavailable, the sidecar
-   retries; the app's request path is never blocked.
+- set the plugin's exporter to the backend's OTLP endpoint ([§5.1](#51-install-and-configure));
+- set deckwatch's `tracing.query_url` and `tracing.ui_url` ([§6](#6-trace-queries-and-deep-links)).
 
-The alternative (a namespace-scoped or cluster-scoped collector DaemonSet)
-saves a container per pod but shares failure domains — one crashy collector
-takes traces down for every pod on the node, and the routing config gets
-harder. Sidecar is the right default for a UI-driven "click to enable"
-experience because the failure mode is scoped to that one workload.
+### 4.2 Bundled backend (Helm)
 
-## 4. How deckwatch deploys the tracing backend
+The deckwatch chart can run a small, single-replica backend for development and evaluation.
+It is not meant for production: Tempo writes to an `emptyDir` and Jaeger keeps everything in
+memory, so traces are lost when the pod restarts.
 
-Two options, roughly equal effort. Recommendation is **Option A** for the
-initial ship because it matches how `helm/deckwatch/templates/servicemonitor.yaml`
-already handles a similar shared-infrastructure concern (Prometheus operator
-being present-or-absent).
-
-### 4.1 Option A (recommended): values-gated sub-chart
-
-Add a sub-chart under `helm/deckwatch/charts/tempo/` (or `charts/jaeger/`)
-that vendors the upstream Tempo/Jaeger Helm chart. Enable via values:
+`values.yaml` ships only `tracing.enabled: false` and **no image defaults**, so set the image
+yourself when you enable it:
 
 ```yaml
 tracing:
-  # Whether deckwatch should deploy a tracing backend at all. Set to
-  # false if your cluster already has one you want to use.
-  deployBackend: true
-  # Which backend to deploy. Ignored when deployBackend=false.
-  backend: tempo          # tempo | jaeger
-  # Where deckwatch tells the sidecar addons to send OTLP.
-  # Auto-computed from the sub-chart's service when deployBackend=true;
-  # required when deployBackend=false and you point at an external
-  # collector or backend (e.g. a managed Tempo, Honeycomb, Grafana Cloud).
-  otlpEndpoint: ""        # e.g. http://tempo.observability:4317
-  # Where the deckwatch UI deep-links users for a trace ID.
-  # For Tempo, this is a Grafana Explore URL with the datasource param.
-  # For Jaeger, it's the Jaeger UI base URL.
-  uiUrl: ""               # e.g. https://grafana.internal/explore?left=...
+  enabled: true
+  backend: tempo            # tempo | jaeger
   tempo:
-    persistence:
-      # Prefer S3 in prod; PVC ok for dev clusters.
-      backend: s3         # s3 | gcs | azure | pvc
-      s3:
-        bucket: ""
-        region: ""
-        # Auth via IRSA — deckwatch already documents this pattern.
-        # No secret-based access keys.
+    image:
+      repository: grafana/tempo
+      tag: "<version>"      # pin a release you have tested with the bundled config
+      pullPolicy: IfNotPresent
+    retention: 24h          # compactor block_retention
+    resources:
+      requests: { cpu: 100m, memory: 256Mi }
+      limits: { memory: 1Gi }
+  # jaeger:                 # used when backend: jaeger
+  #   image:
+  #     repository: jaegertracing/all-in-one
+  #     tag: "<version>"
+  #     pullPolicy: IfNotPresent
+  #   resources: {}
 ```
 
-**Pros:** one `helm upgrade` gives you deckwatch + tracing. Consistent with
-how deckwatch already ships its own Prometheus PodMonitor template
-alongside the app.
+| Value | Effect |
+|---|---|
+| `tracing.enabled` | Renders the backend Deployment, Service and (for Tempo) ConfigMap. |
+| `tracing.backend` | `tempo` (default) or `jaeger`. |
+| `tracing.tempo.image.*`, `tracing.tempo.resources`, `tracing.tempo.retention` | The Tempo container and how long blocks are kept (default `24h`). |
+| `tracing.jaeger.image.*`, `tracing.jaeger.resources` | The Jaeger all-in-one container (OTLP enabled through `COLLECTOR_OTLP_ENABLED`). |
 
-**Cons:** ties tracing backend upgrades to deckwatch chart upgrades. Small
-cost — Tempo minor bumps rarely require action from the deckwatch side.
+The chart exposes the backend as a ClusterIP Service named after the release, for example
+`deckwatch-tempo` for a release named `deckwatch`:
 
-### 4.2 Option B: separate deployment, deckwatch just consumes
+| Backend | Service | Ports |
+|---|---|---|
+| Tempo | `<release>-tempo` | 4317 OTLP gRPC, 4318 OTLP HTTP, 3200 HTTP API (Tempo search, readiness) |
+| Jaeger | `<release>-jaeger` | 4317 OTLP gRPC, 4318 OTLP HTTP, 16686 UI and query API |
 
-Deckwatch ships nothing tracing-related in its chart. The cluster operator
-installs Tempo/Jaeger via whatever mechanism they prefer (Helm, ArgoCD app,
-Terraform module). Deckwatch reads `tracing.otlpEndpoint` and
-`tracing.uiUrl` from settings and everything downstream (sidecar env vars,
-UI deep-links) uses those.
+The OTLP endpoint for the plugin is then `<release>-tempo.<namespace>.svc:4317` (or
+`<release>-jaeger…`), plaintext. Only the Jaeger Service also serves deckwatch's trace
+queries, as `http://<release>-jaeger.<namespace>.svc:16686` ([§6.1](#61-trace-query-proxy)).
 
-**Pros:** cleaner separation of concerns. Backend upgrades independent of
-deckwatch releases. Matches the current deckwatch stance on Prometheus:
-"we consume it, we don't ship it."
+## 5. The OpenTelemetry Collector plugin
 
-**Cons:** more manual setup on day zero — operator has to find, install,
-and configure Tempo/Jaeger *before* deckwatch tracing works. Discovery
-story is worse: users may not realize the tracing feature exists until an
-admin wires it up.
+[`deckwatch-plugin-otel`](https://github.com/alexconrey/deckwatch-plugin-otel) adds the
+collector sidecar. Its README is the full reference. This section covers what an operator
+needs to know.
 
-### 4.3 Chosen path
+### 5.1 Install and configure
 
-**Do Option A first, ship Option B as a supported alternative.** The
-sub-chart is opt-in (`tracing.deployBackend: false` by default) so shops
-with an existing backend can point deckwatch at theirs without spinning up
-a redundant Tempo. Shops without any tracing today get a one-line values
-change to bootstrap.
+Requires deckwatch **0.6.4 or later**. Add the plugin under **Settings → Plugins**. Name it
+`otel`, pin the release checksum (each release publishes `plugin.wasm.sha256`), and leave
+`allowed_hosts` empty, because the plugin makes no outbound requests:
 
-This mirrors what `PROMETHEUS_INTEGRATION.md` §3 concluded for the
-Prometheus operator: deckwatch does not require you use its bundled thing,
-but it works out of the box if you have nothing.
-
-## 5. The `otel-collector` addon
-
-This is the primary artifact of this design and the one thing that MUST land
-for the tracing story to be usable.
-
-### 5.1 Catalog entry
-
-Added to `catalog()` in `src/handlers/addons.rs`, matching the shape of
-existing entries (redis, memcached, nginx-proxy, fluent-bit):
-
-```rust
-AddonDefinition {
-    id: "otel-collector".to_string(),
-    name: "OpenTelemetry Collector".to_string(),
-    description: "Sidecar that collects and forwards traces/metrics \
-                  to the cluster tracing backend".to_string(),
-    image: "otel/opentelemetry-collector:latest".to_string(),
-    default_port: Some(4317),   // OTLP gRPC
-    default_env: vec![
-        EnvVarOutput {
-            name: "OTEL_EXPORTER_OTLP_ENDPOINT".to_string(),
-            value: "http://localhost:4317".to_string(),
-        },
-        EnvVarOutput {
-            name: "OTEL_SERVICE_NAME".to_string(),
-            // Placeholder — resolved to deployment name at attach() time.
-            // See §5.3 for how the substitution happens.
-            value: "{deployment_name}".to_string(),
-        },
-        EnvVarOutput {
-            name: "OTEL_TRACES_EXPORTER".to_string(),
-            value: "otlp".to_string(),
-        },
-    ],
-    default_resources: Some(ResourceSpecOutput {
-        cpu: Some("100m".to_string()),
-        memory: Some("128Mi".to_string()),
-    }),
-},
-```
-
-### 5.2 What attach() does, unchanged from the current pattern
-
-The existing `attach()` handler already:
-
-1. Creates a sidecar container with `image = otel/opentelemetry-collector`,
-   `port = 4317`, and the collector's own env (empty for now — see §5.4).
-2. Injects `OTEL_EXPORTER_OTLP_ENDPOINT`, `OTEL_SERVICE_NAME`,
-   `OTEL_TRACES_EXPORTER` into the **primary container** so the app SDK
-   discovers the sidecar.
-3. Records the injected env-var names in the
-   `deckwatch.addon-env/<container_name>` annotation so `detach()` can
-   remove exactly those names later without clobbering user env.
-
-Nothing new here — the addon plumbing already handles all of this. The
-tracing addon is purely a catalog addition from the code's perspective.
-
-### 5.3 `OTEL_SERVICE_NAME` placeholder substitution — a small extension
-
-Every existing addon in the catalog uses static default env values (e.g.
-`REDIS_URL=redis://localhost:6379`). Tracing has a natural per-deployment
-value: the service name should default to the Deployment name so that
-traces from `checkout-api` show up as `checkout-api` in the UI without the
-user having to think about it.
-
-Two implementation options:
-
-**Option A (minimal):** don't substitute anything. Ship the addon with
-`OTEL_SERVICE_NAME` **omitted from `default_env`**. Users who want a
-service name pass it via the `env` override on attach (the frontend can
-pre-fill it with the deployment name in the "attach addon" modal). This
-requires zero backend changes beyond the catalog entry.
-
-**Option B (nicer UX):** support a `{deployment_name}` placeholder token in
-`default_env` values that `attach()` interpolates against the Deployment's
-`metadata.name`. This is a small addition to
-`inject_addon_env_into_primary()` and the sidecar env construction: after
-resolving `def.default_env`, run each value through a substitute-known-tokens
-step.
-
-**Recommendation: Option B**, because it generalizes cleanly (future
-addons can use `{namespace}`, `{cluster}`, etc.) and is ~5 LOC of
-substitution logic. Full stub:
-
-```rust
-fn interpolate(v: &str, ctx: &InterpolationCtx) -> String {
-    v.replace("{deployment_name}", &ctx.deployment_name)
-     .replace("{namespace}", &ctx.namespace)
+```json
+{
+  "name": "otel",
+  "enabled": true,
+  "source": {
+    "type": "github",
+    "repo": "alexconrey/deckwatch-plugin-otel",
+    "ref": "v0.2.0",
+    "path": "plugin.wasm",
+    "use_release": true
+  },
+  "sha256": "<plugin.wasm.sha256 from the release>",
+  "allowed_hosts": []
 }
 ```
 
-Applied both when building the sidecar's env and when injecting into the
-primary. If the addon catalog grows past a handful of these tokens,
-promote to a real templating pass; for now, `String::replace` is fine.
+Then configure it under **Settings → Plugins → otel**. The main settings:
 
-### 5.4 Collector config: how does the sidecar know where to send?
+| Key | Default | Notes |
+|---|---|---|
+| `OTLP_ENDPOINT` | **required** | The backend's OTLP endpoint. Use the value you set as `tracing.otlp_endpoint`, because plugins cannot read deckwatch's settings. gRPC: `host:port`. HTTP: a base URL. |
+| `OTLP_PROTOCOL` | `grpc` | `grpc` or `http/protobuf`, for the collector-to-backend connection. |
+| `OTLP_INSECURE` | `false` | Plaintext export, like `tracing.otlp_insecure`. It must agree with an `http://` or `https://` scheme. |
+| `OTLP_HEADERS` | — | A Secret field holding exporter headers, usually credentials, in `name=value,...` form. |
+| `SIGNALS` | `traces` | Which of `traces`, `metrics` and `logs` the collector forwards. |
+| `APP_OTLP_PROTOCOL` | `grpc` | How the application reaches the sidecar (`http://localhost:4317` or `:4318`). |
+| `COLLECTOR_IMAGE` | `otel/opentelemetry-collector-contrib:0.165.0@sha256:…` | Must be pinned. `:latest` is rejected. |
+| `COLLECTOR_*_REQUEST` / `_LIMIT` | `100m`/`500m` CPU, `128Mi`/`256Mi` memory | Sidecar resources. |
+| `BATCH_*`, `MEMORY_*` | collector defaults | Tuning for the `batch` and `memory_limiter` processors. |
 
-The `otel-collector` binary needs a config file to know its receivers,
-processors, and exporters. Two ways to get one in:
+**Exporter headers.** The values go into a Kubernetes Secret in each workload's namespace.
+That Secret is mounted read-only into the collector only, and its values never appear in the
+pod spec or in environment variables. deckwatch 0.6.x passes `Secret` fields saved from the
+plugin settings form to plugins still encrypted. The plugin refuses that ciphertext, so
+supply `OTLP_HEADERS` through `inherit_env_keys` (an environment variable on the deckwatch
+pod) or the `update_plugin_config` MCP tool instead.
 
-1. **Baked default via env vars only.** The collector supports a "no config
-   file" mode when env vars are enough. Requires the collector be
-   configured to pick up `OTEL_EXPORTER_OTLP_ENDPOINT` for its own
-   downstream export. This is not the collector's default — it reads the
-   file at `/etc/otelcol/config.yaml` and ignores those envs unless the
-   config references them via `${OTEL_EXPORTER_OTLP_ENDPOINT}`.
+### 5.2 Enable for a deployment
 
-2. **ConfigMap-mounted config, rendered by deckwatch.** deckwatch creates
-   a per-deployment ConfigMap named `{deployment}-otel-collector-config`
-   at addon-attach time, containing a templated `config.yaml`. Mount it
-   into the sidecar at `/etc/otelcol/config.yaml`.
-
-**Recommendation: option 2** for the initial ship. Template:
-
-```yaml
-receivers:
-  otlp:
-    protocols:
-      grpc:
-        endpoint: 0.0.0.0:4317
-      http:
-        endpoint: 0.0.0.0:4318
-processors:
-  batch: {}
-  memory_limiter:
-    check_interval: 1s
-    limit_percentage: 80
-    spike_limit_percentage: 25
-exporters:
-  otlp:
-    endpoint: {tracing.otlpEndpoint}         # from deckwatch settings
-    tls:
-      insecure: {tracing.otlpInsecure}       # default false
-service:
-  pipelines:
-    traces:
-      receivers: [otlp]
-      processors: [memory_limiter, batch]
-      exporters: [otlp]
-```
-
-This adds a small amount to attach() (create a ConfigMap alongside the
-sidecar) and detach() (delete the ConfigMap). Cleanest owner: use
-`ownerReferences` back to the Deployment, same pattern the Prometheus
-design uses for materialized CRDs (`PROMETHEUS_INTEGRATION.md` §5.1).
-
-**Note on scope:** if the config becomes a first-class thing users want to
-edit, promote it to a settings tab (Phase 2). For now it is invisible
-plumbing — an implementation detail of the addon.
-
-### 5.5 What the "attached" state looks like in the API
-
-`DeploymentDetail` already surfaces addon state via deployment-level
-annotations. After attaching `otel-collector`:
+Opt the deployment in with an annotation, or with a pod template label when you create it:
 
 ```yaml
 metadata:
   annotations:
-    deckwatch.addon/addon-otel-collector: "otel-collector"
-    deckwatch.addon-env/addon-otel-collector: "OTEL_EXPORTER_OTLP_ENDPOINT,OTEL_SERVICE_NAME,OTEL_TRACES_EXPORTER"
+    deckwatch.io/otel: enabled
 ```
 
-The AddonsCard in the frontend already knows how to render this. No new
-API shape.
+Then save the deployment through deckwatch's deployment API: the deployment edit form in the
+UI, or `POST`/`PUT /api/namespaces/{ns}/deployments[/{name}]`. These are the only paths that
+run plugins. The YAML editor, the MCP `create_deployment`/`update_deployment` tools, `kubectl`
+and GitOps do not.
 
-## 6. UI integration
+The deployment gets:
 
-### 6.1 Trace-link deep-link (Phase 1, ships with the addon)
+- an `otel-collector` sidecar. Its OTLP gRPC (4317) and HTTP (4318) receivers listen on
+  127.0.0.1 only, so other pods cannot send through it. Data passes through `memory_limiter`
+  and then `batch` before it is exported to the backend;
+- on the application container: `OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4317`,
+  `OTEL_EXPORTER_OTLP_PROTOCOL`, `OTEL_SERVICE_NAME=<deployment name>`,
+  `OTEL_RESOURCE_ATTRIBUTES` (`k8s.namespace.name`, `k8s.deployment.name`) and
+  `OTEL_<SIGNAL>_EXPORTER`. Variables you set yourself are kept;
+- the ConfigMap `<deployment>-otelcol` (the collector configuration) and, if headers are
+  configured, the Secret `<deployment>-otelcol-headers`, both in the deployment's namespace.
 
-Anywhere deckwatch already renders a **pod**, **deployment**, or **log
-line with a trace ID**, add a "View traces" link that opens the
-configured `tracing.uiUrl` with the appropriate query pre-filled.
+Saving again changes nothing. To **disable**, set `deckwatch.io/otel: disabled` and save.
+deckwatch 0.6.x does not remove what a plugin added earlier, so also delete these by hand
+from the deployment YAML:
 
-Two entry points:
+- the `otel-collector` container;
+- the `otelcol-config` and `otelcol-headers` volumes;
+- the env vars listed in the `deckwatch.plugin-env/otel` annotation.
 
-1. **Deployment detail page.** Right next to the AddonsCard row for the
-   attached `otel-collector`, render:
-   > *View traces for `checkout-api` →*
+Then delete the ConfigMap and Secret.
 
-   URL construction (backend-agnostic, driven by `tracing.uiUrl`):
-   - **Tempo (via Grafana Explore):**
-     `{uiUrl}?left=[..."queries":[{"query":"{service.name=\"checkout-api\"}"}]]`
-   - **Jaeger:** `{uiUrl}/search?service=checkout-api`
+### 5.3 Enable for an application
 
-   The link renderer picks the format from the backend kind in settings.
+Provision the **OpenTelemetry Collector** resource (id `tracing`) on the application:
 
-2. **Log viewer.** If a log line contains a `traceparent`, `trace_id`, or
-   `traceId` field (whether OTLP-flavored or Jaeger-flavored), render the
-   trace ID as a clickable badge that opens the backend UI focused on
-   that specific trace. Requires a small extraction pass in the log-panel
-   component; the parsing itself is well-covered by open-source regex.
+- **UI:** the **Infrastructure** tab;
+- **MCP:** `provision_resource` with `plugin_name: otel` and `resource_id: tracing`;
+- **REST:** `POST /api/namespaces/{ns}/applications/{app}/resources/otel/tracing`.
 
-### 6.2 Embedded trace viewer (Phase 2, deferred)
+deckwatch's reconciler then adds the sidecar and the variables to every deployment and
+cronjob in the application. On deckwatch 0.6.x the values are the same for every workload,
+so there is no per-deployment `OTEL_SERVICE_NAME`. Variables with the same names that you set
+yourself are replaced. Do not use application-level enablement for applications with
+cronjobs: their Jobs never complete while the sidecar keeps running.
 
-Long-term the right move is an in-deckwatch trace viewer so users never
-leave the app. That is a full component build — waterfall rendering,
-span attribute inspection, service-graph fetch — and materially larger
-than everything else in this design.
+After you change the plugin settings, click **Refresh** on the resource; the pods roll with
+the new configuration. To **disable**, deprovision the resource. `associate_plugin` has no
+effect on this plugin.
 
-Deferring is safe because Phase 1 gets users to a working trace view via
-Grafana/Jaeger, and we learn what queries they actually run before
-committing UI to reproduce that surface area.
+## 6. Trace queries and deep links
 
-### 6.3 Settings surface for the URLs
+Deckwatch reads tracing configuration from a `tracing` block in its settings.
 
-Add to the deckwatch settings ConfigMap (mirrors §4.1 values):
+### 6.1 Trace query proxy
+
+`GET /api/namespaces/{ns}/deployments/{name}/traces?service=<service>&limit=<n>` returns
+recent trace summaries: trace ID, root span name, duration, span count and start time. It
+proxies to `{query_url}/api/traces?service=…&limit=…`, which is Jaeger's query API. The
+handler:
+
+- returns at most 20 traces and times out after 10 seconds;
+- only answers for namespaces the caller is allowed to see;
+- accepts a restricted set of characters in `service`;
+- returns HTTP 200 with an `unavailable_reason` when `query_url` is unset, the backend cannot
+  be reached, or the backend returns an error.
+
+Only Jaeger serves this API, on port 16686. Tempo does not: Tempo 2.9 and 3.0 answer
+`/api/traces?service=` on their HTTP port (3200) with **404**, and search through
+`/api/search` instead. With Tempo, deckwatch's trace queries therefore report
+`unavailable_reason: tracing backend returned HTTP 404`, unless `query_url` points at a
+Jaeger-compatible query service in front of Tempo. Deep links into Grafana
+([§6.2](#62-deep-links)) work either way.
+
+deckwatch's trace components look traces up with `service` set to the **deployment name**,
+which is why the plugin defaults `OTEL_SERVICE_NAME` to the deployment name. The deployment
+page does not show a trace list yet; for now, use the API or the backend's UI.
+
+### 6.2 Deep links
+
+Each response echoes `ui_url` and `backend_kind`, and deckwatch builds trace links from them:
+
+| `backend_kind` | Link |
+|---|---|
+| `jaeger` | `{ui_url}/trace/{trace_id}` |
+| `tempo` (default) | `{ui_url}/explore?left=…`: a Grafana Explore query for the trace ID against a Tempo datasource with the UID `tempo` |
+
+An empty `ui_url` hides the link.
+
+### 6.3 Settings and values.yaml
+
+| Setting | Used by | Meaning |
+|---|---|---|
+| `backend_kind` | Deep links | `tempo` or `jaeger`. Blank or unknown means `tempo`. |
+| `query_url` | Query proxy | HTTP base URL of a Jaeger query API, such as `http://<jaeger>:16686`. Empty disables queries. Tempo does not serve this API ([§6.1](#61-trace-query-proxy)). |
+| `ui_url` | Deep links | Public base URL of Grafana (for Tempo) or the Jaeger UI. |
+| `otlp_endpoint` | Operators | Where the backend receives OTLP. deckwatch itself does not use it, and plugins cannot read it, so copy it into the plugin's `OTLP_ENDPOINT`. |
+| `otlp_insecure` | Operators | `true` when that endpoint is plaintext. Copy it into the plugin's `OTLP_INSECURE`. |
+
+Set these through Helm under `settings.defaults.tracing`. The chart renders them into the
+settings ConfigMap (`settings.configMapName`, by default `deckwatch-config`), and the query
+proxy reads the `tracing` block **from that ConfigMap** on every request. The Settings page
+has no tracing section. Values saved through `PUT /api/settings` go to the settings database,
+which the query proxy does not read.
+
+With the bundled Jaeger backend, both queries and links work:
 
 ```yaml
 settings:
   defaults:
     tracing:
-      # Where sidecar collectors export to.
-      otlp_endpoint: ""
-      # Whether the OTLP connection is plaintext or TLS.
-      otlp_insecure: false
-      # Where the deckwatch UI deep-links for a trace / service view.
-      ui_url: ""
-      # tempo | jaeger — controls the URL construction template above.
-      backend_kind: "tempo"
+      backend_kind: jaeger
+      otlp_endpoint: deckwatch-jaeger.deckwatch.svc:4317
+      otlp_insecure: true
+      query_url: http://deckwatch-jaeger.deckwatch.svc:16686
+      ui_url: https://jaeger.example.com   # port 16686 through your ingress
 ```
 
-Frontend reads these via the existing `/api/settings` endpoint. Empty
-`otlp_endpoint` disables the addon toggle (or the UI shows it with a
-"tracing backend not configured — talk to your admin" hint).
+With Tempo, only the links work. Leave `query_url` empty, or point it at a Jaeger-compatible
+query service:
 
-## 7. Effort estimate
+```yaml
+settings:
+  defaults:
+    tracing:
+      backend_kind: tempo
+      otlp_endpoint: deckwatch-tempo.deckwatch.svc:4317
+      otlp_insecure: true
+      query_url: ""
+      ui_url: https://grafana.example.com
+```
 
-Broken into shippable slices, matching the `PROMETHEUS_INTEGRATION.md`
-convention.
+## 7. Instrumenting applications
 
-| Slice | Scope | Effort |
+The plugin does not instrument code. The application needs an OpenTelemetry SDK, or
+auto-instrumentation such as the Java agent, `opentelemetry-instrument` for Python, or
+`--require @opentelemetry/auto-instrumentations-node` for Node. Most SDKs configure
+themselves from the variables the plugin sets: `OTEL_EXPORTER_OTLP_ENDPOINT`,
+`OTEL_EXPORTER_OTLP_PROTOCOL`, `OTEL_SERVICE_NAME`, `OTEL_RESOURCE_ATTRIBUTES` and
+`OTEL_<SIGNAL>_EXPORTER`. Some SDKs default to a different OTLP protocol than the sidecar
+expects; the plugin sets `OTEL_EXPORTER_OTLP_PROTOCOL` so that the protocol and the port
+match.
+
+## 8. Troubleshooting
+
+| Symptom | Check |
+|---|---|
+| No sidecar after enabling at deployment level | The deployment was saved through a path that does not run plugins ([§5.2](#52-enable-for-a-deployment)). The plugin is not loaded (`list_plugins`). deckwatch logs `otel-collector not injected into <deployment>` with the configuration error. deckwatch is older than 0.6.4. |
+| Provisioning the application resource fails | The error names the plugin setting to fix, for example a missing `OTLP_ENDPOINT`. |
+| Pod stays in `ContainerCreating` | The ConfigMap `<name>-otelcol` (or the Secret) does not exist yet. deckwatch creates it right after the deployment, and the kubelet retries the mount. |
+| Collector logs `Exporting failed` | `OTLP_ENDPOINT`, `OTLP_PROTOCOL` and `OTLP_INSECURE` do not match the backend, or the backend rejects the headers. Check the collector logs (container `otel-collector`). |
+| The application cannot connect to the sidecar | The SDK's protocol differs from `APP_OTLP_PROTOCOL`, or you overrode `OTEL_EXPORTER_OTLP_ENDPOINT` yourself. |
+| Trace queries return `unavailable_reason` | `query_url` is unset in the settings ConfigMap, or deckwatch cannot reach it. `HTTP 404` means `query_url` points at Tempo, which does not serve the Jaeger query API ([§6.1](#61-trace-query-proxy)). |
+| Queries find no traces | The application's `service.name` is not the deployment name, or the application is not instrumented. |
+| CronJob Jobs never finish | The collector was enabled at application level ([§5.3](#53-enable-for-an-application)). |
+
+## 9. Security
+
+- **Collector receivers listen on 127.0.0.1 only**, and the sidecar declares no ports. Only
+  containers in the same pod can send telemetry through it.
+- **Exporter credentials live in a namespaced Secret** that is mounted read-only into the
+  collector and referenced from its configuration by file path. They are never in the pod
+  spec, in environment variables or in the ConfigMap.
+- **Namespaced objects only.** The plugin creates a ConfigMap and, with headers configured,
+  a Secret in the workload's namespace. It creates no RBAC and no cluster-scoped objects.
+- **No plugin egress.** Keep the plugin's `allowed_hosts` empty.
+- **Pinned images.** The collector image is pinned by digest, and `:latest` is rejected. Pin
+  the bundled backend images as well.
+- **Container hardening.** deckwatch 0.6.x does not let plugins set a sidecar
+  `securityContext`. The default collector image runs as a non-root user (UID 10001) from a
+  `scratch` base. It also works with a read-only root filesystem and all capabilities
+  dropped.
+- **Trace queries** go only to the configured `query_url`, with a strict allowlist on the
+  service name and a capped result size.
+
+## 10. Known limitations (deckwatch 0.6.x)
+
+| Limitation | Effect | Workaround |
 |---|---|---|
-| **A — Addon catalog entry** | Add `otel-collector` to `catalog()` in `handlers/addons.rs`; support `{deployment_name}` / `{namespace}` placeholder substitution; ConfigMap create/delete alongside sidecar attach/detach; unit tests for the substitution + configmap lifecycle | **~1.5 days** |
-| **B — Backend Helm sub-chart (Tempo)** | Vendor tempo Helm chart under `helm/deckwatch/charts/tempo/`, values.yaml gate (`tracing.deployBackend`, S3 config), auto-wire `tracing.otlpEndpoint` from the sub-chart's Service, docs entry | **~2 days** |
-| **C — Trace-link UI** | Read `tracing.ui_url` + `backend_kind` in the frontend, render "View traces" link on DeploymentDetail next to AddonsCard, add trace-id badge extraction in the log panel, empty-state ("tracing not configured") | **~1.5 days** |
-| **D — Settings surface + docs** | ConfigMap + values.yaml plumbing for `tracing.*`, admin docs (`docs/TRACING.md`) covering backend choice, addon usage, per-app opt-in, troubleshooting | **~1 day** |
-| **E — Embedded viewer (deferred)** | Full trace waterfall UI: fetch traces via the backend's query API, render spans, per-span attributes, service graph | **~5–8 days** |
-
-**Total for shippable core (Slices A–D): ~6 days.** Slice A alone
-(**~1.5 days**) delivers the "one-click sidecar" experience for shops
-that already run Tempo/Jaeger and just need the injection wired up — a
-defensible first ship.
-
-## 8. Recommended sequencing
-
-1. **Slice A first.** Backend-only PR. Adds the catalog entry, the
-   placeholder substitution, and the ConfigMap plumbing. Users with an
-   existing tracing backend and a manually-set `tracing.otlp_endpoint`
-   can click "Attach OpenTelemetry Collector" and immediately get spans
-   flowing. Low risk, low review surface, immediately useful.
-2. **Slice D next.** Documents the settings and hooks up the values so
-   subsequent slices have a home.
-3. **Slice B in parallel with C.** Backend infra (sub-chart) and frontend
-   (trace-link) don't touch each other — safe to ship independently.
-4. **Slice E deferred.** Revisit only if users ask; Grafana/Jaeger UIs
-   are good enough for a while.
-
-## 9. Risks and open questions
-
-- **Sidecar cost per pod.** ~30–50 MiB memory per collector, ~100m CPU
-  under load. For workloads with 20+ replicas this adds up. If it becomes
-  a problem, offer a "shared collector" mode (namespace-scoped Deployment
-  that the app sends to directly) as an alternative addon variant — but
-  measure first, don't preemptively add the complexity.
-- **Backend selection drift.** If we default to Tempo and a shop already
-  runs Jaeger, they can just set `tracing.backend: jaeger` and
-  `tracing.deployBackend: false`. Fine. If they *don't* set the URL
-  correctly, the sidecar buffers until it OOMs. Add a startup probe on the
-  sidecar that tests the OTLP endpoint and surfaces the failure via pod
-  events — deckwatch already renders pod events in the detail view.
-- **OTLP TLS/auth.** Tempo/Jaeger in a shared cluster is often not
-  TLS-fronted for internal OTLP; managed backends (Grafana Cloud,
-  Honeycomb) require TLS + a bearer token. Support both via
-  `tracing.otlp_insecure` (bool) and `tracing.otlp_headers_secret_ref`
-  (Secret with `x-headers` key of the form `Authorization=Bearer ...`).
-  Phase 2 — the initial ship targets in-cluster deployments.
-- **Auto-instrumentation.** OpenTelemetry has language-specific
-  auto-instrumentation (Java agent, Python `opentelemetry-instrument`,
-  Node `--require @opentelemetry/auto-instrumentations-node`, Rust manual
-  via the `tracing-opentelemetry` crate). deckwatch cannot magically
-  instrument arbitrary apps — the addon assumes the app is already
-  OTel-aware or the user has enabled auto-instrumentation via an init
-  container. Document this loudly in the addon's description hover
-  (out of the current `description` field's length budget — Phase 2 add a
-  `long_description` markdown field to `AddonDefinition`).
-- **CollectorConfig ConfigMap churn on settings changes.** When
-  `tracing.otlp_endpoint` changes in deckwatch settings, existing
-  attached collectors keep their old endpoint until the addon is
-  re-attached. Fix in Phase 2 with a reconciler that patches all
-  addon ConfigMaps on settings change; for the initial ship, document
-  that a settings change requires re-attach.
-- **`otel/opentelemetry-collector:latest` is a floating tag.** Aerospace-
-  grade practice (per `CLAUDE.md`) is pinned images. Ship pinned to the
-  current stable minor (e.g. `otel/opentelemetry-collector:0.109.0`) and
-  let the operator override via `image` at attach time. Update the pin
-  quarterly. (The team-lead spec says `:latest`; call this out as a
-  small deviation for review.)
-
-## 10. Alignment with existing deckwatch patterns
-
-- **Opt-in per-Deployment** via addon annotations — same shape as the
-  monitor CRDs in `PROMETHEUS_INTEGRATION.md`. Users always know what is
-  or isn't attached by inspecting the Deployment.
-- **Owner references for garbage collection** — ConfigMap owned by the
-  Deployment, deleted when the Deployment is deleted. Same pattern the
-  Prometheus design uses for PodMonitors.
-- **Backend feature-flagged by presence** — no `tracing.otlp_endpoint`,
-  no attach path is offered. Same as the Prometheus operator's CRDs.
-- **Sensible defaults, escape hatches for the escape hatches** — Tempo
-  is default, Jaeger is one values flag away, external collector is one
-  more. Same layering as PodMonitor → ServiceMonitor → user-owned Service.
+| Disabling a plugin does not remove what it injected at deployment level | The sidecar and env vars stay | Remove them from the YAML ([§5.2](#52-enable-for-a-deployment)) |
+| Application-level injection is static and applied with force | No per-deployment service name; same-named user variables are replaced | Use deployment-level enablement |
+| Application sidecars are also added to cronjobs | Their Jobs never complete | Do not enable at application level for applications with cronjobs |
+| Plugins cannot set `securityContext`, `args` or probes on sidecars | Hardening relies on the image defaults | — |
+| `Secret` plugin fields saved in the UI reach plugins encrypted | `OTLP_HEADERS` set that way is refused | Use `inherit_env_keys` or `update_plugin_config` |
+| Plugins cannot read `tracing.otlp_endpoint` | The endpoint must be set twice | Copy it into `OTLP_ENDPOINT` |
+| The query proxy reads tracing settings from the ConfigMap, not the database | `PUT /api/settings` does not change trace queries | Set `settings.defaults.tracing` in Helm values |
+| The query proxy speaks only Jaeger's query API | No trace queries against Tempo | Use Jaeger for queries, or Grafana links with Tempo |
+| The deployment page has no trace list | Traces are not shown in the deckwatch UI | Use the API or the backend's UI |

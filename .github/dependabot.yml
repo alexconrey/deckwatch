@@ -66,10 +66,12 @@ updates:
       # Bump manually once vue-tsc supports the native compiler.
       - dependency-name: typescript
         versions: [">=7"]
-      # vue-tsc 3 reports template type errors in our components (see #189).
-      # Remove this once the frontend type-checks cleanly with it.
+      # vue-tsc <= 3.3.14 misreads "//" inside component prop values
+      # (vuejs/language-tools#6322, fixed by #6371 but unreleased), which breaks
+      # our templates (see #189). Ignore only that range, so Dependabot offers
+      # the first fixed release on its own. Drop this once we're on it.
       - dependency-name: vue-tsc
-        update-types: ["version-update:semver-major"]
+        versions: [">=3.0.0 <3.3.15"]
     groups:
       frontend-prod:
         dependency-type: production
@@ -93,8 +95,8 @@ updates:
     commit-message:
       prefix: "chore(docker)"
     ignore:
-      # Stay on Node LTS lines (even majors); skip odd-numbered "current"
-      # releases. Move to the next LTS manually.
+      # Bump Node majors manually, together with frontend/.nvmrc (which CI
+      # reads), so CI and the release image stay on the same Node line.
       - dependency-name: node
         update-types: ["version-update:semver-major"]
     groups:

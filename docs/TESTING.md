@@ -187,7 +187,7 @@ pnpm test:e2e
 
 ```yaml
 - uses: actions/setup-node@v4
-  with: { node-version: 20 }
+  with: { node-version-file: frontend/.nvmrc }
 - run: pnpm install --frozen-lockfile
   working-directory: frontend
 - run: pnpm exec playwright install --with-deps
