@@ -372,6 +372,24 @@ pub mod capture {
 
     static KEEPALIVE: std::sync::OnceLock<tracing::Dispatch> = std::sync::OnceLock::new();
 
+    /// [`capture`] for async code on a current-thread runtime (the
+    /// `#[tokio::test]` default), where everything runs on this thread.
+    pub async fn capture_async<R>(
+        fut: impl std::future::Future<Output = R>,
+    ) -> (R, Vec<CapturedEvent>) {
+        KEEPALIVE.get_or_init(|| tracing::Dispatch::new(Sometimes));
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::registry().with(CaptureLayer {
+            events: events.clone(),
+        });
+        let guard = tracing::subscriber::set_default(subscriber);
+        tracing::callsite::rebuild_interest_cache();
+        let result = fut.await;
+        drop(guard);
+        let captured = events.lock().map(|e| e.clone()).unwrap_or_default();
+        (result, captured)
+    }
+
     /// Run `f` with a subscriber that records every event on this thread.
     pub fn capture<R>(f: impl FnOnce() -> R) -> (R, Vec<CapturedEvent>) {
         KEEPALIVE.get_or_init(|| tracing::Dispatch::new(Sometimes));

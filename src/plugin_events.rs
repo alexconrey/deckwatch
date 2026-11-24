@@ -78,6 +78,10 @@ pub mod codes {
     pub const K8S_APPLY_FAILED: &str = "plugin.k8s_apply_failed";
     /// Deckwatch refused something the plugin or its config asked for.
     pub const POLICY_REJECTED: &str = "plugin.policy_rejected";
+    /// Informational: deckwatch released the fields provisioned resources had
+    /// added to a workload, because its application has no provisioned
+    /// resources left. Host-only; not part of the SDK's list.
+    pub const FIELDS_RELEASED: &str = "plugin.fields_released";
 
     /// The reserved namespace.
     pub const RESERVED_PREFIX: &str = "plugin.";
@@ -93,6 +97,7 @@ pub mod codes {
         OUTPUT_INVALID,
         K8S_APPLY_FAILED,
         POLICY_REJECTED,
+        FIELDS_RELEASED,
     ];
 
     /// The metric label for a host code: the code without `plugin.`. Anything
