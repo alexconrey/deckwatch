@@ -57,7 +57,7 @@ sea-orm-migration = { version = "1" }
 
 # AES-256-GCM for encrypting API keys stored in the database.
 aes-gcm = "0.10"
-rand = "0.8"
+rand = "0.10"
 
 # WASM plugin host — executes external plugins fetched from Git repos.
 extism = "1.41"
