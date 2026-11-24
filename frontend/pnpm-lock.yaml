@@ -33,8 +33,8 @@ importers:
         specifier: ^3.13.8
         version: 3.13.8(typescript@5.7.3)(vite-plugin-vuetify@2.1.3)(vue@3.5.46(typescript@5.7.3))
       web-vitals:
-        specifier: ^4.2.4
-        version: 4.2.4
+        specifier: ^6.2.3
+        version: 6.2.3
     devDependencies:
       '@pinia/testing':
         specifier: ^2.0.2
@@ -1009,8 +1009,8 @@ packages:
       webpack-plugin-vuetify:
         optional: true
 
-  web-vitals@4.2.4:
-    resolution: {integrity: sha512-r4DIlprAGwJ7YM11VZp4R884m0Vmgr6EAKe3P+kO0PPj3Unqyvv59rczf6UiGcb9Z8QxZVcqKNwv/g0WNdWwsw==}
+  web-vitals@6.2.3:
+    resolution: {integrity: sha512-Dmy+vdO1UPMqXiAtZSNayhl4f794Bxfd94W4HIj2HlYtczEQfEOon969memlcpcHrTuOKLa5baFjX7WbgmOq+A==}
 
   whatwg-mimetype@3.0.0:
     resolution: {integrity: sha512-nt+N2dzIutVRxARx1nghPKGv1xHikU7HKdfafKkLNLindmPU/ch3U31NOCGGA/dmPcmb1VlofO0vnKAcsm0o/Q==}
@@ -1820,7 +1820,7 @@ snapshots:
       typescript: 5.7.3
       vite-plugin-vuetify: 2.1.3(supports-color@7.2.0)(vite@6.4.6(@types/node@26.6.6))(vue@3.5.46(typescript@5.7.3))(vuetify@3.13.8)
 
-  web-vitals@4.2.4: {}
+  web-vitals@6.2.3: {}
 
   whatwg-mimetype@3.0.0: {}
 
