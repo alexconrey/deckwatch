@@ -2292,15 +2292,23 @@ async fn tool_get_plugin_config(
     // Append any config keys that exist in settings but were not declared in
     // the schema (e.g. keys added manually before the plugin published a schema,
     // or internal keys like CURRENT_TIMESTAMP that plugins read internally).
+    // Undeclared keys are where operators put cloud credentials by hand
+    // (see `PluginConfig::config`), so treat them as secret: report that a
+    // value is set without revealing it.
     for (key, val) in &cfg.config {
         if !schema_keys.contains(key.as_str()) {
+            let value = if val.is_empty() {
+                serde_json::Value::Null
+            } else {
+                serde_json::Value::String("***".to_string())
+            };
             config_entries.push(serde_json::json!({
                 "key": key,
                 "label": key,
                 "description": "",
                 "field_type": "string",
-                "value": val,
-                "is_secret": false,
+                "value": value,
+                "is_secret": true,
             }));
         }
     }

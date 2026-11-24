@@ -550,23 +550,145 @@ pub async fn get_settings(
 ) -> Result<Json<DeckwatchSettings>, AppError> {
     let mut settings = load_settings_from_db(&state).await;
     inject_builtin_registry(&state, &mut settings);
-    // Never return actual encrypted keys to the frontend. Replace non-null
-    // values with the sentinel "configured" so the UI can show a badge.
-    mask_credentials(&mut settings);
+    // This route is public (the SPA reads `auth` from it before login), so
+    // it must never return secrets: replace them with MASKED_VALUE.
+    mask_secrets(&mut settings, &public_plugin_config_keys(&state).await);
     Ok(Json(settings))
 }
 
-/// Replace actual encrypted credential values with `"configured"` so the
-/// API never leaks ciphertext (or plaintext) to the frontend.
-fn mask_credentials(settings: &mut DeckwatchSettings) {
-    if let Some(creds) = &mut settings.credentials {
-        if creds.anthropic_api_key.is_some() {
-            creds.anthropic_api_key = Some("configured".to_string());
+/// Placeholder returned in place of secret values. The frontend already keys
+/// off this exact string (credential badges, PluginSettingsPage secret
+/// inputs). `put_settings` swaps it back for the stored value.
+pub const MASKED_VALUE: &str = "configured";
+
+/// Plugin config keys that loaded plugins declare as non-secret in their
+/// `config_schema`, keyed by plugin name. These are the only plugin config
+/// values returned in clear.
+pub async fn public_plugin_config_keys(
+    state: &AppState,
+) -> std::collections::HashMap<String, std::collections::HashSet<String>> {
+    state
+        .plugins
+        .read()
+        .await
+        .iter()
+        .map(|p| {
+            let keys = p
+                .metadata
+                .config_schema
+                .iter()
+                .filter(|f| f.field_type != crate::plugins::ConfigFieldType::Secret)
+                .map(|f| f.key.clone())
+                .collect();
+            (p.name.clone(), keys)
+        })
+        .collect()
+}
+
+/// Replace every secret in `settings` with [`MASKED_VALUE`] before it leaves
+/// the server. Empty values stay empty so the UI can still tell "unset" from
+/// "set".
+///
+/// `plugins[].config` is documented as the place for cloud credentials
+/// (`AWS_SECRET_ACCESS_KEY`, service-account JSON, ...), so it fails closed:
+/// a value is only shown when the plugin's schema declares that key
+/// non-secret.
+fn mask_secrets(
+    settings: &mut DeckwatchSettings,
+    public_plugin_keys: &std::collections::HashMap<String, std::collections::HashSet<String>>,
+) {
+    let mask = |v: &mut String| {
+        if !v.is_empty() {
+            *v = MASKED_VALUE.to_string();
         }
-        if creds.gcp_sa_key.is_some() {
-            creds.gcp_sa_key = Some("configured".to_string());
+    };
+    if let Some(creds) = &mut settings.credentials {
+        for v in [&mut creds.anthropic_api_key, &mut creds.gcp_sa_key]
+            .into_iter()
+            .flatten()
+        {
+            mask(v);
         }
     }
+    for t in &mut settings.git_token_secrets {
+        if let Some(v) = &mut t.encrypted_token {
+            mask(v);
+        }
+    }
+    if let Some(n) = &mut settings.notifications {
+        // Slack/Teams/Discord incoming-webhook URLs are bearer credentials.
+        mask(&mut n.webhook_url);
+    }
+    for p in &mut settings.plugins {
+        let public = public_plugin_keys.get(&p.name);
+        for (key, value) in p.config.iter_mut() {
+            if !public.is_some_and(|keys| keys.contains(key)) {
+                mask(value);
+            }
+        }
+    }
+}
+
+/// Reverse [`mask_secrets`] on a settings document submitted by a client,
+/// using the stored copy.
+///
+/// * `credentials` and `git_token_secrets[].encrypted_token` are
+///   server-managed (only `POST /api/settings/credentials` and the git-token
+///   routes change them), so they always come from `stored`. The frontend
+///   omits `credentials` from its payload and some pages PUT the masked GET
+///   response back verbatim, so taking them from the request used to wipe or
+///   corrupt the stored ciphertext.
+/// * `notifications.webhook_url` and `plugins[].config` values still equal
+///   to [`MASKED_VALUE`] are replaced by the stored value. A masked plugin
+///   value with nothing stored under that key (e.g. the key was renamed in
+///   the UI) is rejected rather than persisting the placeholder.
+fn restore_secrets(
+    incoming: &mut DeckwatchSettings,
+    stored: &DeckwatchSettings,
+) -> Result<(), String> {
+    incoming.credentials.clone_from(&stored.credentials);
+
+    for t in &mut incoming.git_token_secrets {
+        t.encrypted_token = stored
+            .git_token_secrets
+            .iter()
+            .find(|s| s.name == t.name)
+            .and_then(|s| s.encrypted_token.clone());
+    }
+
+    if let Some(n) = &mut incoming.notifications {
+        if n.webhook_url == MASKED_VALUE {
+            n.webhook_url = stored
+                .notifications
+                .as_ref()
+                .map(|s| s.webhook_url.clone())
+                .unwrap_or_default();
+        }
+    }
+
+    for p in &mut incoming.plugins {
+        let stored_config = stored
+            .plugins
+            .iter()
+            .find(|s| s.name == p.name)
+            .map(|s| &s.config);
+        for (key, value) in p.config.iter_mut() {
+            if value != MASKED_VALUE {
+                continue;
+            }
+            match stored_config.and_then(|c| c.get(key)) {
+                Some(original) => value.clone_from(original),
+                None => {
+                    return Err(format!(
+                        "plugin '{}' config key '{key}' still holds the masked placeholder \
+                         \"{MASKED_VALUE}\" and has no stored value; re-enter the value",
+                        p.name
+                    ))
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Load settings from the database. If the DB row doesn't exist yet, attempt
@@ -635,6 +757,11 @@ pub async fn put_settings(
     // from the deployment env var, not user data.
     settings.oci_registries.retain(|r| !r.builtin);
 
+    // Clients only ever see masked secrets; put the real values back (and
+    // keep server-managed credentials) before persisting.
+    let stored = load_settings_from_db(&state).await;
+    restore_secrets(&mut settings, &stored).map_err(AppError::BadRequest)?;
+
     for t in &mut settings.git_token_secrets {
         if t.namespace.is_empty() {
             t.namespace.clone_from(&state.settings_namespace);
@@ -680,6 +807,7 @@ pub async fn put_settings(
 
     let mut result = settings;
     inject_builtin_registry(&state, &mut result);
+    mask_secrets(&mut result, &public_plugin_config_keys(&state).await);
 
     Ok(Json(result))
 }
