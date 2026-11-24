@@ -33,7 +33,7 @@ base64 = "0.22"
 anyhow = "1"
 metrics = "0.24"
 metrics-exporter-prometheus = { version = "0.17", default-features = false }
-jsonwebtoken = "9"
+jsonwebtoken = { version = "12", features = ["rust_crypto"] }
 sha2 = "0.10"
 uuid = { version = "1", features = ["v4"] }
 tokio-util = { version = "0.7", features = ["io"] }
@@ -60,7 +60,7 @@ aes-gcm = "0.10"
 rand = "0.8"
 
 # WASM plugin host — executes external plugins fetched from Git repos.
-extism = "1"
+extism = "1.41"
 
 [dev-dependencies]
 tempfile = "3"
