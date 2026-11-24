@@ -29,7 +29,7 @@
     "@pinia/testing": "^2.0.2",
     "@playwright/test": "^1.65.1",
     "@types/node": "^26.6.6",
-    "@vitejs/plugin-vue": "^5.2.4",
+    "@vitejs/plugin-vue": "^6.0.11",
     "@vitest/coverage-v8": "^4.1.12",
     "@vue/test-utils": "^2.6.0",
     "happy-dom": "^21.0.4",
