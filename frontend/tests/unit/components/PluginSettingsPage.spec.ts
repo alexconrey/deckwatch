@@ -431,3 +431,36 @@ describe("PluginSettingsPage — save payload construction", () => {
     expect((wrapper.vm as any).formValues.API_KEY).toBe("");
   });
 });
+
+// ---------------------------------------------------------------------------
+// Loaded binary identity (sha256 / loaded_at)
+// ---------------------------------------------------------------------------
+
+describe("PluginSettingsPage — loaded binary info", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockSettingsGet.mockResolvedValue(makeSettings());
+  });
+
+  it("shows the SHA-256 and load time of the loaded binary", async () => {
+    const sha = "a".repeat(64);
+    mockListPlugins.mockResolvedValue([
+      { ...makePlugin([]), sha256: sha, loaded_at: "2026-11-24T12:00:00+00:00" },
+    ]);
+
+    const wrapper = mountPage();
+    await flushPromises();
+
+    expect(wrapper.find('[data-testid="plugin-sha256"]').text()).toBe(sha);
+    expect(wrapper.find('[data-testid="plugin-loaded-at"]').exists()).toBe(true);
+  });
+
+  it("omits the binary info block when the backend does not report it", async () => {
+    mockListPlugins.mockResolvedValue([makePlugin([])]);
+
+    const wrapper = mountPage();
+    await flushPromises();
+
+    expect(wrapper.find('[data-testid="plugin-binary-info"]').exists()).toBe(false);
+  });
+});

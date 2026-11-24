@@ -462,6 +462,27 @@ pub struct LoadedPlugin {
     /// Metadata from the plugin's `metadata()` export — populated at load time.
     /// Plugins without a `metadata()` export get a default with no dependencies.
     pub metadata: PluginMetadata,
+    /// Lowercase hex SHA-256 of `wasm_bytes`, computed once at load time.
+    /// Identifies the exact binary in memory even when two builds report the
+    /// same `metadata.version` (e.g. an uploaded fix build without a version bump).
+    pub sha256: String,
+    /// RFC 3339 UTC timestamp of when this binary was loaded into memory.
+    pub loaded_at: String,
+}
+
+/// Lowercase hex SHA-256 digest of `bytes` — same format as `shasum -a 256`.
+pub fn sha256_hex(bytes: &[u8]) -> String {
+    format!("{:x}", Sha256::digest(bytes))
+}
+
+/// Current UTC time as an RFC 3339 string, without a direct `chrono` dependency.
+fn now_rfc3339() -> String {
+    let d = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default();
+    sea_orm::prelude::DateTimeUtc::from_timestamp(d.as_secs() as i64, 0)
+        .map(|t| t.to_rfc3339())
+        .unwrap_or_default()
 }
 
 // ── Validation ────────────────────────────────────────────────────────────────
@@ -520,6 +541,8 @@ pub async fn fetch_and_validate(
     let size = bytes.len();
     let plugin = LoadedPlugin {
         name: cfg.name.clone(),
+        sha256: sha256_hex(&bytes),
+        loaded_at: now_rfc3339(),
         wasm_bytes: Arc::new(bytes),
         allowed_hosts: cfg.allowed_hosts.clone(),
         config: cfg.config.clone(),
@@ -646,7 +669,8 @@ pub async fn fetch_plugins(settings: &DeckwatchSettings, state: &AppState) -> Ve
         let fetch_start = std::time::Instant::now();
         match fetch_bytes(cfg, &http, settings, state).await {
             Ok(bytes) => {
-                tracing::info!(plugin = %cfg.name, bytes = bytes.len(), "loaded plugin");
+                let sha256 = sha256_hex(&bytes);
+                tracing::info!(plugin = %cfg.name, bytes = bytes.len(), sha256 = %sha256, "loaded plugin");
                 let metadata = load_metadata_from_bytes(&bytes, &cfg.allowed_hosts, &cfg.config)
                     .unwrap_or_else(|e| {
                         tracing::debug!(plugin = %cfg.name, error = %e, "metadata() not exported or failed; using defaults");
@@ -678,6 +702,8 @@ pub async fn fetch_plugins(settings: &DeckwatchSettings, state: &AppState) -> Ve
                     inherit_env_keys: cfg.inherit_env_keys.clone(),
                     inherit_env_file_keys: cfg.inherit_env_file_keys.clone(),
                     metadata,
+                    sha256,
+                    loaded_at: now_rfc3339(),
                 });
                 metrics::record_plugin_load(&cfg.name, "loaded");
             }
@@ -732,9 +758,7 @@ async fn fetch_bytes(
     // development workflows aren't blocked while still surfacing the gap.
     match &cfg.sha256 {
         Some(expected_hex) => {
-            let mut hasher = Sha256::new();
-            hasher.update(&bytes);
-            let actual_hex = format!("{:x}", hasher.finalize());
+            let actual_hex = sha256_hex(&bytes);
             if actual_hex != *expected_hex {
                 return Err(anyhow::anyhow!(
                     "SHA-256 mismatch for plugin '{}': expected {expected_hex}, got {actual_hex}",
@@ -1854,7 +1878,34 @@ mod tests {
                 depends_on: depends_on.into_iter().map(String::from).collect(),
                 ..Default::default()
             },
+            sha256: sha256_hex(&[]),
+            loaded_at: String::new(),
         }
+    }
+
+    #[test]
+    fn sha256_hex_matches_shasum_format() {
+        // `printf '' | shasum -a 256` and `printf 'abc' | shasum -a 256`
+        assert_eq!(
+            sha256_hex(b""),
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
+        assert_eq!(
+            sha256_hex(b"abc"),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+    }
+
+    #[test]
+    fn now_rfc3339_is_parseable_utc() {
+        let ts = now_rfc3339();
+        let parsed = sea_orm::prelude::DateTimeWithTimeZone::parse_from_rfc3339(&ts)
+            .expect("loaded_at should be valid RFC 3339");
+        assert_eq!(parsed.offset().local_minus_utc(), 0, "should be UTC");
+        assert!(
+            parsed.timestamp() > 1_700_000_000,
+            "timestamp should be recent"
+        );
     }
 
     #[test]
