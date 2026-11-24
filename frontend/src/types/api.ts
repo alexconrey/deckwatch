@@ -998,7 +998,9 @@ export interface TemplatesUpdateRequest {
 
 // --- Plugin schema types (Feature 1: self-describing plugin config) ---
 
-export type ConfigFieldType = 'string' | 'secret' | 'bool' | 'select';
+/** `key_value` has no dedicated editor yet (see TODO.md) and falls back to a
+ *  text input of its JSON value, as `unknown` (a newer plugin SDK type) does. */
+export type ConfigFieldType = 'string' | 'secret' | 'bool' | 'key_value' | 'select' | 'unknown';
 
 export interface ConfigField {
   key: string;

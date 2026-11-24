@@ -121,6 +121,29 @@ Plugins are configured as part of `DeckwatchSettings`, stored in the deckwatch d
 }
 ```
 
+### Config field types
+
+A plugin declares its settings in `metadata().config_schema`, and the plugin
+settings page renders one control per field. Every value is stored as a string.
+
+| `field_type` | Control | Stored value |
+|---|---|---|
+| `string` | Text input | As entered |
+| `secret` | Masked input | Encrypted at rest |
+| `bool` | Switch | `"true"` or `"false"` |
+| `key_value` | Text input of the JSON value (a row-per-pair editor is planned) | JSON object of string keys to string values, e.g. `{"Team":"platform"}`; empty means no pairs |
+| `select` | Dropdown of `options` | The chosen option |
+| anything else | Text input | As entered |
+
+- **`key_value` values are validated on save**, both in the UI and in MCP
+  `update_plugin_config`. Anything but an object of strings is rejected with a
+  400 or an error, and nothing in that save is written. Over MCP you can pass the
+  object itself (`{"RESOURCE_TAGS": {"Team": "platform"}}`) or its JSON string.
+- **An unrecognised `field_type`**, from a plugin built against a newer SDK, is
+  treated as plain text instead of failing the whole `metadata()` parse. Before
+  this, one unknown type made deckwatch drop every config field and resource
+  the plugin declares.
+
 ### Source types
 
 #### `github` — GitHub repository

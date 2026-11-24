@@ -118,6 +118,10 @@ pub async fn save_plugin_config(
             .unwrap_or_default()
     };
 
+    // Validate key_value fields up front so a bad value can't leave the config
+    // half-saved.
+    crate::plugins::validate_key_value_updates(&schema, &body).map_err(AppError::BadRequest)?;
+
     // Insert each submitted key-value pair, encrypting Secret fields.
     for (key, value) in &body {
         let is_secret = schema

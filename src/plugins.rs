@@ -242,8 +242,57 @@ pub enum ConfigFieldType {
     Secret,
     /// Checkbox. Stored as `"true"` or `"false"`.
     Bool,
+    /// Key/value pairs, edited as one row per pair (e.g. resource tags). Stored
+    /// as a JSON object of string keys to string values, e.g.
+    /// `{"Team":"platform"}`; empty means no pairs. Validated on save by
+    /// [`validate_key_value_field`].
+    KeyValue,
     /// Dropdown. The field must have a non-empty `options` list.
     Select,
+    /// A field type this deckwatch doesn't know (from a newer plugin SDK).
+    ///
+    /// Without this fallback, one unrecognised `field_type` fails the whole
+    /// `metadata()` parse, and the plugin silently loses every config field and
+    /// resource it declares. Rendered as a plain text input. serde requires
+    /// `#[serde(other)]` on the last variant.
+    #[serde(other)]
+    Unknown,
+}
+
+/// Validate every `key_value` field among `updates` against `schema`. Returns
+/// the first error, prefixed with the field key. Keys not in the schema, or of
+/// other types, are not checked here.
+pub fn validate_key_value_updates<'a>(
+    schema: &[ConfigField],
+    updates: impl IntoIterator<Item = (&'a String, &'a String)>,
+) -> Result<(), String> {
+    for (key, value) in updates {
+        let is_key_value = schema
+            .iter()
+            .any(|f| f.key == *key && f.field_type == ConfigFieldType::KeyValue);
+        if is_key_value {
+            validate_key_value_field(value).map_err(|e| format!("{key}: {e}"))?;
+        }
+    }
+    Ok(())
+}
+
+/// Check the stored value of a [`ConfigFieldType::KeyValue`] field: a JSON
+/// object of string keys to string values, or empty for no pairs. Mirrors
+/// `deckwatch_plugin_sdk::parse_key_value_field`, which plugins use to read it.
+pub fn validate_key_value_field(raw: &str) -> Result<(), String> {
+    if raw.trim().is_empty() {
+        return Ok(());
+    }
+    let value: serde_json::Value =
+        serde_json::from_str(raw).map_err(|e| format!("not a JSON object: {e}"))?;
+    let object = value
+        .as_object()
+        .ok_or("expected a JSON object of string keys to string values")?;
+    match object.iter().find(|(_, v)| !v.is_string()) {
+        Some((k, v)) => Err(format!("value for {k:?} must be a string, got {v}")),
+        None => Ok(()),
+    }
 }
 
 /// A single field in a plugin's self-declared configuration schema.
@@ -1912,6 +1961,104 @@ mod tests {
             serde_json::to_string(&ConfigFieldType::Bool).unwrap(),
             "\"bool\""
         );
+    }
+
+    #[test]
+    fn key_value_and_unknown_field_types_round_trip() {
+        assert_eq!(
+            serde_json::to_string(&ConfigFieldType::KeyValue).unwrap(),
+            "\"key_value\""
+        );
+        let kv: ConfigFieldType = serde_json::from_str("\"key_value\"").unwrap();
+        assert_eq!(kv, ConfigFieldType::KeyValue);
+        let future: ConfigFieldType = serde_json::from_str("\"color_picker\"").unwrap();
+        assert_eq!(future, ConfigFieldType::Unknown);
+    }
+
+    // Regression guard: an unrecognised field_type used to fail the whole
+    // metadata() parse, so the plugin silently lost every config field and
+    // resource it declares.
+    #[test]
+    fn metadata_with_a_future_field_type_still_parses() {
+        let meta: PluginMetadata = serde_json::from_str(
+            r#"{"name":"aws","config_schema":[
+                {"key":"AWS_REGION","label":"Region","field_type":"string"},
+                {"key":"RESOURCE_TAGS","label":"Tags","field_type":"key_value"},
+                {"key":"FUTURE","label":"Future","field_type":"some_future_type"}
+            ]}"#,
+        )
+        .expect("metadata must parse despite an unknown field type");
+        let types: Vec<_> = meta
+            .config_schema
+            .iter()
+            .map(|f| f.field_type.clone())
+            .collect();
+        assert_eq!(
+            types,
+            vec![
+                ConfigFieldType::String,
+                ConfigFieldType::KeyValue,
+                ConfigFieldType::Unknown
+            ]
+        );
+    }
+
+    #[test]
+    fn validate_key_value_updates_checks_only_key_value_fields() {
+        let field = |key: &str, field_type| ConfigField {
+            key: key.to_string(),
+            label: key.to_string(),
+            description: String::new(),
+            field_type,
+            default: None,
+            required: false,
+            options: vec![],
+            env_source: None,
+        };
+        let schema = vec![
+            field("RESOURCE_TAGS", ConfigFieldType::KeyValue),
+            field("NOTE", ConfigFieldType::String),
+        ];
+        let good: std::collections::HashMap<String, String> = [
+            (
+                "RESOURCE_TAGS".to_string(),
+                r#"{"Team":"platform"}"#.to_string(),
+            ),
+            (
+                "NOTE".to_string(),
+                "Team=platform is fine in a string field".to_string(),
+            ),
+            ("UNDECLARED".to_string(), "{not json".to_string()),
+        ]
+        .into();
+        assert!(validate_key_value_updates(&schema, &good).is_ok());
+
+        let bad: std::collections::HashMap<String, String> =
+            [("RESOURCE_TAGS".to_string(), "Team=platform".to_string())].into();
+        let err = validate_key_value_updates(&schema, &bad).unwrap_err();
+        assert!(err.starts_with("RESOURCE_TAGS: "), "{err}");
+    }
+
+    #[test]
+    fn validate_key_value_field_accepts_objects_of_strings_and_empty() {
+        for ok in ["", "  ", "{}", r#"{"Team":"platform","CostCenter":"1234"}"#] {
+            assert!(
+                validate_key_value_field(ok).is_ok(),
+                "{ok:?} should be accepted"
+            );
+        }
+        for bad in [
+            "Team=platform",
+            r#"["Team"]"#,
+            r#"{"Count":3}"#,
+            r#"{"Nested":{"a":"b"}}"#,
+            "{oops",
+        ] {
+            assert!(
+                validate_key_value_field(bad).is_err(),
+                "{bad:?} should be rejected"
+            );
+        }
     }
 
     fn make_plugin(name: &str, provides: Vec<&str>, depends_on: Vec<&str>) -> LoadedPlugin {
