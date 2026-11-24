@@ -1,4 +1,5 @@
 import "vuetify/styles";
+import "@/styles/vuetify-v3-compat.css";
 import { createVuetify, type ThemeDefinition } from "vuetify";
 import * as components from "vuetify/components";
 import * as directives from "vuetify/directives";

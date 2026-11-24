@@ -257,7 +257,6 @@ const tagHeaders = [
           v-else
           no-gutters
           class="fill-height"
-          style="height: 620px"
         >
           <!-- Left pane: repositories -->
           <v-col

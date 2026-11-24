@@ -1,0 +1,120 @@
+/*
+ * Vuetify 3 -> 4 compatibility styles.
+ *
+ * Vuetify 4 removed or restyled several global styles that our templates
+ * still rely on. This file restores the Vuetify 3 look so the upgrade does
+ * not restyle the whole UI in one go, following the "multi-step migration"
+ * advice in the upgrade guide:
+ * https://vuetifyjs.com/en/getting-started/upgrade-guide/#multi-step-migration
+ *
+ * Every rule sits inside one of Vuetify's own cascade layers, so utility
+ * classes (mb-2, font-weight-bold, text-none, ...) and our unlayered
+ * component styles keep overriding it exactly as they did in Vuetify 3.
+ * The sections are independent: delete a section once the templates it
+ * covers have been migrated to the Vuetify 4 / MD3 equivalents.
+ */
+
+/*
+ * 1. CSS reset (vuetify#20960).
+ * Vuetify 3 zeroed margin/padding on every element; Vuetify 4 does not, so
+ * headings, paragraphs, lists and <pre> picked up browser default margins.
+ * Vuetify 3 also used the "monospace, monospace" trick, which stops browsers
+ * shrinking bare <code>/<pre> text to the 13px default monospace size.
+ * Mirrors the snippet in the upgrade guide's "CSS reset" section.
+ */
+@layer vuetify-core.reset {
+  ul, ol, figure, details, summary {
+    padding: 0;
+    margin: 0;
+  }
+
+  h1, h2, h3, h4, h5, h6, p, pre {
+    margin: 0;
+  }
+
+  code, kbd, pre, samp {
+    font-family: monospace, monospace;
+  }
+
+  pre {
+    font-size: 1em;
+  }
+}
+
+/*
+ * 2. MD2 typography classes (text-h1 ... text-overline).
+ * Vuetify 4 removed them in favour of the MD3 names (text-headline-small,
+ * text-body-medium, ...), so ~460 call sites silently lost their styling.
+ * Values are copied from Vuetify 3.13.8. In Vuetify 3, font-size,
+ * letter-spacing and text-transform were !important (they beat component
+ * styles) while font-weight, line-height and font-family were not (component
+ * styles such as .v-card-title won). The two layers reproduce that split.
+ * Migration map: https://vuetifyjs.com/en/getting-started/typography-migration/
+ */
+@layer vuetify-utilities.typography {
+  .text-h1 { font-size: 6rem; letter-spacing: -0.015625em; text-transform: none; }
+  .text-h2 { font-size: 3.75rem; letter-spacing: -0.0083333333em; text-transform: none; }
+  .text-h3 { font-size: 3rem; letter-spacing: normal; text-transform: none; }
+  .text-h4 { font-size: 2.125rem; letter-spacing: 0.0073529412em; text-transform: none; }
+  .text-h5 { font-size: 1.5rem; letter-spacing: normal; text-transform: none; }
+  .text-h6 { font-size: 1.25rem; letter-spacing: 0.0125em; text-transform: none; }
+  .text-subtitle-1 { font-size: 1rem; letter-spacing: 0.009375em; text-transform: none; }
+  .text-subtitle-2 { font-size: 0.875rem; letter-spacing: 0.0071428571em; text-transform: none; }
+  .text-body-1 { font-size: 1rem; letter-spacing: 0.03125em; text-transform: none; }
+  .text-body-2 { font-size: 0.875rem; letter-spacing: 0.0178571429em; text-transform: none; }
+  .text-button { font-size: 0.875rem; letter-spacing: 0.0892857143em; text-transform: uppercase; }
+  .text-caption { font-size: 0.75rem; letter-spacing: 0.0333333333em; text-transform: none; }
+  .text-overline { font-size: 0.75rem; letter-spacing: 0.1666666667em; text-transform: uppercase; }
+}
+
+@layer vuetify-core.base {
+  .text-h1, .text-h2, .text-h3, .text-h4, .text-h5, .text-h6 {
+    font-family: var(--v-font-heading, var(--v-font-body, "Roboto", sans-serif));
+  }
+  .text-subtitle-1, .text-subtitle-2, .text-body-1, .text-body-2,
+  .text-button, .text-caption, .text-overline {
+    font-family: var(--v-font-body, "Roboto", sans-serif);
+  }
+
+  .text-h1 { font-weight: 300; line-height: 1; }
+  .text-h2 { font-weight: 300; line-height: 1; }
+  .text-h3 { font-weight: 400; line-height: 1.05; }
+  .text-h4 { font-weight: 400; line-height: 1.175; }
+  .text-h5 { font-weight: 400; line-height: 1.333; }
+  .text-h6 { font-weight: 500; line-height: 1.6; }
+  .text-subtitle-1 { font-weight: normal; line-height: 1.75; }
+  .text-subtitle-2 { font-weight: 500; line-height: 1.6; }
+  .text-body-1 { font-weight: 400; line-height: 1.5; }
+  .text-body-2 { font-weight: 400; line-height: 1.425; }
+  .text-button { font-weight: 500; line-height: 2.6; }
+  .text-caption { font-weight: 400; line-height: 1.667; }
+  .text-overline { font-weight: 500; line-height: 2.667; }
+}
+
+/*
+ * 3. Component typography that Vuetify 4 moved to MD3 sizes.
+ * Card titles went from 20px/500 to 22px/400 and buttons lost their
+ * uppercase label style (vuetify#21079). Values are copied from 3.13.8.
+ */
+@layer vuetify-overrides {
+  .v-card-title {
+    font-size: 1.25rem;
+    font-weight: 500;
+    letter-spacing: 0.0125em;
+  }
+  .v-card .v-card-title { line-height: 1.6; }
+  .v-card--density-comfortable .v-card-title { line-height: 1.75rem; }
+  .v-card--density-compact .v-card-title { line-height: 1.55rem; }
+
+  .v-empty-state__title {
+    font-size: 1.25rem;
+    font-weight: 500;
+    line-height: 1.6;
+  }
+
+  .v-btn {
+    letter-spacing: 0.0892857143em;
+    text-indent: 0.0892857143em;
+    text-transform: uppercase;
+  }
+}
