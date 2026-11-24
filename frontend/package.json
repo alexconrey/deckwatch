@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "vite",
     "build": "vue-tsc --noEmit && vite build",
+    "typecheck:test": "vue-tsc -p tsconfig.test.json --noEmit",
     "preview": "vite preview",
     "test": "vitest run",
     "test:watch": "vitest",
@@ -27,6 +28,7 @@
   "devDependencies": {
     "@pinia/testing": "^2.0.2",
     "@playwright/test": "^1.65.1",
+    "@types/node": "^26.6.6",
     "@vitejs/plugin-vue": "^5.2.4",
     "@vitest/coverage-v8": "^4.1.12",
     "@vue/test-utils": "^2.6.0",
