@@ -46,7 +46,7 @@ async-trait = "0.1"
 # pulls in the standard AWS credential chain (env, IMDS, IRSA).
 object_store = { version = "0.11", features = ["aws"] }
 bytes = "1"
-ed25519-dalek = { version = "2", features = ["rand_core"] }
+ed25519-dalek = { version = "3", features = ["rand_core"] }
 rcgen = "0.13"
 time = "0.3"
 
@@ -56,8 +56,8 @@ sea-orm = { version = "1", features = ["sqlx-sqlite", "sqlx-postgres", "sqlx-mys
 sea-orm-migration = { version = "1" }
 
 # AES-256-GCM for encrypting API keys stored in the database.
-aes-gcm = "0.10"
-rand = "0.8"
+aes-gcm = "0.11"
+rand = "0.10"
 
 # WASM plugin host — executes external plugins fetched from Git repos.
 extism = "1.41"

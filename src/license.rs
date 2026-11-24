@@ -176,7 +176,15 @@ pub struct License {
 impl License {
     /// Verify the license signature against [`EMBEDDED_PUBLIC_KEY`].
     pub fn verify(&self) -> Result<(), LicenseError> {
-        let key = VerifyingKey::from_bytes(&EMBEDDED_PUBLIC_KEY)
+        self.verify_with_key(&EMBEDDED_PUBLIC_KEY)
+    }
+
+    /// The check behind [`License::verify`], taking the public key as a
+    /// parameter so tests can run the exact production path with a key whose
+    /// private half they hold. Deliberately private: production code must
+    /// only ever verify against [`EMBEDDED_PUBLIC_KEY`].
+    fn verify_with_key(&self, public_key: &[u8; 32]) -> Result<(), LicenseError> {
+        let key = VerifyingKey::from_bytes(public_key)
             .map_err(|e| LicenseError::InvalidPublicKey(e.to_string()))?;
         let sig = Signature::from_bytes(&self.signature);
         key.verify(&self.payload_json, &sig)
@@ -440,7 +448,6 @@ pub fn init_entitlements() -> Entitlements {
 mod tests {
     use super::*;
     use ed25519_dalek::{Signer, SigningKey};
-    use rand::rngs::OsRng;
 
     #[test]
     fn community_has_no_features() {
@@ -604,7 +611,9 @@ mod tests {
         use base64::engine::general_purpose::URL_SAFE_NO_PAD;
         use base64::Engine as _;
 
-        let key = SigningKey::generate(&mut OsRng);
+        // rand 0.10's ThreadRng implements rand_core 0.10's `CryptoRng`, which
+        // is what ed25519-dalek 3's `generate` requires.
+        let key = SigningKey::generate(&mut rand::rng());
         let payload = LicensePayload {
             iss: "test".into(),
             sub: "cust-6".into(),
@@ -633,6 +642,10 @@ mod tests {
             &Signature::from_bytes(&parsed.signature),
         )
         .expect("signature verifies against original signing key");
+        // Same check through the production verification path.
+        parsed
+            .verify_with_key(vk.as_bytes())
+            .expect("production verify path accepts the signing key");
     }
 
     #[test]
@@ -670,5 +683,122 @@ mod tests {
         let at_boundary = Timestamp::from_second(exp + GRACE_PERIOD_SECS).unwrap();
         let ent = Entitlements::from_license(&license, at_boundary);
         assert_eq!(ent.tier(), Tier::Community);
+    }
+
+    // Known-answer vector produced with ed25519-dalek 2.2.0 (main before the
+    // 3.x upgrade) and cross-checked with OpenSSL via Python `cryptography`.
+    // Ed25519 signing is deterministic (RFC 8032), so any compliant
+    // implementation must reproduce these bytes exactly.
+    const KAT_SEED: [u8; 32] = [42u8; 32];
+    const KAT_PUBLIC_KEY_HEX: &str =
+        "197f6b23e16c8532c6abc838facd5ea789be0c76b2920334039bfa8b3d368d61";
+    const KAT_PAYLOAD: &[u8] = br#"{"iss":"https://license.deckwatch.io","sub":"cust-kat","iat":1700000000,"exp":9999999999,"jti":"lic-kat","tier":"enterprise","features":["custom_branding"],"limits":{"max_users":50,"max_clusters":3},"customer":{"org":"Acme","contact":"ops@acme.example"}}"#;
+    const KAT_SIGNATURE_HEX: &str = "ffc3336116bb29d7dbb1f6720436bf5e779677f1f22398b911a42e4ba7111f5820f37ac172ecdfc7016ecbac054b19bed82a5b6d9cb7e3bf5f1ac7a45a502b0f";
+    const KAT_BLOB: &str = "eyJpc3MiOiJodHRwczovL2xpY2Vuc2UuZGVja3dhdGNoLmlvIiwic3ViIjoiY3VzdC1rYXQiLCJpYXQiOjE3MDAwMDAwMDAsImV4cCI6OTk5OTk5OTk5OSwianRpIjoibGljLWthdCIsInRpZXIiOiJlbnRlcnByaXNlIiwiZmVhdHVyZXMiOlsiY3VzdG9tX2JyYW5kaW5nIl0sImxpbWl0cyI6eyJtYXhfdXNlcnMiOjUwLCJtYXhfY2x1c3RlcnMiOjN9LCJjdXN0b21lciI6eyJvcmciOiJBY21lIiwiY29udGFjdCI6Im9wc0BhY21lLmV4YW1wbGUifX0._8MzYRa7KdfbsfZyBDa_XneWd_HyI5i5EaQuS6cRH1gg83rBcuzfxwFuy6wFSxm-2CpbbZy3479fGsekWlArDw";
+
+    fn hex(bytes: &[u8]) -> String {
+        bytes.iter().map(|b| format!("{b:02x}")).collect()
+    }
+
+    fn kat_public_key() -> [u8; 32] {
+        SigningKey::from_bytes(&KAT_SEED).verifying_key().to_bytes()
+    }
+
+    #[test]
+    fn signing_matches_previous_release_vector() {
+        let key = SigningKey::from_bytes(&KAT_SEED);
+        assert_eq!(hex(key.verifying_key().as_bytes()), KAT_PUBLIC_KEY_HEX);
+        assert_eq!(hex(&key.sign(KAT_PAYLOAD).to_bytes()), KAT_SIGNATURE_HEX);
+    }
+
+    #[test]
+    fn previous_release_blob_verifies_via_production_path() {
+        let license = parse_license_blob(KAT_BLOB).expect("parses");
+        assert_eq!(license.payload_json, KAT_PAYLOAD);
+        assert_eq!(hex(&license.signature), KAT_SIGNATURE_HEX);
+        assert_eq!(license.payload.tier, Tier::Enterprise);
+        license
+            .verify_with_key(&kat_public_key())
+            .expect("valid signature verifies");
+    }
+
+    #[test]
+    fn signature_checks_reject_tampering() {
+        let vk = kat_public_key();
+        let good = parse_license_blob(KAT_BLOB).unwrap();
+        let rejected = |l: &License, key: &[u8; 32]| {
+            matches!(l.verify_with_key(key), Err(LicenseError::BadSignature))
+        };
+
+        // Payload edited after signing ("enterprise" -> "enterprisf").
+        let mut payload = good.clone();
+        let pos = payload
+            .payload_json
+            .windows(10)
+            .position(|w| w == b"enterprise")
+            .unwrap();
+        payload.payload_json[pos + 9] ^= 0x03;
+        assert!(rejected(&payload, &vk), "tampered payload");
+
+        // R component of the signature altered.
+        let mut r = good.clone();
+        r.signature[0] ^= 0x01;
+        assert!(rejected(&r, &vk), "tampered R");
+
+        // Non-canonical s with the high bit set.
+        let mut high = good.clone();
+        high.signature[63] ^= 0x80;
+        assert!(rejected(&high, &vk), "high-bit s");
+
+        // s + L: same scalar mod L, non-canonical encoding. Strict (non
+        // `legacy_compatibility`) verification must reject this malleated
+        // signature, as ed25519-dalek 2.2.0 did.
+        const L: [u8; 32] = [
+            0xed, 0xd3, 0xf5, 0x5c, 0x1a, 0x63, 0x12, 0x58, 0xd6, 0x9c, 0xf7, 0xa2, 0xde, 0xf9,
+            0xde, 0x14, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x10,
+        ];
+        let mut malleated = good.clone();
+        let mut carry = 0u16;
+        for (b, l) in malleated.signature[32..].iter_mut().zip(L) {
+            let sum = u16::from(*b) + u16::from(l) + carry;
+            *b = sum as u8;
+            carry = sum >> 8;
+        }
+        assert_eq!(carry, 0);
+        assert!(rejected(&malleated, &vk), "s + L");
+
+        // Valid signature, but from a different key.
+        let other = SigningKey::from_bytes(&[7u8; 32])
+            .verifying_key()
+            .to_bytes();
+        assert!(rejected(&good, &other), "foreign key");
+
+        // The untouched blob still verifies.
+        assert!(good.verify_with_key(&vk).is_ok());
+    }
+
+    #[test]
+    fn verify_checks_against_embedded_public_key() {
+        // The in-tree EMBEDDED_PUBLIC_KEY is the 0xdeadbeef development
+        // placeholder, which is not a valid Edwards point: ed25519-dalek 2.2.0
+        // refused to decompress it, so `verify()` returned InvalidPublicKey for
+        // every license and the runtime degraded to Community. 3.x must keep
+        // rejecting it the same way.
+        let placeholder: [u8; 32] = std::array::from_fn(|i| [0xde, 0xad, 0xbe, 0xef][i % 4]);
+        let license = parse_license_blob(KAT_BLOB).unwrap();
+        assert!(matches!(
+            license.verify_with_key(&placeholder),
+            Err(LicenseError::InvalidPublicKey(_))
+        ));
+
+        // `verify()` must use the embedded key, never the KAT key.
+        let err = license
+            .verify()
+            .expect_err("KAT key is not the embedded key");
+        if EMBEDDED_PUBLIC_KEY == placeholder {
+            assert!(matches!(err, LicenseError::InvalidPublicKey(_)), "{err}");
+        } else {
+            assert!(matches!(err, LicenseError::BadSignature), "{err}");
+        }
     }
 }
