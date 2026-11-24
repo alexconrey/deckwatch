@@ -42,7 +42,7 @@ async fn bad_request_maps_to_400() {
 #[tokio::test]
 async fn kube_api_error_preserves_status_code() {
     // 409 Conflict from the Kubernetes API should be forwarded verbatim.
-    let api_err = kube::error::ErrorResponse {
+    let api_err = kube::core::Status {
         status: None,
         message: "already exists".to_string(),
         reason: "AlreadyExists".to_string(),
@@ -60,7 +60,7 @@ async fn kube_api_error_preserves_status_code() {
 
 #[tokio::test]
 async fn kube_api_error_invalid_code_falls_back_to_502() {
-    let api_err = kube::error::ErrorResponse {
+    let api_err = kube::core::Status {
         status: None,
         message: "weird".to_string(),
         reason: "Unknown".to_string(),
