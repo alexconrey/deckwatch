@@ -1,5 +1,5 @@
-import type { Locator, Page } from "@playwright/test";
 import { expect, test } from "./fixtures";
+import { card, choose, openMenu } from "./support/ui";
 
 /**
  * Functional checks for the deployment detail page's cards and dialogs:
@@ -8,39 +8,6 @@ import { expect, test } from "./fixtures";
  */
 
 const WEB = "/deployments/default/web";
-
-/** A card found by the exact text of an element in its title. */
-function card(page: Page, title: string): Locator {
-  return page
-    .locator(".v-card")
-    .filter({ has: page.locator(".v-card-title").getByText(title, { exact: true }) })
-    .first();
-}
-
-/**
- * The clickable field of a v-select / v-autocomplete / v-combobox, found
- * through its labelled input (a v-select's own input is 1 character wide).
- */
-function field(scope: Page | Locator, label: string): Locator {
-  return scope
-    .getByRole("combobox", { name: label })
-    .locator('xpath=ancestor::*[contains(concat(" ", normalize-space(@class), " "), " v-field ")][1]');
-}
-
-/** Open a select-family menu and return its list. */
-async function openMenu(scope: Page | Locator, page: Page, label: string): Promise<Locator> {
-  await field(scope, label).click();
-  const menu = page.locator(".v-overlay--active .v-list").last();
-  await expect(menu).toBeVisible();
-  return menu;
-}
-
-/** Choose `option` in the select labelled `label`. */
-async function choose(scope: Page | Locator, page: Page, label: string, option: string | RegExp): Promise<void> {
-  const menu = await openMenu(scope, page, label);
-  await menu.getByRole("option", { name: option, exact: typeof option === "string" }).click();
-  await expect(menu).toBeHidden();
-}
 
 test.describe("Deployment detail: cards", () => {
   test("labels editor saves pod labels and annotations", async ({ page, mockApi }) => {
@@ -81,7 +48,7 @@ test.describe("Deployment detail: cards", () => {
     await mockApi.waitForRequest("GET", history);
     await expect(card(page, "Logs").getByText("24 / 24 lines")).toBeVisible();
 
-    await choose(card(page, "Logs"), page, "History", "Last 100");
+    await choose(card(page, "Logs"), "History", "Last 100");
     await expect
       .poll(() => mockApi.requests("GET", history).map((c) => c.query.get("tail_lines")))
       .toContain("100");
@@ -161,8 +128,8 @@ test.describe("Deployment detail: ingress", () => {
     await page.goto(WEB);
     await card(page, "Ingresses").getByRole("button", { name: "Add" }).click();
     const dialog = page.getByRole("dialog").filter({ hasText: "Add Ingress" });
-    await choose(dialog, page, "Template", "None");
-    await choose(dialog, page, "Type", "Exact");
+    await choose(dialog, "Template", "None");
+    await choose(dialog, "Type", "Exact");
     await dialog.getByRole("combobox", { name: "Ingress Class" }).fill("traefik");
     await dialog.getByLabel("Path").fill("/shop");
     await dialog.getByRole("button", { name: "Create" }).click();
@@ -194,7 +161,7 @@ test.describe("Deployment detail: GitOps dialog", () => {
     const dialog = page.getByRole("dialog").filter({ hasText: "Edit GitOps" });
 
     const expectOptions = async (label: string, options: [string, string][]) => {
-      const menu = await openMenu(dialog, page, label);
+      const menu = await openMenu(dialog, label);
       const items = menu.getByRole("option");
       await expect(items).toHaveCount(options.length);
       for (const [i, [title, subtitle]] of options.entries()) {
@@ -229,7 +196,7 @@ test.describe("Deployment detail: GitOps dialog", () => {
     const dialog = page.getByRole("dialog").filter({ hasText: "Edit GitOps" });
     await expect(dialog.getByLabel("Custom repository URL")).toBeHidden();
 
-    await choose(dialog, page, "Repository", /Custom URL/);
+    await choose(dialog, "Repository", /Custom URL/);
     await expect(dialog.getByLabel("Custom repository URL")).toHaveValue("https://github.com/acme/storefront.git");
   });
 
@@ -262,9 +229,9 @@ test.describe("Deployment detail: GitOps dialog", () => {
     const save = dialog.getByRole("button", { name: "Save" });
     await expect(save).toBeDisabled();
 
-    await choose(dialog, page, "Repository", /platform-api/);
-    await choose(dialog, page, "Git Token", /github-bot/);
-    await choose(dialog, page, "OCI Registry", /^ghcr/);
+    await choose(dialog, "Repository", /platform-api/);
+    await choose(dialog, "Git Token", /github-bot/);
+    await choose(dialog, "OCI Registry", /^ghcr/);
     await expect(save).toBeEnabled();
     await save.click();
 
@@ -287,7 +254,7 @@ test.describe("Deployment detail: GitOps dialog", () => {
     await page.goto(WEB);
     await card(page, "GitOps").getByRole("button", { name: "Edit" }).click();
     const dialog = page.getByRole("dialog").filter({ hasText: "Edit GitOps" });
-    await choose(dialog, page, "Branch", "develop");
+    await choose(dialog, "Branch", "develop");
     await dialog.getByRole("button", { name: "Save" }).click();
 
     const call = await mockApi.waitForRequest("PUT", "/namespaces/default/deployments/web/gitops");

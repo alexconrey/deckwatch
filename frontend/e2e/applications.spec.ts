@@ -1,9 +1,5 @@
-import type { Locator } from "@playwright/test";
 import { expect, test } from "./fixtures";
-
-/** The v-field around the select labelled `label` (clicks open its menu). */
-const field = (scope: Locator, label: string) =>
-  scope.locator(".v-field").filter({ has: scope.page().getByRole("combobox", { name: label, exact: true }) });
+import { field } from "./support/ui";
 
 test.describe("Applications", () => {
   test("clicking a row opens the application", async ({ app, page }) => {

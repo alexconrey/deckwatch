@@ -1,19 +1,13 @@
 import type { Page } from "@playwright/test";
 import { expect, test } from "./fixtures";
+import { menuItem, row } from "./support/ui";
 
 /**
  * Resources page (/deployments): tabs, the deployments table and its row
  * actions, and the CronJob / Secret / ConfigMap / ServiceAccount dialogs.
  */
 
-const row = (page: Page, name: string) =>
-  page.getByRole("row").filter({ has: page.getByRole("cell", { name, exact: true }) });
-
 const deploymentRows = (page: Page) => page.locator(".v-data-table tbody tr");
-
-/** The open menu's entry (by class, not role: list item roles differ across Vuetify versions). */
-const menuItem = (page: Page, text: string) =>
-  page.locator(".v-overlay--active .v-list-item", { hasText: text });
 
 async function openRowAction(page: Page, deployment: string, action: "Restart" | "Scale" | "Delete") {
   await row(page, deployment).locator("button:has(.mdi-dots-vertical)").click();

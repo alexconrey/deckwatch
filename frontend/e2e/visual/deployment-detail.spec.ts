@@ -1,6 +1,7 @@
 import type { Locator, Page } from "@playwright/test";
 import type { App } from "../support/app";
 import { eachTheme, expect, test } from "./visual-test";
+import { card, field, openMenu } from "../support/ui";
 
 /**
  * Deployment detail page (/deployments/:namespace/:name), the highest-risk
@@ -10,14 +11,6 @@ import { eachTheme, expect, test } from "./visual-test";
  */
 
 const WEB = "/deployments/default/web";
-
-/** A card found by the exact text of an element in its title. */
-function card(page: Page, title: string): Locator {
-  return page
-    .locator(".v-card")
-    .filter({ has: page.locator(".v-card-title").getByText(title, { exact: true }) })
-    .first();
-}
 
 const POD_METRICS = "/namespaces/:ns/pods/metrics";
 
@@ -51,43 +44,6 @@ async function openDeployment(app: App, path = WEB): Promise<void> {
   await app.settle();
 }
 
-/**
- * `app.snap`, made independent of the last click:
- * - the mouse is parked in the bottom-left corner (page margin in every
- *   state captured here). The cursor otherwise stays on the clicked control,
- *   and Chromium updates hover state under a stationary cursor on a timer
- *   after the DOM changes, so that control (often now behind a scrim) was
- *   captured hovered in some runs only;
- * - Vuetify's click ripple is removed by timers up to ~550 ms after the
- *   click, so wait for it to be gone;
- * - no tooltip is open.
- */
-async function snap(app: App, name: string, options?: Parameters<App["snap"]>[1]): Promise<void> {
-  await app.page.mouse.move(1, (app.page.viewportSize()?.height ?? 900) - 1);
-  await expect(app.page.locator(".v-ripple__animation")).toHaveCount(0);
-  await expect(app.page.locator(".v-tooltip.v-overlay--active")).toHaveCount(0);
-  await app.snap(name, options);
-}
-
-/**
- * The clickable field of a v-select / v-autocomplete / v-combobox, found
- * through its labelled input. A v-select's input is a 1-character-wide
- * readonly element, so clicks go to the surrounding field.
- */
-function field(scope: Page | Locator, label: string): Locator {
-  return scope
-    .getByRole("combobox", { name: label })
-    .locator('xpath=ancestor::*[contains(concat(" ", normalize-space(@class), " "), " v-field ")][1]');
-}
-
-/** Open a select-family menu by its label and wait for it. */
-async function openMenu(scope: Page | Locator, page: Page, label: string): Promise<Locator> {
-  await field(scope, label).click();
-  const menu = page.locator(".v-overlay--active .v-list").last();
-  await expect(menu).toBeVisible();
-  return menu;
-}
-
 async function openGitOpsDialog(app: App, page: Page): Promise<Locator> {
   await card(page, "GitOps").getByRole("button", { name: "Edit" }).click();
   const dialog = page.getByRole("dialog").filter({ hasText: "Edit GitOps" });
@@ -102,7 +58,7 @@ eachTheme(() => {
   test.describe("web (available)", () => {
     test("full page", async ({ app }) => {
       await openDeployment(app);
-      await snap(app, "deployment-detail/web", { fullPage: true });
+      await app.snap("deployment-detail/web", { fullPage: true });
     });
 
     test("pod row expanded", async ({ app, page }) => {
@@ -110,21 +66,21 @@ eachTheme(() => {
       const pods = card(page, "Pods (3)");
       await pods.getByRole("row").filter({ hasText: "web-6c9f7d8b5-4xk2p" }).getByRole("button").first().click();
       await expect(pods.getByText("Containers (1)")).toBeVisible();
-      await snap(app, "deployment-detail/pods-expanded", { fullPage: true, locator: pods });
+      await app.snap("deployment-detail/pods-expanded", { fullPage: true, locator: pods });
     });
 
     test("logs: history select open", async ({ app, page }) => {
       await openDeployment(app);
-      const menu = await openMenu(card(page, "Logs"), page, "History");
+      const menu = await openMenu(card(page, "Logs"), "History");
       await expect(menu.getByRole("option", { name: "Last 100", exact: true })).toBeVisible();
-      await snap(app, "deployment-detail/logs-history-menu");
+      await app.snap("deployment-detail/logs-history-menu");
     });
 
     test("logs: pod select open", async ({ app, page }) => {
       await openDeployment(app);
-      const menu = await openMenu(card(page, "Logs"), page, "Pod");
+      const menu = await openMenu(card(page, "Logs"), "Pod");
       await expect(menu.getByRole("option", { name: "web-6c9f7d8b5-mr7wd" })).toBeVisible();
-      await snap(app, "deployment-detail/logs-pod-menu");
+      await app.snap("deployment-detail/logs-pod-menu");
     });
 
     test("labels and annotations editor", async ({ app, page }) => {
@@ -132,7 +88,7 @@ eachTheme(() => {
       const labels = card(page, "Labels & Annotations");
       await labels.getByRole("button", { name: "Edit" }).click();
       await expect(labels.getByRole("button", { name: "Add annotation" })).toBeVisible();
-      await snap(app, "deployment-detail/labels-editor", { fullPage: true, locator: labels });
+      await app.snap("deployment-detail/labels-editor", { fullPage: true, locator: labels });
     });
 
     test("resource metrics details", async ({ app, page }) => {
@@ -144,7 +100,7 @@ eachTheme(() => {
       // The charts draw one x-axis label per sample: exactly two polls (mount
       // + the forced one) must have happened, or the axis would differ.
       expect(app.api.requests("GET", POD_METRICS)).toHaveLength(2);
-      await snap(app, "deployment-detail/metrics-details", { fullPage: true, locator: metrics });
+      await app.snap("deployment-detail/metrics-details", { fullPage: true, locator: metrics });
     });
 
     test("gitops build history", async ({ app, page }) => {
@@ -152,7 +108,7 @@ eachTheme(() => {
       const gitops = card(page, "GitOps");
       await gitops.getByRole("button", { name: "Build History" }).click();
       await expect(gitops.getByText("web-build-1a2b3c4")).toBeVisible();
-      await snap(app, "deployment-detail/gitops-build-history", { fullPage: true, locator: gitops });
+      await app.snap("deployment-detail/gitops-build-history", { fullPage: true, locator: gitops });
     });
   });
 
@@ -163,25 +119,25 @@ eachTheme(() => {
       const dialog = page.getByRole("dialog").filter({ hasText: "Add Ingress" });
       await expect(dialog.getByLabel("Ingress Name")).toHaveValue("web-ingress");
       await expect(dialog.getByRole("textbox", { name: "Key" }).first()).toHaveValue("alb.ingress.kubernetes.io/scheme");
-      await snap(app, "deployment-detail/ingress-add");
+      await app.snap("deployment-detail/ingress-add");
     });
 
     test("template select open", async ({ app, page }) => {
       await openDeployment(app);
       await card(page, "Ingresses").getByRole("button", { name: "Add" }).click();
       const dialog = page.getByRole("dialog").filter({ hasText: "Add Ingress" });
-      const menu = await openMenu(dialog, page, "Template");
+      const menu = await openMenu(dialog, "Template");
       await expect(menu.getByRole("option", { name: "internal-nginx" })).toBeVisible();
-      await snap(app, "deployment-detail/ingress-template-menu");
+      await app.snap("deployment-detail/ingress-template-menu");
     });
 
     test("path type select open", async ({ app, page }) => {
       await openDeployment(app);
       await card(page, "Ingresses").getByRole("button", { name: "Add" }).click();
       const dialog = page.getByRole("dialog").filter({ hasText: "Add Ingress" });
-      const menu = await openMenu(dialog, page, "Type");
+      const menu = await openMenu(dialog, "Type");
       await expect(menu.getByRole("option", { name: "Exact" })).toBeVisible();
-      await snap(app, "deployment-detail/ingress-path-type-menu");
+      await app.snap("deployment-detail/ingress-path-type-menu");
     });
 
     test("ingress class combobox with a typed value", async ({ app, page }) => {
@@ -191,7 +147,7 @@ eachTheme(() => {
       await dialog.getByLabel("Hostname").fill("shop.example.com");
       const ingressClass = dialog.getByRole("combobox", { name: "Ingress Class" });
       await ingressClass.fill("traefik");
-      await snap(app, "deployment-detail/ingress-class-typed");
+      await app.snap("deployment-detail/ingress-class-typed");
     });
 
     test("edit web-ingress", async ({ app, page }) => {
@@ -200,7 +156,7 @@ eachTheme(() => {
       await ingresses.getByRole("row").filter({ hasText: "web-ingress" }).locator("button:has(.mdi-pencil)").click();
       const dialog = page.getByRole("dialog").filter({ hasText: "Edit Ingress" });
       await expect(dialog.getByLabel("Hostname")).toHaveValue("shop.example.com");
-      await snap(app, "deployment-detail/ingress-edit");
+      await app.snap("deployment-detail/ingress-edit");
     });
   });
 
@@ -208,40 +164,40 @@ eachTheme(() => {
     test("edit", async ({ app, page }) => {
       await openDeployment(app);
       await openGitOpsDialog(app, page);
-      await snap(app, "deployment-detail/gitops-edit");
+      await app.snap("deployment-detail/gitops-edit");
     });
 
     test("repository select open", async ({ app, page }) => {
       await openDeployment(app);
       const dialog = await openGitOpsDialog(app, page);
-      const menu = await openMenu(dialog, page, "Repository");
+      const menu = await openMenu(dialog, "Repository");
       await expect(menu.getByText("https://github.com/acme/platform-api.git")).toBeVisible();
-      await snap(app, "deployment-detail/gitops-repository-menu");
+      await app.snap("deployment-detail/gitops-repository-menu");
     });
 
     test("git token select open", async ({ app, page }) => {
       await openDeployment(app);
       const dialog = await openGitOpsDialog(app, page);
-      const menu = await openMenu(dialog, page, "Git Token");
+      const menu = await openMenu(dialog, "Git Token");
       await expect(menu.getByText("deckwatch/gitlab-ci-token")).toBeVisible();
-      await snap(app, "deployment-detail/gitops-token-menu");
+      await app.snap("deployment-detail/gitops-token-menu");
     });
 
     test("oci registry select open", async ({ app, page }) => {
       await openDeployment(app);
       const dialog = await openGitOpsDialog(app, page);
-      const menu = await openMenu(dialog, page, "OCI Registry");
+      const menu = await openMenu(dialog, "OCI Registry");
       await expect(menu.getByText("ghcr · ghcr.io/acme")).toBeVisible();
-      await snap(app, "deployment-detail/gitops-registry-menu");
+      await app.snap("deployment-detail/gitops-registry-menu");
     });
 
     test("custom repository URL", async ({ app, page }) => {
       await openDeployment(app);
       const dialog = await openGitOpsDialog(app, page);
-      const menu = await openMenu(dialog, page, "Repository");
+      const menu = await openMenu(dialog, "Repository");
       await menu.getByRole("option", { name: /Custom URL/ }).click();
       await expect(dialog.getByLabel("Custom repository URL")).toBeVisible();
-      await snap(app, "deployment-detail/gitops-custom-repository");
+      await app.snap("deployment-detail/gitops-custom-repository");
     });
 
     test("branch autocomplete open", async ({ app, page }) => {
@@ -250,7 +206,7 @@ eachTheme(() => {
       await field(dialog, "Branch").click();
       const menu = page.locator(".v-overlay--active .v-list").last();
       await expect(menu.getByRole("option", { name: "release/2026.06" })).toBeVisible();
-      await snap(app, "deployment-detail/gitops-branch-menu");
+      await app.snap("deployment-detail/gitops-branch-menu");
     });
 
     test("webhook section, scrolled into view", async ({ app, page }) => {
@@ -259,7 +215,7 @@ eachTheme(() => {
       const generate = dialog.getByRole("button", { name: "Generate secret" });
       await generate.scrollIntoViewIfNeeded();
       await expect(dialog.getByLabel("Webhook URL")).toHaveValue(/\/api\/webhooks\/gitops$/);
-      await snap(app, "deployment-detail/gitops-webhook");
+      await app.snap("deployment-detail/gitops-webhook");
     });
 
     test("enable on a deployment without gitops", async ({ app, page }) => {
@@ -267,7 +223,7 @@ eachTheme(() => {
       await card(page, "GitOps").getByRole("button", { name: "Enable" }).click();
       const dialog = page.getByRole("dialog").filter({ hasText: "Enable GitOps" });
       await expect(dialog.getByRole("button", { name: "Save" })).toBeDisabled();
-      await snap(app, "deployment-detail/gitops-enable");
+      await app.snap("deployment-detail/gitops-enable");
     });
 
     test("browse registry on top of the dialog", async ({ app, page }) => {
@@ -279,7 +235,7 @@ eachTheme(() => {
       const picker = page.getByRole("dialog").filter({ hasText: "Browse Registry" });
       await picker.getByText("acme/platform-api", { exact: true }).click();
       await expect(picker.getByRole("cell", { name: "v2.4.1" })).toBeVisible();
-      await snap(app, "deployment-detail/gitops-browse-registry");
+      await app.snap("deployment-detail/gitops-browse-registry");
     });
   });
 
@@ -289,7 +245,7 @@ eachTheme(() => {
       await card(page, "Rollout History").getByRole("button", { name: "Compare" }).click();
       const dialog = page.getByRole("dialog").filter({ hasText: "Compare Revisions" });
       await expect(dialog.getByText(/lines? differ/)).toBeVisible();
-      await snap(app, "deployment-detail/compare-revisions");
+      await app.snap("deployment-detail/compare-revisions");
     });
 
     test("affinity editor", async ({ app, page }) => {
@@ -297,7 +253,7 @@ eachTheme(() => {
       await page.getByRole("button", { name: "Affinity" }).click();
       const dialog = page.getByRole("dialog").filter({ hasText: "Node Affinity & Scheduling" });
       await expect(dialog.getByRole("textbox", { name: "Key" }).first()).toHaveValue("kubernetes.io/os");
-      await snap(app, "deployment-detail/affinity-editor");
+      await app.snap("deployment-detail/affinity-editor");
     });
 
     test("add sidecar", async ({ app, page }) => {
@@ -306,7 +262,7 @@ eachTheme(() => {
       const dialog = page.getByRole("dialog").filter({ hasText: "Add Sidecar Container" });
       await dialog.getByLabel("Name", { exact: true }).fill("metrics-exporter");
       await dialog.getByLabel("Image", { exact: true }).fill("nginx/nginx-prometheus-exporter:1.3");
-      await snap(app, "deployment-detail/add-sidecar");
+      await app.snap("deployment-detail/add-sidecar");
     });
 
     test("edit deployment: form with autoscaling", async ({ app, page }) => {
@@ -315,7 +271,7 @@ eachTheme(() => {
       const dialog = page.getByRole("dialog").filter({ hasText: "Edit Deployment" });
       await expect(dialog.getByLabel("Container Image")).toHaveValue("nginx:1.25");
       await expect(dialog.getByLabel("Max Replicas")).toHaveValue("6");
-      await snap(app, "deployment-detail/edit-form");
+      await app.snap("deployment-detail/edit-form");
     });
 
     test("edit deployment: autoscaling section", async ({ app, page }) => {
@@ -323,7 +279,7 @@ eachTheme(() => {
       await page.getByRole("button", { name: "Edit" }).first().click();
       const dialog = page.getByRole("dialog").filter({ hasText: "Edit Deployment" });
       await dialog.getByLabel("Target Memory %").scrollIntoViewIfNeeded();
-      await snap(app, "deployment-detail/edit-autoscaling");
+      await app.snap("deployment-detail/edit-autoscaling");
     });
 
     test("edit deployment: yaml", async ({ app, page }) => {
@@ -332,7 +288,7 @@ eachTheme(() => {
       const dialog = page.getByRole("dialog").filter({ hasText: "Edit Deployment" });
       await dialog.getByRole("button", { name: "YAML" }).click();
       await expect(dialog.locator("textarea")).toHaveValue(/kind: Deployment/);
-      await snap(app, "deployment-detail/edit-yaml");
+      await app.snap("deployment-detail/edit-yaml");
     });
 
     test("view yaml", async ({ app, page }) => {
@@ -340,7 +296,7 @@ eachTheme(() => {
       await page.getByRole("button", { name: "View YAML" }).click();
       const dialog = page.getByRole("dialog").filter({ hasText: "web — YAML" });
       await expect(dialog.getByText("kind: Deployment")).toBeVisible();
-      await snap(app, "deployment-detail/view-yaml");
+      await app.snap("deployment-detail/view-yaml");
     });
 
     test("monitor edit", async ({ app, page }) => {
@@ -348,14 +304,14 @@ eachTheme(() => {
       await card(page, "Prometheus Monitor").getByRole("button", { name: "Edit" }).click();
       const dialog = page.getByRole("dialog").filter({ hasText: "Edit Monitor" });
       await expect(dialog.getByLabel("Scrape interval")).toHaveValue("30s");
-      await snap(app, "deployment-detail/monitor-edit");
+      await app.snap("deployment-detail/monitor-edit");
     });
 
     test("restart confirm", async ({ app, page }) => {
       await openDeployment(app);
       await page.getByRole("button", { name: "Restart" }).click();
       await expect(page.getByRole("dialog").getByText("This will trigger a rolling restart of 'web'.")).toBeVisible();
-      await snap(app, "deployment-detail/restart-confirm");
+      await app.snap("deployment-detail/restart-confirm");
     });
 
     test("delete confirm with the name typed", async ({ app, page }) => {
@@ -364,14 +320,14 @@ eachTheme(() => {
       const dialog = page.getByRole("dialog").filter({ hasText: "Delete Deployment" });
       await dialog.getByRole("textbox").fill("web");
       await expect(dialog.getByRole("button", { name: "Delete" })).toBeEnabled();
-      await snap(app, "deployment-detail/delete-confirm");
+      await app.snap("deployment-detail/delete-confirm");
     });
 
     test("diagnose with ai: agent chooser", async ({ app, page }) => {
       await openDeployment(app);
       await page.getByRole("button", { name: "Diagnose with AI" }).click();
       await expect(page.getByRole("dialog").filter({ hasText: "Choose an AI agent" })).toBeVisible();
-      await snap(app, "deployment-detail/diagnose-chooser");
+      await app.snap("deployment-detail/diagnose-chooser");
     });
 
     test("diagnose with ai: result", async ({ app, page, mockApi }) => {
@@ -382,14 +338,14 @@ eachTheme(() => {
       const result = page.locator(".v-card").filter({ hasText: /AI Diagnostic/ }).last();
       await expect(result.getByText("Root cause: the upstream API times out after 60s.")).toBeVisible();
       await expect(result.getByText("succeeded")).toBeVisible();
-      await snap(app, "deployment-detail/diagnose-result", { fullPage: true, locator: card(page, "Logs") });
+      await app.snap("deployment-detail/diagnose-result", { fullPage: true, locator: card(page, "Logs") });
     });
   });
 
   test.describe("worker (degraded) and importer (failed)", () => {
     test("worker: full page", async ({ app }) => {
       await openDeployment(app, "/deployments/default/worker");
-      await snap(app, "deployment-detail/worker", { fullPage: true });
+      await app.snap("deployment-detail/worker", { fullPage: true });
     });
 
     test("worker: diagnostics drawer", async ({ app, page }) => {
@@ -398,12 +354,12 @@ eachTheme(() => {
       const drawer = page.locator(".v-navigation-drawer").filter({ hasText: "Deployment Diagnostics" });
       await expect(drawer).toBeInViewport();
       await expect(drawer.getByText("CrashLoopBackOff")).toBeVisible();
-      await snap(app, "deployment-detail/worker-diagnostics-drawer");
+      await app.snap("deployment-detail/worker-diagnostics-drawer");
     });
 
     test("importer: full page", async ({ app }) => {
       await openDeployment(app, "/deployments/default/importer");
-      await snap(app, "deployment-detail/importer", { fullPage: true });
+      await app.snap("deployment-detail/importer", { fullPage: true });
     });
   });
 });
@@ -415,7 +371,7 @@ test.describe("responsive", () => {
 
       test("web: full page", async ({ app }) => {
         await openDeployment(app);
-        await snap(app, "deployment-detail/web", { fullPage: true });
+        await app.snap("deployment-detail/web", { fullPage: true });
       });
     });
   }

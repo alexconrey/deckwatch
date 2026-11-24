@@ -1,6 +1,7 @@
 import type { Locator, Page } from "@playwright/test";
 import { apiError } from "./support/mock-api";
 import { expect, test } from "./fixtures";
+import { fieldOf } from "./support/ui";
 
 /**
  * Create deployment (/deployments/create, DeploymentForm), the template
@@ -14,8 +15,7 @@ const probeCard = (page: Page, probe: string) =>
   page.locator(".v-card", { has: page.getByLabel(probe, { exact: true }), hasNot: page.locator(".v-card") });
 
 /** Open a v-select by clicking its field (the inner input is 1 character wide). */
-const openSelect = (combobox: Locator) =>
-  combobox.locator("xpath=ancestor::div[contains(concat(' ', @class, ' '), ' v-field ')][1]").click();
+const openSelect = (combobox: Locator) => fieldOf(combobox).click();
 
 async function chooseOption(page: Page, combobox: Locator, option: string): Promise<void> {
   await openSelect(combobox);

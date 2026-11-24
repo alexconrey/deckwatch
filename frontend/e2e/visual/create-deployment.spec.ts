@@ -1,24 +1,11 @@
 import type { Page } from "@playwright/test";
-import type { App, SnapOptions } from "../support/app";
 import { eachTheme, expect, test } from "./visual-test";
+import { fieldOf } from "../support/ui";
 
 /**
  * Template picker (/deployments/templates) and the create form
  * (/deployments/create, DeploymentForm).
  */
-
-/** Move the pointer off the page content so no hover state is captured. */
-const parkMouse = (page: Page) => page.mouse.move(0, 0);
-
-/**
- * A Vuetify ripple outlives the click that started it by ~550ms and is not
- * an animation that App.settle() can see, so wait for it to finish before
- * taking the screenshot; otherwise a half-faded ripple is captured.
- */
-async function snap(app: App, name: string, options?: SnapOptions): Promise<void> {
-  await expect(app.page.locator(".v-ripple__animation")).toHaveCount(0);
-  await app.snap(name, options);
-}
 
 /** The probe's own card (not the page card that also contains it). */
 const probeCard = (page: Page, probe: string) =>
@@ -29,8 +16,7 @@ const probeCard = (page: Page, probe: string) =>
  * 1-character-wide element under the selection text, so it never receives
  * the click itself.
  */
-const openSelect = (combobox: ReturnType<Page["getByRole"]>) =>
-  combobox.locator("xpath=ancestor::div[contains(concat(' ', @class, ' '), ' v-field ')][1]").click();
+const openSelect = (combobox: ReturnType<Page["getByRole"]>) => fieldOf(combobox).click();
 
 async function openForm(app: { goto(path: string): Promise<void> }, page: Page): Promise<void> {
   await app.goto("/deployments/create");
@@ -42,12 +28,12 @@ eachTheme(() => {
   test("template picker", async ({ app, page }) => {
     await app.goto("/deployments/templates");
     await expect(page.getByText("ACME Node.js service")).toBeVisible();
-    await snap(app, "create-deployment/template-picker", { fullPage: true });
+    await app.snap("create-deployment/template-picker", { fullPage: true });
   });
 
   test("empty form", async ({ app, page }) => {
     await openForm(app, page);
-    await snap(app, "create-deployment/empty-form", { fullPage: true });
+    await app.snap("create-deployment/empty-form", { fullPage: true });
   });
 
   test("validation errors", async ({ app, page }) => {
@@ -60,8 +46,7 @@ eachTheme(() => {
     await expect(page.getByText("Memory limit is less than memory request")).toBeVisible();
     await expect(page.getByText(/cannot contain underscores/)).toBeVisible();
     await expect(page.getByText("Image must not have leading or trailing whitespace")).toBeVisible();
-    await parkMouse(page);
-    await snap(app, "create-deployment/validation-errors", { fullPage: true });
+    await app.snap("create-deployment/validation-errors", { fullPage: true });
   });
 
   test("filled form with a port, an env var and a probe", async ({ app, page }) => {
@@ -76,8 +61,7 @@ eachTheme(() => {
     await page.getByRole("textbox", { name: "Value", exact: true }).fill("production");
     await page.getByLabel("Liveness Probe", { exact: true }).check();
     await probeCard(page, "Liveness Probe").getByRole("textbox", { name: "Path" }).fill("/healthz");
-    await parkMouse(page);
-    await snap(app, "create-deployment/filled-form", { fullPage: true });
+    await app.snap("create-deployment/filled-form", { fullPage: true });
   });
 
   test("probe type menu", async ({ app, page }) => {
@@ -85,7 +69,7 @@ eachTheme(() => {
     await page.getByLabel("Readiness Probe", { exact: true }).check();
     await openSelect(probeCard(page, "Readiness Probe").getByRole("combobox", { name: "Type" }));
     await expect(page.getByRole("option", { name: "TCP Socket" })).toBeVisible();
-    await snap(app, "create-deployment/probe-type-menu");
+    await app.snap("create-deployment/probe-type-menu");
   });
 
   test("protocol menu", async ({ app, page }) => {
@@ -93,7 +77,7 @@ eachTheme(() => {
     await page.getByRole("button", { name: "Add Port" }).click();
     await openSelect(page.getByRole("combobox", { name: "Protocol" }));
     await expect(page.getByRole("option", { name: "UDP" })).toBeVisible();
-    await snap(app, "create-deployment/protocol-menu");
+    await app.snap("create-deployment/protocol-menu");
   });
 
   test("replicas slider thumb label", async ({ app, page }) => {
@@ -103,15 +87,14 @@ eachTheme(() => {
     await slider.press("ArrowRight");
     await slider.press("ArrowRight");
     await expect(slider).toHaveAttribute("aria-valuenow", "3");
-    await snap(app, "create-deployment/replicas-thumb-label");
+    await app.snap("create-deployment/replicas-thumb-label");
   });
 
   test("replicas set to zero", async ({ app, page }) => {
     await openForm(app, page);
     await page.getByRole("spinbutton", { name: "Replicas" }).fill("0");
     await expect(page.getByText("Setting replicas to 0 will stop all instances")).toBeVisible();
-    await parkMouse(page);
-    await snap(app, "create-deployment/replicas-zero");
+    await app.snap("create-deployment/replicas-zero");
   });
 
   test("validate passed", async ({ app, page }) => {
@@ -120,8 +103,7 @@ eachTheme(() => {
     await page.getByRole("textbox", { name: "Container Image" }).fill("ghcr.io/acme/checkout:1.4.0");
     await page.getByRole("button", { name: "Validate" }).click();
     await expect(page.getByText("Dry-run passed — the API server accepted this spec.")).toBeVisible();
-    await parkMouse(page);
-    await snap(app, "create-deployment/validate-passed", { fullPage: true });
+    await app.snap("create-deployment/validate-passed", { fullPage: true });
   });
 
   test("validate failed", async ({ app, page, mockApi }) => {
@@ -139,8 +121,7 @@ eachTheme(() => {
     await page.getByRole("textbox", { name: "Container Image" }).fill("ghcr.io/acme/checkout:1.4.0");
     await page.getByRole("button", { name: "Validate" }).click();
     await expect(page.getByText("Validation failed:")).toBeVisible();
-    await parkMouse(page);
-    await snap(app, "create-deployment/validate-failed", { fullPage: true });
+    await app.snap("create-deployment/validate-failed", { fullPage: true });
   });
 
   test("pre-filled from a template", async ({ app, page }) => {
@@ -151,8 +132,7 @@ eachTheme(() => {
       .click();
     await expect(page.getByText("Pre-filled from template:")).toBeVisible();
     await expect(page.getByRole("textbox", { name: "Container Image" })).toHaveValue("ghcr.io/acme/node-base:22");
-    await parkMouse(page);
-    await snap(app, "create-deployment/from-template", { fullPage: true });
+    await app.snap("create-deployment/from-template", { fullPage: true });
   });
 
   test("registry picker with a repository selected", async ({ app, page }) => {
@@ -161,8 +141,7 @@ eachTheme(() => {
     const dialog = app.dialog("Browse Registry");
     await dialog.getByText("acme/platform-api", { exact: true }).click();
     await expect(dialog.getByRole("cell", { name: "v2.4.1" })).toBeVisible();
-    await parkMouse(page);
-    await snap(app, "create-deployment/registry-picker");
+    await app.snap("create-deployment/registry-picker");
   });
 });
 
@@ -177,8 +156,7 @@ for (const width of [1200, 900]) {
       await page.getByRole("button", { name: "Add Port" }).click();
       await page.getByRole("button", { name: "Add Variable" }).click();
       await page.getByLabel("Liveness Probe", { exact: true }).check();
-      await parkMouse(page);
-      await snap(app, "create-deployment/filled-form", { fullPage: true });
+      await app.snap("create-deployment/filled-form", { fullPage: true });
     });
   });
 }

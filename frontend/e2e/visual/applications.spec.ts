@@ -1,52 +1,31 @@
-import type { Locator, Page } from "@playwright/test";
-import type { App, SnapOptions } from "../support/app";
+import type { Page } from "@playwright/test";
 import { eachTheme, expect, test } from "./visual-test";
-
-/**
- * Before the shot, park the mouse and let click ripples finish. The last
- * click leaves the pointer over a control, and whether Chromium has applied
- * its hover state yet varies from run to run; Vuetify removes a ripple up to
- * ~550ms after the click, on a timer.
- */
-async function snap(app: App, name: string, options?: SnapOptions): Promise<void> {
-  await app.page.mouse.move(0, 0);
-  await expect(app.page.locator(".v-ripple__container")).toHaveCount(0);
-  await app.snap(name, options);
-}
+import { field } from "../support/ui";
 
 /**
  * Applications: list, create wizard, detail tabs and their dialogs.
  */
-
-/**
- * The v-field around the select labelled `label`. A v-select's <input> sits
- * under the selection text, so clicks must go to the field.
- */
-const field = (scope: Locator | Page, label: string) => {
-  const page = "page" in scope ? scope.page() : scope;
-  return scope.locator(".v-field").filter({ has: page.getByRole("combobox", { name: label, exact: true }) });
-};
 
 const wizard = (page: Page) => page.locator(".v-stepper");
 
 eachTheme(() => {
   test("applications list", async ({ app }) => {
     await app.goto("/applications");
-    await snap(app, "applications/list", { fullPage: true });
+    await app.snap("applications/list", { fullPage: true });
   });
 
   test("applications list empty", async ({ app, mockState }) => {
     mockState.applications = [];
     await app.goto("/applications");
     await expect(app.page.getByText("No applications in this namespace")).toBeVisible();
-    await snap(app, "applications/list-empty", { fullPage: true });
+    await app.snap("applications/list-empty", { fullPage: true });
   });
 
   test("create wizard step 1", async ({ app, page }) => {
     await app.goto("/applications/create");
     await page.getByLabel("App name").fill("checkout");
     await page.getByLabel("Description (optional)").fill("Checkout flow and payment hand-off.");
-    await snap(app, "applications/wizard-step1", { fullPage: true });
+    await app.snap("applications/wizard-step1", { fullPage: true });
   });
 
   test("create wizard step 1 with an invalid name", async ({ app, page }) => {
@@ -54,14 +33,14 @@ eachTheme(() => {
     await page.getByLabel("App name").fill("Checkout_Service");
     await expect(page.getByText("Resource names cannot contain underscores", { exact: false })).toBeVisible();
     await expect(page.getByRole("button", { name: "Next" })).toBeDisabled();
-    await snap(app, "applications/wizard-step1-invalid", { fullPage: true });
+    await app.snap("applications/wizard-step1-invalid", { fullPage: true });
   });
 
   test("create wizard namespace menu", async ({ app, page }) => {
     await app.goto("/applications/create");
     await field(wizard(page), "Namespace").click();
     await expect(page.getByRole("option", { name: "staging" })).toBeVisible();
-    await snap(app, "applications/wizard-namespace-menu");
+    await app.snap("applications/wizard-namespace-menu");
   });
 
   test("create wizard steps 2 to 4", async ({ app, page }) => {
@@ -72,31 +51,31 @@ eachTheme(() => {
     await page.getByText("I have a Git repository").click();
     await page.getByLabel("Repository URL").fill("https://github.com/acme/checkout.git");
     await page.getByLabel("Access token secret name").fill("github-bot-token");
-    await snap(app, "applications/wizard-step2-git", { fullPage: true });
+    await app.snap("applications/wizard-step2-git", { fullPage: true });
 
     await page.getByRole("button", { name: "Next" }).click();
     // A public URL is the default and the hostname is still empty.
     await expect(page.getByText("Hostname is required for a public URL.")).toBeVisible();
-    await snap(app, "applications/wizard-step3-hostname-required", { fullPage: true });
+    await app.snap("applications/wizard-step3-hostname-required", { fullPage: true });
 
     await page.getByLabel("Hostname", { exact: true }).fill("checkout.example.com");
     await page.getByRole("button", { name: "Next" }).click();
     await expect(page.getByText("Ready to create?")).toBeVisible();
-    await snap(app, "applications/wizard-step4-review", { fullPage: true });
+    await app.snap("applications/wizard-step4-review", { fullPage: true });
   });
 
   test("application detail overview", async ({ app }) => {
     await app.goto("/applications/default/storefront");
     // Two metrics polls, so the sparklines are lines rather than a ramp.
     await app.runTimers(10_000);
-    await snap(app, "applications/detail-overview", { fullPage: true });
+    await app.snap("applications/detail-overview", { fullPage: true });
   });
 
   test("application detail plugins tab", async ({ app, page }) => {
     await app.goto("/applications/default/storefront");
     await page.getByRole("tab", { name: "Plugins" }).click();
     await expect(page.getByText("is not currently loaded")).toBeVisible();
-    await snap(app, "applications/detail-plugins", { fullPage: true });
+    await app.snap("applications/detail-plugins", { fullPage: true });
   });
 
   test("add plugin dialog with the plugin select open", async ({ app, page }) => {
@@ -105,14 +84,14 @@ eachTheme(() => {
     await page.getByRole("button", { name: "Add Plugin" }).click();
     await field(app.dialog("Add Plugin"), "Plugin").click();
     await expect(page.getByRole("option", { name: "aws-rds" })).toBeVisible();
-    await snap(app, "applications/add-plugin-select");
+    await app.snap("applications/add-plugin-select");
   });
 
   test("application detail infrastructure tab", async ({ app, page }) => {
     await app.goto("/applications/default/storefront");
     await page.getByRole("tab", { name: "Infrastructure" }).click();
     await expect(page.getByText("provisioned", { exact: true })).toBeVisible();
-    await snap(app, "applications/detail-infrastructure", { fullPage: true });
+    await app.snap("applications/detail-infrastructure", { fullPage: true });
   });
 
   test("provision dialog with a select open", async ({ app, page }) => {
@@ -123,7 +102,7 @@ eachTheme(() => {
     await expect(dialog).toBeVisible();
     await field(dialog, "Node type").click();
     await expect(page.getByRole("option", { name: "cache.m6g.large" })).toBeVisible();
-    await snap(app, "applications/provision-select");
+    await app.snap("applications/provision-select");
   });
 
   test("edit application dialog", async ({ app, page }) => {
@@ -132,7 +111,7 @@ eachTheme(() => {
     await expect(app.dialog("Edit Application").getByLabel("Repository URL")).toHaveValue(
       "https://github.com/acme/storefront.git",
     );
-    await snap(app, "applications/edit-dialog");
+    await app.snap("applications/edit-dialog");
   });
 
   test("delete application dialog with cascade", async ({ app, page }) => {
@@ -142,7 +121,7 @@ eachTheme(() => {
     await dialog.getByLabel("Also delete all member resources (deployments and cronjobs)").check();
     await dialog.getByRole("textbox").fill("storefront");
     await expect(dialog.getByText("This will delete all attached deployments and cronjobs.")).toBeVisible();
-    await snap(app, "applications/delete-dialog-cascade");
+    await app.snap("applications/delete-dialog-cascade");
   });
 
   test("add resource dialog", async ({ app, page }) => {
@@ -150,14 +129,14 @@ eachTheme(() => {
     await page.getByRole("button", { name: "Add Resource" }).click();
     const dialog = app.dialog("Add Resource to Application");
     await expect(dialog.getByRole("cell", { name: "legacy-admin", exact: true })).toBeVisible();
-    await snap(app, "applications/add-resource-dialog");
+    await app.snap("applications/add-resource-dialog");
   });
 
   test("fix with AI agent chooser", async ({ app, page }) => {
     await app.goto("/applications/default/storefront");
     await page.getByRole("button", { name: "Fix with AI" }).click();
     await expect(app.dialog("Choose an AI agent")).toBeVisible();
-    await snap(app, "applications/fix-with-ai-chooser");
+    await app.snap("applications/fix-with-ai-chooser");
   });
 });
 
@@ -167,7 +146,7 @@ for (const width of [1200, 900]) {
 
     test("applications list", async ({ app }) => {
       await app.goto("/applications");
-      await snap(app, "applications/list", { fullPage: true });
+      await app.snap("applications/list", { fullPage: true });
     });
   });
 }
