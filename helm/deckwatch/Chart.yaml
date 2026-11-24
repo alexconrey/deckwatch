@@ -4,3 +4,6 @@ description: Kubernetes deployment lifecycle manager
 type: application
 version: 0.6.7
 appVersion: "0.6.7"
+# deckwatch compiles against k8s-openapi v1_33. The "-0" lets pre-release
+# server versions such as EKS's "v1.35.9-eks-..." satisfy the constraint.
+kubeVersion: ">=1.33.0-0"

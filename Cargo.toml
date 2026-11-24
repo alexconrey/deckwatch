@@ -10,11 +10,16 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-uti
 tower = "0.5"
 tower-http = { version = "0.7", features = ["fs", "compression-gzip", "trace"] }
 
-kube = { version = "4", features = ["ws"] }
-k8s-openapi = { version = "0.28", features = ["v1_32"] }
+kube = { version = "5", features = ["ws"] }
+# deckwatch is the binary, so it picks the Kubernetes API version (k8s-openapi
+# allows exactly one `v1_*` feature per build; libraries such as mcp-k8s don't
+# set one). v1_33 is the oldest k8s-openapi 0.29 offers, so deckwatch supports
+# Kubernetes >= 1.33 (Zeus runs 1.35). Raising it raises that floor.
+k8s-openapi = { version = "0.29", features = ["v1_33"] }
 # default-features = false: deckwatch only uses the mcp_k8s library, not the
 # standalone server binary (and its utoipa-swagger-ui / zip build dependencies).
-mcp-k8s = { git = "https://github.com/alexconrey/mcp-k8s.git", branch = "main", default-features = false }
+# kube and k8s-openapi must match mcp-k8s's: deckwatch passes its kube::Client in.
+mcp-k8s = { git = "https://github.com/alexconrey/mcp-k8s.git", tag = "v0.5.0", default-features = false }
 rustls = { version = "0.23", features = ["ring"] }
 
 serde = { version = "1", features = ["derive"] }
