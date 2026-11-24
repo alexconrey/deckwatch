@@ -34,8 +34,8 @@ importers:
         version: 4.2.4
     devDependencies:
       '@pinia/testing':
-        specifier: ^0.1.7
-        version: 0.1.7(pinia@3.0.4(typescript@5.7.3)(vue@3.5.46(typescript@5.7.3)))(vue@3.5.46(typescript@5.7.3))
+        specifier: ^1.0.3
+        version: 1.0.3(pinia@3.0.4(typescript@5.7.3)(vue@3.5.46(typescript@5.7.3)))
       '@playwright/test':
         specifier: ^1.65.1
         version: 1.65.1
@@ -265,10 +265,10 @@ packages:
   '@one-ini/wasm@0.2.1':
     resolution: {integrity: sha512-TUqERXGNTifZ9y2g3wPxQrw3HpHv/02DsW3D90T9x0hhonrL1ZqpSmNrU2XkoIq0fP1N6gZfVQzy2Fw1ZvGBNg==}
 
-  '@pinia/testing@0.1.7':
-    resolution: {integrity: sha512-xcDq6Ry/kNhZ5bsUMl7DeoFXwdume1NYzDggCiDUDKoPQ6Mo0eH9VU7bJvBtlurqe6byAntWoX5IhVFqWzRz/Q==}
+  '@pinia/testing@1.0.3':
+    resolution: {integrity: sha512-g+qR49GNdI1Z8rZxKrQC3GN+LfnGTNf5Kk8Nz5Cz6mIGva5WRS+ffPXQfzhA0nu6TveWzPNYTjGl4nJqd3Cu9Q==}
     peerDependencies:
-      pinia: '>=2.2.6'
+      pinia: '>=3.0.4'
 
   '@playwright/test@1.65.1':
     resolution: {integrity: sha512-y+NCIRm2LvY4slUVWvGh1nujJ8RF/hEisIsq2mtUPgdQC4L701bq5hZGMhrpeXjACvwvO9tj5dJqhvM6TP9lbw==}
@@ -986,17 +986,6 @@ packages:
   vue-component-type-helpers@3.3.14:
     resolution: {integrity: sha512-Pq3+OnbCiPCHk0R7KSZrx+j/XXaUn2kSQ1epxq60w8CPbByLjC1EJgV51n4WY851sTXUVzsNMuitywdkdVyKjA==}
 
-  vue-demi@0.14.10:
-    resolution: {integrity: sha512-nMZBOwuzabUO0nLgIcc6rycZEebF6eeUfaiQx9+WSk8e29IbLvPU9feI6tqW4kTo3hvoYAJkMh8n8D0fuISphg==}
-    engines: {node: '>=12'}
-    hasBin: true
-    peerDependencies:
-      '@vue/composition-api': ^1.0.0-rc.1
-      vue: ^3.0.0-0 || ^2.6.0
-    peerDependenciesMeta:
-      '@vue/composition-api':
-        optional: true
-
   vue-router@4.6.5:
     resolution: {integrity: sha512-HBoGqixpB2ej1kI17NotdOatUdKIsi3yfOQ5vhwAhcoHk90+JtwtIy7MEeOqdPi1+npmQVMEu5F+Hvw+3TU48w==}
     peerDependencies:
@@ -1165,13 +1154,9 @@ snapshots:
 
   '@one-ini/wasm@0.2.1': {}
 
-  '@pinia/testing@0.1.7(pinia@3.0.4(typescript@5.7.3)(vue@3.5.46(typescript@5.7.3)))(vue@3.5.46(typescript@5.7.3))':
+  '@pinia/testing@1.0.3(pinia@3.0.4(typescript@5.7.3)(vue@3.5.46(typescript@5.7.3)))':
     dependencies:
       pinia: 3.0.4(typescript@5.7.3)(vue@3.5.46(typescript@5.7.3))
-      vue-demi: 0.14.10(vue@3.5.46(typescript@5.7.3))
-    transitivePeerDependencies:
-      - '@vue/composition-api'
-      - vue
 
   '@playwright/test@1.65.1':
     dependencies:
@@ -1830,10 +1815,6 @@ snapshots:
       vue: 3.5.46(typescript@5.7.3)
 
   vue-component-type-helpers@3.3.14: {}
-
-  vue-demi@0.14.10(vue@3.5.46(typescript@5.7.3)):
-    dependencies:
-      vue: 3.5.46(typescript@5.7.3)
 
   vue-router@4.6.5(vue@3.5.46(typescript@5.7.3)):
     dependencies:

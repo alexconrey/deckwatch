@@ -24,7 +24,7 @@
     "web-vitals": "^4.2.4"
   },
   "devDependencies": {
-    "@pinia/testing": "^0.1.7",
+    "@pinia/testing": "^1.0.3",
     "@playwright/test": "^1.65.1",
     "@vitejs/plugin-vue": "^5.2.4",
     "@vitest/coverage-v8": "^4.1.12",
