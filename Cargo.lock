@@ -2851,8 +2851,8 @@ checksum = "4facc753ae494aeb6e3c22f839b158aebd4f9270f55cd3c79906c45476c47ab4"
 
 [[package]]
 name = "mcp-k8s"
-version = "0.1.0"
-source = "git+https://github.com/alexconrey/mcp-k8s.git?branch=main#bc355884445fa80e8c2dd93775d41ec7a016d6c2"
+version = "0.4.0"
+source = "git+https://github.com/alexconrey/mcp-k8s.git?tag=v0.4.0#7cb8e011694cd89b76a6c9ff408de5ef0a15cbd9"
 dependencies = [
  "futures",
  "http",
