@@ -8,19 +8,52 @@ jobs:
   rust-check:
     name: Rust Check
     runs-on: ubuntu-latest
+    env:
+      CARGO_TERM_COLOR: always
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - name: Install Rust 1.91
-        uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: "1.91"
-          components: clippy, rustfmt
+      # rust-toolchain.toml is the single source of truth for the toolchain.
+      # rustup gives it precedence over `rustup default`, so a separate
+      # toolchain-install action only installs a toolchain that cargo then
+      # ignores (that is how CI used to build with the runner's preinstalled
+      # stable). With no arguments, `rustup toolchain install` (rustup >= 1.28)
+      # installs the toolchain, profile and components that file pins.
+      - name: Install Rust toolchain from rust-toolchain.toml
+        run: |
+          rustup toolchain install --no-self-update
+          rustc --version --verbose
+          cargo --version
+
+      # The release image is built by the Dockerfile's rust:<version> stages,
+      # so CI must compile with the same rustc minor version.
+      - name: Check toolchain matches Dockerfile rust image
+        run: |
+          want=$(rustc --version | sed -E 's/^rustc ([0-9]+\.[0-9]+).*/\1/')
+          images=$(awk 'toupper($1) == "FROM" { for (i = 2; i <= NF; i++) if ($i !~ /^--/) { print $i; break } }' Dockerfile | grep -E '(^|/)rust([:@]|$)' || true)
+          if [ -z "$images" ]; then
+            echo "::error file=Dockerfile::no rust:<version> build stage found"
+            exit 1
+          fi
+          rc=0
+          for image in $images; do
+            case "$image" in
+              *rust:"$want" | *rust:"$want"[.-]*) echo "ok: $image matches rustc $want" ;;
+              *) echo "::error file=Dockerfile::$image does not match rustc $want from rust-toolchain.toml; bump both together"; rc=1 ;;
+            esac
+          done
+          exit "$rc"
 
       - uses: Swatinem/rust-cache@v2
 
       - name: cargo check
         run: cargo check --locked
+
+      # Also type-check tests (and any benches/examples) so test-only breakage
+      # is caught. Tests are not run yet because `cargo test` has known
+      # failures being fixed separately; add `cargo test --locked` once it passes.
+      - name: cargo check (all targets)
+        run: cargo check --locked --all-targets
 
       - name: cargo clippy
         run: cargo clippy -- -D warnings
@@ -35,15 +68,15 @@ jobs:
       run:
         working-directory: frontend
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Setup Node.js 24
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: "24"
 
       - name: Install pnpm
-        uses: pnpm/action-setup@v4
+        uses: pnpm/action-setup@v6
         with:
           version: 11
 
@@ -55,14 +88,20 @@ jobs:
       - name: type check + build
         run: pnpm run build
 
+      - name: type check tests
+        run: pnpm run typecheck:test
+
+      - name: unit tests
+        run: pnpm test
+
   helm-lint:
     name: Helm Lint
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Set up Helm
-        uses: azure/setup-helm@v4
+        uses: azure/setup-helm@v5
 
       - name: helm lint
         run: helm lint helm/deckwatch --set image.repository=test --set image.tag=test

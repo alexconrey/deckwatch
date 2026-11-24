@@ -60,6 +60,8 @@ function makePlugin(schema: ConfigField[], name = "aws"): PluginSummary {
     provides: [],
     depends_on: [],
     wasm_size_bytes: 1024,
+    resources: [],
+    mcp_tuning_fields: [],
     config_schema: schema,
   };
 }

@@ -220,26 +220,6 @@ async function installDefaultRoutes(page: Page) {
       body: JSON.stringify(fixtureData.nodes),
     });
   });
-
-  await page.route("**/api/addons", async (route) => {
-    return route.fulfill({
-      status: 200,
-      contentType: "application/json",
-      body: JSON.stringify({
-        addons: [
-          {
-            id: "redis",
-            name: "Redis",
-            description: "cache",
-            image: "redis:7-alpine",
-            default_port: 6379,
-            default_env: [],
-            default_resources: { cpu: "100m", memory: "128Mi" },
-          },
-        ],
-      }),
-    });
-  });
 }
 
 export const test = base.extend<Fixtures>({

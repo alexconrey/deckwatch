@@ -309,35 +309,37 @@ For advanced users, you can view the full Kubernetes YAML spec:
 
 This is read-only. To edit via YAML, use the YAML tab in the Edit dialog.
 
-## Addons (Sidecar Containers)
+## Sidecar Containers (Plugins)
 
-Addons attach pre-configured sidecar containers to your deployment. On the
-deployment detail page, the **Addons** card shows attached addons and lets you
-browse the catalog.
+Pre-configured sidecars such as Redis or PostgreSQL are provided by plugins.
+You add them to an application, not to a single deployment. Deckwatch then
+injects them into every deployment and cron job that belongs to that
+application (see [Applications](APPLICATIONS.md)).
 
-Available addons:
+| Sidecar | Plugin | Default image | Env vars injected into your app |
+|---------|--------|---------------|---------------------------------|
+| Redis | [deckwatch-plugin-redis](https://github.com/alexconrey/deckwatch-plugin-redis) | `redis:7-alpine` | `REDIS_URL=redis://localhost:6379` |
+| Memcached | [deckwatch-plugin-memcached](https://github.com/alexconrey/deckwatch-plugin-memcached) | `memcached:1.6-alpine` | `MEMCACHED_URL=memcached://localhost:11211` |
+| Nginx proxy | [deckwatch-plugin-nginx-proxy](https://github.com/alexconrey/deckwatch-plugin-nginx-proxy) | `nginx:1.27-alpine` | — |
+| Fluent Bit | [deckwatch-plugin-fluent-bit](https://github.com/alexconrey/deckwatch-plugin-fluent-bit) | `fluent/fluent-bit:3.1` | — |
+| OpenTelemetry Collector | [deckwatch-plugin-otel](https://github.com/alexconrey/deckwatch-plugin-otel) | `otel/opentelemetry-collector:latest` | `OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4317`, plus `OTEL_SERVICE_NAME` if you set one |
+| PostgreSQL | [deckwatch-plugin-postgresql](https://github.com/alexconrey/deckwatch-plugin-postgresql) | `postgres:16-alpine` | `PG_HOST=localhost`, `POSTGRES_DB`, `POSTGRES_USER`, `POSTGRES_PASSWORD`, `PGDATA` |
 
-| Addon | Image | Injected Env Vars |
-|-------|-------|-------------------|
-| Redis | `redis:7-alpine` | `REDIS_URL=redis://localhost:6379` |
-| Memcached | `memcached:1.6-alpine` | `MEMCACHED_URL=memcached://localhost:11211` |
-| Nginx Proxy | `nginx:1.27-alpine` | `PROXY_URL=http://localhost:8080` |
-| Fluent Bit | `fluent/fluent-bit:3.1` | — |
-| OpenTelemetry | `otel/opentelemetry-collector:latest` | `OTEL_EXPORTER_OTLP_ENDPOINT`, `OTEL_SERVICE_NAME` |
-| **PostgreSQL** | `postgres:16-alpine` | `PG_HOST=localhost`, `POSTGRES_DB=app`, `POSTGRES_USER=app`, `POSTGRES_PASSWORD=changeme` |
+The PostgreSQL plugin also creates a PersistentVolumeClaim named
+`<application>-postgres-data` (default `1Gi`). Removing the resource does not
+delete the PVC. The plugin derives the database password from the application
+and database names instead of generating a random one; see its README.
 
-The **PostgreSQL** addon is unique: it creates a PersistentVolumeClaim for
-durable storage (default 1Gi). Your data survives pod restarts. When you
-detach the addon, the PVC is automatically cleaned up.
+To add a sidecar:
+1. Check that the plugin is installed and enabled under **Settings → Plugins**.
+   This is an administrator task; see [Plugin System](PLUGINS.md).
+2. Open the application's detail page and select the **Infrastructure** tab.
+3. Click **Provision** next to the resource, fill in any fields, and click
+   **Provision** again to confirm.
 
-To attach an addon:
-1. Open the deployment detail page.
-2. In the **Addons** card, click **Browse Catalog**.
-3. Click **Attach** on the desired addon.
-4. (Optional) Override the default port, env vars, or resource limits.
-
-Addon env vars are automatically injected into your primary container so your
-application code can discover the sidecar without additional configuration.
+Deckwatch adds the sidecar and env vars to the application's deployments on
+its next reconcile cycle, which runs every 10 seconds. Each plugin's README
+lists its fields and exactly what it injects.
 
 ## Cloning and Promoting
 

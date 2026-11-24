@@ -20,9 +20,9 @@ operator to know kubectl or hand-write YAML.
 - **Observability** — Prometheus text-format metrics on `/metrics`, per-pod
   and per-node resource metrics (CPU/memory sparklines), and AI-assisted
   diagnostics that hand pod logs to Claude or Codex when a pod crashes.
-- **Templates & Addons** — jumpstart new deployments from the template
-  catalog; attach shared infrastructure (databases, message queues, ...) as
-  addons.
+- **Templates & Plugins** — jumpstart new deployments from the template
+  catalog; extend workloads with WASM plugins, such as Redis, PostgreSQL or
+  OpenTelemetry Collector sidecars provisioned per application.
 - **Rollout History & Rollback** — every mutation becomes a first-class
   revision so a non-engineer can see "what shipped when" and undo a bad
   rollout without touching `kubectl rollout undo`.
