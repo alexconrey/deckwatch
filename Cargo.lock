@@ -2837,7 +2837,7 @@ checksum = "4facc753ae494aeb6e3c22f839b158aebd4f9270f55cd3c79906c45476c47ab4"
 [[package]]
 name = "mcp-k8s"
 version = "0.5.0"
-source = "git+https://github.com/alexconrey/mcp-k8s.git?branch=feat%2Fkube-5#c0e10f5943521d565ceefc0f651c2acd48342df8"
+source = "git+https://github.com/alexconrey/mcp-k8s.git?tag=v0.5.0#d04ae97cbd5477dbfc11ac8540648355a79559cf"
 dependencies = [
  "futures",
  "http",
