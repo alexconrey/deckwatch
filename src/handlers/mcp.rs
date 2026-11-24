@@ -800,6 +800,7 @@ fn deckwatch_tool_definitions() -> Vec<serde_json::Value> {
             "name": "deprovision_resource",
             "description": "Deprovision (tear down) a plugin-managed infrastructure resource from an application. \
         WARNING: This calls the plugin's deprovision() function, which tears down the underlying cloud infrastructure (e.g. deletes an RDS instance or S3 bucket) and removes the injected env vars from all application deployments. \
+        Deckwatch also deletes the Kubernetes objects the plugin asks for (ServiceAccounts and Jobs in the application's namespace only; a ServiceAccount still used by a workload is kept) and reports each one in kubernetes_resource_deletions. \
         This action is destructive and may result in data loss — confirm with the user before proceeding.",
             "inputSchema": {
                 "type": "object",
@@ -2589,14 +2590,14 @@ async fn tool_deprovision_resource(
         .as_str()
         .ok_or("resource_id is required")?;
 
-    application_resources::deprovision(
-        State(state.clone()),
-        axum::extract::Path((
-            ns.to_string(),
-            app_name.to_string(),
-            plugin_name.to_string(),
-            resource_id.to_string(),
-        )),
+    let deletions = application_resources::deprovision_resource(
+        state,
+        &application_resources::DeprovisionTarget {
+            namespace: ns,
+            application: app_name,
+            plugin: plugin_name,
+            resource_id,
+        },
     )
     .await
     .map_err(|e| format!("{e}"))?;
@@ -2606,7 +2607,8 @@ async fn tool_deprovision_resource(
         "namespace": ns,
         "application_name": app_name,
         "plugin_name": plugin_name,
-        "resource_id": resource_id
+        "resource_id": resource_id,
+        "kubernetes_resource_deletions": deletions,
     })
     .to_string())
 }
