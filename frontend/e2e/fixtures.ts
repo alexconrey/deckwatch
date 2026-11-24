@@ -1,238 +1,139 @@
-import { test as base, expect, type Page, type Route } from "@playwright/test";
+import { test as base, expect, type Route } from "@playwright/test";
+import { App, THEME_NAMES, type Theme } from "./support/app";
+import { FIXED_NOW, createMockState, type MockState } from "./support/data";
+import { MockApi } from "./support/mock-api";
+import { installDefaultRoutes } from "./support/routes";
 
 /**
- * Extended test fixture that installs default mock handlers for the
- * deckwatch API. Individual tests can override a handler by calling
- * `mockApi.override(pattern, handler)` before navigating.
+ * Extended Playwright test used by every spec (import `test` and `expect`
+ * from here, not from @playwright/test).
  *
- * All routes fall through to the real backend if not matched — set
- * `PLAYWRIGHT_MOCK_MODE=off` to disable all mocking (for real-backend
- * runs).
+ * Each test gets:
+ * - `mockApi`: every `/api/**` request answered from `mockState`
+ *   (see support/routes.ts). Override one with `mockApi.on(method, path, ...)`.
+ *   An unmocked API request, a request to another origin, or an uncaught page
+ *   error fails the test.
+ * - a browser clock frozen at FIXED_NOW (timers still run), a fixed theme,
+ *   and CSS transitions/animations switched off.
+ * - `app`: navigation, settle and screenshot helpers (support/app.ts).
+ *
+ * `PLAYWRIGHT_MOCK_MODE=off` disables the mocks for runs against a real
+ * backend; the visual specs skip themselves in that mode.
  */
 
 export interface Fixtures {
+  /** Kept for older specs. */
   namespace: string;
+  /** Kept for older specs. */
   deploymentName: string;
-  mockApi: {
-    override(
-      pattern: string | RegExp,
-      handler: (route: Route) => Promise<void> | void,
-    ): Promise<void>;
-  };
+  /** Vuetify theme the app starts in. */
+  theme: Theme;
+  mockState: MockState;
+  mockApi: MockApi;
+  app: App;
 }
 
-const useMocks = process.env.PLAYWRIGHT_MOCK_MODE !== "off";
+export const useMocks = process.env.PLAYWRIGHT_MOCK_MODE !== "off";
 
-const fixtureData = {
-  namespaces: ["default", "team-a", "team-b"],
-  deployments: (ns: string) => ({
-    deployments: [
-      {
-        name: "web",
-        namespace: ns,
-        image: "nginx:1.25",
-        replicas: { desired: 3, ready: 3, available: 3, updated: 3 },
-        status: "available",
-        created_at: new Date(Date.now() - 3 * 60 * 60 * 1000).toISOString(),
-        labels: { app: "web" },
-      },
-      {
-        name: "worker",
-        namespace: ns,
-        image: "worker:v1",
-        replicas: { desired: 2, ready: 1, available: 1, updated: 2 },
-        status: "degraded",
-        created_at: new Date(Date.now() - 30 * 60 * 1000).toISOString(),
-        labels: { app: "worker" },
-      },
-    ],
-  }),
-  deployment: (ns: string, name: string) => ({
-    name,
-    namespace: ns,
-    image: "nginx:1.25",
-    replicas: { desired: 3, ready: 3, available: 3, updated: 3 },
-    status: "available",
-    created_at: new Date(Date.now() - 3 * 60 * 60 * 1000).toISOString(),
-    labels: { app: name },
-    conditions: [
-      {
-        condition_type: "Available",
-        status: "True",
-        reason: "MinimumReplicasAvailable",
-        message: null,
-        last_transition: null,
-      },
-    ],
-    env: [{ name: "PORT", value: "8080" }],
-    command: [],
-    args: [],
-    resource_limits: { cpu: "500m", memory: "512Mi" },
-    resource_requests: { cpu: "100m", memory: "128Mi" },
-    liveness_probe: null,
-    readiness_probe: null,
-    startup_probe: null,
-    pods: [
-      {
-        name: `${name}-abc123-x1`,
-        phase: "Running",
-        ready: true,
-        restart_count: 0,
-        node: "node-a",
-        started_at: new Date().toISOString(),
-        conditions: [],
-        container_statuses: [
-          {
-            name,
-            ready: true,
-            restart_count: 0,
-            state: "running",
-            state_reason: null,
-            image: "nginx:1.25",
-          },
-        ],
-      },
-    ],
-    ingresses: [],
-  }),
-  nodes: {
-    nodes: [
-      {
-        name: "node-a",
-        status: "Ready",
-        roles: ["worker"],
-        cpu_capacity: "8",
-        memory_capacity: "32Gi",
-        cpu_allocatable: "7",
-        memory_allocatable: "30Gi",
-        os_image: "Ubuntu 22.04",
-        kernel_version: "5.15.0",
-        kubelet_version: "v1.32.0",
-        conditions: [],
-        created_at: new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString(),
-      },
-    ],
-  },
-};
-
-async function installDefaultRoutes(page: Page) {
-  if (!useMocks) return;
-
-  await page.route("**/api/namespaces", async (route) => {
-    if (route.request().method() === "POST") {
-      const req = JSON.parse(route.request().postData() ?? "{}");
-      return route.fulfill({
-        status: 201,
-        contentType: "application/json",
-        body: JSON.stringify({
-          name: req.name,
-          created_at: new Date().toISOString(),
-          labels: req.labels ?? {},
-        }),
-      });
-    }
-    return route.fulfill({
-      status: 200,
-      contentType: "application/json",
-      body: JSON.stringify({ namespaces: fixtureData.namespaces }),
-    });
-  });
-
-  await page.route(
-    /\/api\/namespaces\/[^/]+\/deployments$/,
-    async (route) => {
-      const url = new URL(route.request().url());
-      const ns = url.pathname.split("/")[3];
-      if (route.request().method() === "POST") {
-        return route.fulfill({
-          status: 201,
-          contentType: "application/json",
-          body: JSON.stringify(fixtureData.deployment(ns, "web")),
-        });
-      }
-      return route.fulfill({
-        status: 200,
-        contentType: "application/json",
-        body: JSON.stringify(fixtureData.deployments(ns)),
-      });
-    },
-  );
-
-  await page.route(
-    /\/api\/namespaces\/[^/]+\/deployments\/[^/]+$/,
-    async (route) => {
-      const parts = new URL(route.request().url()).pathname.split("/");
-      const ns = parts[3];
-      const name = parts[5];
-      const method = route.request().method();
-      if (method === "DELETE") {
-        return route.fulfill({ status: 204 });
-      }
-      return route.fulfill({
-        status: 200,
-        contentType: "application/json",
-        body: JSON.stringify(fixtureData.deployment(ns, name)),
-      });
-    },
-  );
-
-  await page.route(
-    /\/api\/namespaces\/[^/]+\/pods\/[^/]+$/,
-    async (route) => {
-      const parts = new URL(route.request().url()).pathname.split("/");
-      return route.fulfill({
-        status: 200,
-        contentType: "application/json",
-        body: JSON.stringify({
-          name: parts[5],
-          phase: "Running",
-          ready: true,
-          restart_count: 0,
-          node: "node-a",
-          started_at: new Date().toISOString(),
-          conditions: [
-            {
-              condition_type: "Ready",
-              status: true,
-              reason: null,
-              message: null,
-            },
-          ],
-          container_statuses: [
-            {
-              name: "web",
-              ready: true,
-              restart_count: 0,
-              state: "running",
-              state_reason: null,
-              image: "nginx:1.25",
-            },
-          ],
-        }),
-      });
-    },
-  );
-
-  await page.route("**/api/nodes", async (route) => {
-    return route.fulfill({
-      status: 200,
-      contentType: "application/json",
-      body: JSON.stringify(fixtureData.nodes),
-    });
-  });
+// Ripples are click feedback that Vuetify removes on a timer up to ~550ms
+// after the click; they are never part of a resting UI state.
+const NO_MOTION_CSS = `
+*, *::before, *::after {
+  transition: none !important;
+  animation: none !important;
+  caret-color: transparent !important;
 }
+html { scroll-behavior: auto !important; }
+.v-ripple__container { display: none !important; }
+`;
 
 export const test = base.extend<Fixtures>({
   namespace: ["default", { option: true }],
   deploymentName: ["web", { option: true }],
-  mockApi: async ({ page }, use) => {
-    await installDefaultRoutes(page);
-    await use({
-      override: async (pattern, handler) => {
-        await page.route(pattern, handler);
-      },
-    });
+  theme: ["dark", { option: true }],
+
+  colorScheme: async ({ theme }, use) => {
+    await use(theme);
   },
+
+  page: async ({ page, theme }, use) => {
+    await page.clock.setFixedTime(FIXED_NOW);
+    // The app reads its theme from localStorage, falling back to
+    // prefers-color-scheme. Seed it only once so a theme toggle survives a
+    // reload.
+    await page.addInitScript((themeName: string) => {
+      if (localStorage.getItem("deckwatch-theme") === null) {
+        localStorage.setItem("deckwatch-theme", themeName);
+      }
+    }, THEME_NAMES[theme]);
+    // Count the page's in-flight fetches. App.settle() waits for zero, which
+    // also covers a request the page has started but the route handler has
+    // not seen yet (e.g. a poll fired by clock.runFor). Event streams and
+    // beacons do not go through fetch, so they never hold this up.
+    await page.addInitScript(() => {
+      const realFetch = window.fetch.bind(window);
+      let inFlight = 0;
+      Object.defineProperty(window, "__e2eFetchesInFlight", { get: () => inFlight });
+      window.fetch = (...args: Parameters<typeof fetch>) => {
+        inFlight += 1;
+        const done = () => {
+          inFlight -= 1;
+        };
+        const response = realFetch(...args);
+        response.then(done, done);
+        return response;
+      };
+    });
+    await page.addInitScript((css: string) => {
+      const install = () => {
+        const style = document.createElement("style");
+        style.dataset.e2e = "no-motion";
+        style.textContent = css;
+        (document.head ?? document.documentElement).appendChild(style);
+      };
+      if (document.documentElement) install();
+      else document.addEventListener("readystatechange", install, { once: true });
+    }, NO_MOTION_CSS);
+    await use(page);
+  },
+
+  mockState: async ({}, use) => {
+    await use(createMockState());
+  },
+
+  mockApi: async ({ page, mockState, baseURL }, use) => {
+    const api = new MockApi(page, new URL(baseURL ?? "http://127.0.0.1").origin);
+    if (useMocks) {
+      installDefaultRoutes(api, mockState);
+      await api.install();
+    }
+    await use(api);
+  },
+
+  app: [
+    async ({ page, mockApi, theme }, use, testInfo) => {
+      const app = new App(page, mockApi, theme);
+      await use(app);
+      // Only report these when the test itself passed; otherwise they would
+      // hide the original failure.
+      if (testInfo.status !== testInfo.expectedStatus) return;
+      if (!mockApi.allowUnhandled && mockApi.unhandled.length > 0) {
+        throw new Error(
+          `Unmocked API request(s); add a handler in e2e/support/routes.ts or the test:\n${mockApi.unhandled
+            .map((c) => `  ${c.method} /api${c.path}${c.query.size ? `?${c.query}` : ""}`)
+            .join("\n")}`,
+        );
+      }
+      if (mockApi.external.length > 0) {
+        throw new Error(`Request(s) to another origin:\n  ${mockApi.external.join("\n  ")}`);
+      }
+      if (!app.allowPageErrors && app.pageErrors.length > 0) {
+        throw new Error(`Uncaught page error(s):\n  ${app.pageErrors.map((e) => e.stack ?? e.message).join("\n  ")}`);
+      }
+    },
+    { auto: true },
+  ],
 });
 
 export { expect };
+export type { Route };
