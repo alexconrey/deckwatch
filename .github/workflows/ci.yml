@@ -55,6 +55,9 @@ jobs:
       - name: type check + build
         run: pnpm run build
 
+      - name: unit tests
+        run: pnpm test
+
   helm-lint:
     name: Helm Lint
     runs-on: ubuntu-latest
