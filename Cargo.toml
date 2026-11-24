@@ -28,7 +28,14 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 
 clap = { version = "4", features = ["derive", "env"] }
 jiff = "1.0"
-reqwest = { version = "0.12", features = ["json", "stream"] }
+# reqwest 0.13 defaults to rustls + rustls-platform-verifier: server certs
+# are checked against the OS trust store (/etc/ssl/certs; SSL_CERT_FILE /
+# SSL_CERT_DIR replace it when set), so private CAs trusted by the system keep
+# working. TLS uses the process-wide ring CryptoProvider installed at the top
+# of main(); the aws-lc-rs provider reqwest falls back to when none is
+# installed (e.g. unit tests) is already compiled in via rustls' default
+# features. `form` and `query` became opt-in in 0.13.
+reqwest = { version = "0.13", features = ["json", "stream", "form", "query"] }
 base64 = "0.23"
 anyhow = "1"
 metrics = "0.24"
