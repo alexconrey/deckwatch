@@ -873,3 +873,109 @@ async fn test_get_plugin_config_reports_loaded_binary_identity() {
     );
     assert_eq!(out["loaded_at"], "2026-11-24T12:00:00+00:00");
 }
+
+// ---------------------------------------------------------------------------
+// update_plugin_config: key_value fields
+// ---------------------------------------------------------------------------
+
+async fn state_with_key_value_schema() -> crate::state::AppState {
+    let state = state_with_plugins().await;
+    let field = |key: &str, field_type| crate::plugins::ConfigField {
+        key: key.to_string(),
+        label: key.to_string(),
+        description: String::new(),
+        field_type,
+        default: None,
+        required: false,
+        options: vec![],
+        env_source: None,
+    };
+    state.plugins.write().await[0].metadata.config_schema = vec![
+        field("RESOURCE_TAGS", crate::plugins::ConfigFieldType::KeyValue),
+        field("AWS_REGION", crate::plugins::ConfigFieldType::String),
+    ];
+    state
+}
+
+async fn stored_aws_config(
+    state: &crate::state::AppState,
+) -> std::collections::BTreeMap<String, String> {
+    let s = settings::load_settings_from_db(state).await;
+    s.plugins
+        .into_iter()
+        .find(|p| p.name == "aws")
+        .expect("aws plugin")
+        .config
+        .into_iter()
+        .collect()
+}
+
+#[tokio::test]
+async fn test_update_plugin_config_accepts_key_value_objects_strings_and_null() {
+    let state = state_with_key_value_schema().await;
+
+    // A JSON object is stored as its JSON string; strings pass through.
+    tool_update_plugin_config(
+        &state,
+        &json!({ "name": "aws", "config": {
+            "RESOURCE_TAGS": { "Team": "platform" },
+            "AWS_REGION": "us-gov-west-1"
+        }}),
+    )
+    .await
+    .expect("update ok");
+    let cfg = stored_aws_config(&state).await;
+    let tags: serde_json::Value = serde_json::from_str(&cfg["RESOURCE_TAGS"]).unwrap();
+    assert_eq!(tags, json!({ "Team": "platform" }));
+    assert_eq!(cfg["AWS_REGION"], "us-gov-west-1");
+
+    // The same value as a JSON string is accepted too.
+    tool_update_plugin_config(
+        &state,
+        &json!({ "name": "aws", "config": { "RESOURCE_TAGS": "{\"Team\":\"data\"}" } }),
+    )
+    .await
+    .expect("string form ok");
+    let tags: serde_json::Value =
+        serde_json::from_str(&stored_aws_config(&state).await["RESOURCE_TAGS"]).unwrap();
+    assert_eq!(tags, json!({ "Team": "data" }));
+
+    // null removes a key, as the tool description documents.
+    tool_update_plugin_config(
+        &state,
+        &json!({ "name": "aws", "config": { "AWS_REGION": null } }),
+    )
+    .await
+    .expect("null ok");
+    assert!(!stored_aws_config(&state).await.contains_key("AWS_REGION"));
+}
+
+#[tokio::test]
+async fn test_update_plugin_config_rejects_invalid_key_value_without_partial_writes() {
+    let state = state_with_key_value_schema().await;
+    for bad in [
+        json!("Team=platform"),
+        json!(["Team"]),
+        json!({ "Count": 3 }),
+        json!(7),
+    ] {
+        let err = tool_update_plugin_config(
+            &state,
+            &json!({ "name": "aws", "config": {
+                "AWS_REGION": "us-gov-west-1",
+                "RESOURCE_TAGS": bad
+            }}),
+        )
+        .await
+        .expect_err("invalid key_value must be rejected");
+        assert!(
+            err.contains("RESOURCE_TAGS"),
+            "error names the field: {err}"
+        );
+        // The valid AWS_REGION in the same call must not have been applied.
+        assert!(
+            !stored_aws_config(&state).await.contains_key("AWS_REGION"),
+            "no partial update for {bad}"
+        );
+    }
+}

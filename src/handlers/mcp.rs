@@ -702,8 +702,14 @@ fn deckwatch_tool_definitions() -> Vec<serde_json::Value> {
                     "name": { "type": "string", "description": "Plugin name as configured in settings" },
                     "config": {
                         "type": "object",
-                        "description": "Static key-value pairs injected into the plugin's extism config (credentials, endpoints, etc.). Merges with existing config — use null values to remove keys.",
-                        "additionalProperties": { "type": "string" }
+                        "description": "Static key-value pairs injected into the plugin's extism config (credentials, endpoints, etc.). Merges with existing config — use null values to remove keys. Values are strings; for key_value fields (see the plugin's config schema) pass either a JSON object of string values, e.g. {\"Team\": \"platform\"}, or that object as a JSON string.",
+                        "additionalProperties": {
+                            "anyOf": [
+                                { "type": "string" },
+                                { "type": "object", "additionalProperties": { "type": "string" } },
+                                { "type": "null" }
+                            ]
+                        }
                     },
                     "inherit_env_keys": {
                         "type": "array",
@@ -2195,10 +2201,51 @@ async fn tool_update_plugin_config(
     let mut changed = false;
 
     if let Some(config_val) = args.get("config").filter(|v| !v.is_null()) {
-        let updates: std::collections::BTreeMap<String, String> =
-            serde_json::from_value(config_val.clone())
-                .map_err(|e| format!("invalid config: {e}"))?;
-        cfg.config.extend(updates);
+        let entries = config_val
+            .as_object()
+            .ok_or("invalid config: expected an object of key → value")?;
+        let schema: Vec<crate::plugins::ConfigField> = {
+            let loaded = state.plugins.read().await;
+            loaded
+                .iter()
+                .find(|p| p.name == name)
+                .map(|p| p.metadata.config_schema.clone())
+                .unwrap_or_default()
+        };
+        // Resolve every entry before applying any, so a bad value can't leave
+        // the config half-updated. None = remove the key.
+        let mut resolved: Vec<(String, Option<String>)> = Vec::with_capacity(entries.len());
+        for (key, value) in entries {
+            let is_key_value = schema.iter().any(|f| {
+                f.key == *key && f.field_type == crate::plugins::ConfigFieldType::KeyValue
+            });
+            let stored = match value {
+                serde_json::Value::Null => None,
+                serde_json::Value::String(s) => Some(s.clone()),
+                serde_json::Value::Object(_) if is_key_value => Some(value.to_string()),
+                _ if is_key_value => {
+                    return Err(format!(
+                        "invalid config: {key} takes a JSON object of string values"
+                    ))
+                }
+                _ => return Err(format!("invalid config: value for {key} must be a string")),
+            };
+            if let (true, Some(raw)) = (is_key_value, &stored) {
+                crate::plugins::validate_key_value_field(raw)
+                    .map_err(|e| format!("invalid config: {key}: {e}"))?;
+            }
+            resolved.push((key.clone(), stored));
+        }
+        for (key, stored) in resolved {
+            match stored {
+                Some(v) => {
+                    cfg.config.insert(key, v);
+                }
+                None => {
+                    cfg.config.remove(&key);
+                }
+            }
+        }
         changed = true;
     }
 
