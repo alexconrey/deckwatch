@@ -133,7 +133,7 @@ pub async fn list_branches(
         .map(|v| String::from_utf8_lossy(&v.0).to_string())
         .ok_or_else(|| AppError::BadRequest("secret missing 'token' key".to_string()))?;
 
-    let http = reqwest::Client::new();
+    let http = crate::outbound::global().client(crate::outbound::Purpose::Git);
     let response = fetch_branches(&http, &q.repo_url, &token)
         .await
         .map_err(|e| AppError::BadRequest(format!("failed to list branches: {e}")))?;
@@ -180,7 +180,8 @@ async fn fetch_branches(
         .get(&url)
         .header("Authorization", format!("Basic {creds}"))
         .send()
-        .await?
+        .await
+        .map_err(|e| anyhow::anyhow!("{}", crate::outbound::error_chain(&e)))?
         .error_for_status()?
         .text()
         .await?;
