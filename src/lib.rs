@@ -460,3 +460,5 @@ pub mod testing {
 mod integration_tests;
 #[cfg(test)]
 mod live_plugin_events_tests;
+#[cfg(test)]
+mod plugin_events_acceptance_tests;
