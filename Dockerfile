@@ -1,5 +1,8 @@
 # Keep the Node major in step with frontend/.nvmrc, which CI builds with.
-FROM node:26-alpine AS frontend-builder
+# The frontend and docs stages produce platform-independent files (static
+# assets and HTML), so they run on the build machine's own platform: a release
+# build for another architecture doesn't have to emulate them.
+FROM --platform=$BUILDPLATFORM node:26-alpine AS frontend-builder
 RUN npm install -g pnpm@11
 WORKDIR /app
 COPY frontend/package.json frontend/pnpm-lock.yaml frontend/pnpm-workspace.yaml ./
@@ -11,8 +14,27 @@ RUN pnpm exec vite build
 # self-contained static site under docs/book/book/. We use --copy mode so
 # the resulting layout is portable — no symlinks pointing outside the
 # build context.
-FROM rust:1.99-bookworm AS docs-builder
-RUN cargo install mdbook --version ^0.4 --locked
+#
+# mdBook comes from a pinned release binary with a verified checksum, instead
+# of being compiled with `cargo install` on every cache miss. CI's Docs Build
+# job reads MDBOOK_VERSION and MDBOOK_SHA256_X86_64 from these ARGs, so bump
+# them here and both stay in step.
+FROM --platform=$BUILDPLATFORM rust:1.99-bookworm AS docs-builder
+ARG BUILDARCH
+ARG MDBOOK_VERSION=v0.4.52
+ARG MDBOOK_SHA256_X86_64=c0b903f01dd8f4edc644372ad2b80b1fdddd12552d37b6a098657cbd8eddd768
+ARG MDBOOK_SHA256_AARCH64=7273dda980915a1e2f114d63d432aa6284551e37f0358e3ce7653d1e49e6fa3f
+RUN case "$BUILDARCH" in \
+      amd64) target=x86_64-unknown-linux-gnu; sha256="$MDBOOK_SHA256_X86_64" ;; \
+      arm64) target=aarch64-unknown-linux-musl; sha256="$MDBOOK_SHA256_AARCH64" ;; \
+      *) echo "no pinned mdBook binary for build architecture $BUILDARCH" >&2; exit 1 ;; \
+    esac && \
+    curl --fail --silent --show-error --location --output /tmp/mdbook.tar.gz \
+      "https://github.com/rust-lang/mdBook/releases/download/${MDBOOK_VERSION}/mdbook-${MDBOOK_VERSION}-${target}.tar.gz" && \
+    echo "${sha256}  /tmp/mdbook.tar.gz" | sha256sum --check --strict && \
+    tar -xzf /tmp/mdbook.tar.gz -C /usr/local/bin mdbook && \
+    rm /tmp/mdbook.tar.gz && \
+    mdbook --version
 WORKDIR /app
 COPY docs/ docs/
 COPY scripts/ scripts/
@@ -25,11 +47,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /app
 COPY Cargo.toml Cargo.lock ./
 RUN mkdir src && echo 'fn main(){}' > src/main.rs
-RUN cargo build --release && rm -rf src
+RUN cargo build --release --locked && rm -rf src
 COPY src/ src/
 COPY docs/ docs/
 COPY openapi/ openapi/
-RUN touch src/main.rs && cargo build --release
+RUN touch src/main.rs && cargo build --release --locked
 
 FROM gcr.io/distroless/cc-debian12
 WORKDIR /app
