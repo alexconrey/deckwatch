@@ -782,7 +782,7 @@ pub async fn add_plugin(
 
     // Bug 1: idempotency — check for an existing association before inserting.
     // Use a case-insensitive comparison in the DB query (Bug 2).
-    use sea_orm::sea_query::{Expr, Func};
+    use sea_orm::sea_query::{Expr, ExprTrait, Func};
     let existing = application_plugins::Entity::find()
         .filter(application_plugins::Column::ApplicationId.eq(&app_id))
         .filter(
@@ -838,7 +838,7 @@ pub async fn remove_plugin(
 
     // Bug 2: use case-insensitive comparison so that "AWS" and "aws" resolve to
     // the same stored row regardless of how the name was originally cased.
-    use sea_orm::sea_query::{Expr, Func};
+    use sea_orm::sea_query::{Expr, ExprTrait, Func};
     let deleted = application_plugins::Entity::delete_many()
         .filter(application_plugins::Column::ApplicationId.eq(&app_id))
         .filter(
