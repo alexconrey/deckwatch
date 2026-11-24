@@ -4,8 +4,10 @@ import { useRoute, useRouter } from "vue-router";
 import { useNamespaceStore } from "@/stores/namespace";
 import { deploymentsApi } from "@/api/deployments";
 import { deploymentsUxApi } from "@/api/deployments_additions";
-import type { CreateDeploymentRequest } from "@/types/api";
+import type { CreateDeploymentRequest, PluginEventReport } from "@/types/api";
 import DeploymentForm from "@/components/views/deployment/DeploymentForm.vue";
+import PluginEventList from "@/components/common/PluginEventList.vue";
+import { hasProblems, summarizeEvents, worstSeverity } from "@/utils/pluginEvents";
 
 const route = useRoute();
 const router = useRouter();
@@ -14,6 +16,11 @@ const loading = ref(false);
 const error = ref<string | null>(null);
 const templateInitial = ref<Partial<CreateDeploymentRequest> | undefined>();
 const templateId = ref<string | null>(null);
+// Set when the deployment was created but its plugins reported warnings or
+// errors: the page stays put so the operator sees them before moving on.
+const created = ref<{ namespace: string; name: string; events: PluginEventReport[] } | null>(
+  null,
+);
 
 onMounted(() => {
   // If the user arrived from the template picker, hydrate the form with the
@@ -46,7 +53,15 @@ const handleSubmit = async (values: CreateDeploymentRequest) => {
   loading.value = true;
   error.value = null;
   try {
-    await deploymentsApi.create(ns.selected, values);
+    const resp = await deploymentsApi.create(ns.selected, values);
+    if (hasProblems(resp.plugin_events)) {
+      created.value = {
+        namespace: ns.selected,
+        name: values.name,
+        events: resp.plugin_events ?? [],
+      };
+      return;
+    }
     router.push({
       name: "DeploymentDetail",
       params: { namespace: ns.selected, name: values.name },
@@ -56,6 +71,14 @@ const handleSubmit = async (values: CreateDeploymentRequest) => {
   } finally {
     loading.value = false;
   }
+};
+
+const continueToCreated = () => {
+  if (!created.value) return;
+  router.push({
+    name: "DeploymentDetail",
+    params: { namespace: created.value.namespace, name: created.value.name },
+  });
 };
 </script>
 
@@ -91,7 +114,24 @@ const handleSubmit = async (values: CreateDeploymentRequest) => {
       {{ error }}
     </v-alert>
 
-    <v-card v-if="ns.selected" class="pa-4">
+    <v-alert
+      v-if="created"
+      :type="worstSeverity(created.events) === 'error' ? 'error' : 'warning'"
+      variant="tonal"
+      class="mb-4"
+      data-testid="create-plugin-events"
+    >
+      <div class="mb-2">
+        Deployment <strong>{{ created.name }}</strong> was created, but its plugins
+        reported {{ summarizeEvents(created.events) }}:
+      </div>
+      <PluginEventList :events="created.events" />
+      <v-btn class="mt-3" variant="tonal" @click="continueToCreated">
+        Continue to deployment
+      </v-btn>
+    </v-alert>
+
+    <v-card v-if="ns.selected && !created" class="pa-4">
       <v-chip class="mb-4" color="primary" variant="outlined" size="small">
         {{ ns.selected }}
       </v-chip>

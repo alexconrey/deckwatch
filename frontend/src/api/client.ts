@@ -1,15 +1,26 @@
 import { recordApiCall, recordError } from "@/composables/useMetrics";
 import { useAuth } from "@/composables/useAuth";
+import type { PluginEventReport } from "@/types/api";
 
 const BASE_URL = "/api";
 
 export class ApiError extends Error {
   constructor(
     public status: number,
-    public body: { error: string; message: string },
+    public body: {
+      error: string;
+      message: string;
+      /** Set when a plugin call the request depended on failed (502). */
+      plugin_events?: PluginEventReport[];
+    },
   ) {
     super(body.message);
   }
+}
+
+/** The plugin events carried by a failed request, if any. */
+export function pluginEventsOf(err: unknown): PluginEventReport[] {
+  return err instanceof ApiError ? (err.body.plugin_events ?? []) : [];
 }
 
 export async function apiFetch<T>(
