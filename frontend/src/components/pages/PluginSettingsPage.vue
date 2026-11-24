@@ -2,10 +2,15 @@
 import { computed, onMounted, ref } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { pluginsApi } from "@/api/plugins";
+import { pluginStatusApi } from "@/api/pluginStatus";
+import { usePolling } from "@/composables/usePolling";
+import PluginEventList from "@/components/common/PluginEventList.vue";
+import PluginHealthChip from "@/components/common/PluginHealthChip.vue";
+import { statusTarget, worstHealth } from "@/utils/pluginEvents";
 import { settingsApi } from "@/api/settings";
 import { useSnackbar } from "@/composables/useSnackbar";
 import { formatTimestamp } from "@/utils/format";
-import type { ConfigField, PluginConfig, PluginSummary } from "@/types/api";
+import type { ConfigField, PluginConfig, PluginStatus, PluginSummary } from "@/types/api";
 
 const route = useRoute();
 const router = useRouter();
@@ -27,6 +32,21 @@ const showPassword = ref<Record<string, boolean>>({});
 
 // The plugin config entry loaded from settings (for reading saved values).
 const savedPluginConfig = ref<PluginConfig | null>(null);
+
+// The plugin's status: its load, and every application target. Shown even
+// when the plugin isn't loaded, since that's when the load error matters.
+const pluginStatus = ref<PluginStatus[]>([]);
+usePolling(async () => {
+  try {
+    pluginStatus.value = (await pluginStatusApi.forPlugin(pluginName.value)) ?? [];
+  } catch {
+    // Older backends have no plugin status endpoint.
+  }
+}, 10000);
+const pluginHealth = computed(() => worstHealth(pluginStatus.value));
+const statusProblems = computed(() =>
+  pluginStatus.value.filter((s) => s.health !== "healthy"),
+);
 
 // --- Load ---
 async function load() {
@@ -182,6 +202,7 @@ async function save() {
         <h2 class="text-h5">{{ pluginName }}</h2>
         <span class="text-caption text-secondary">Plugin configuration</span>
       </div>
+      <PluginHealthChip v-if="pluginHealth" :health="pluginHealth" class="ml-3" />
       <v-spacer />
       <v-btn
         color="primary"
@@ -193,6 +214,24 @@ async function save() {
         Save
       </v-btn>
     </div>
+
+    <!-- What's failing or degraded for this plugin right now. -->
+    <v-alert
+      v-if="statusProblems.length"
+      :type="pluginHealth === 'failing' ? 'error' : 'warning'"
+      variant="tonal"
+      class="mb-4"
+      data-testid="plugin-status-problems"
+    >
+      <div v-for="p in statusProblems" :key="`${p.namespace}/${p.application}/${p.resource_id}`" class="mb-2">
+        <div class="d-flex align-center ga-2 text-body-2">
+          <PluginHealthChip :health="p.health" size="x-small" />
+          <span class="font-weight-medium">{{ statusTarget(p) }}</span>
+        </div>
+        <PluginEventList :events="p.last_events" hide-plugin class="ml-6" />
+      </div>
+      <v-btn size="small" variant="text" :to="{ name: 'PluginProblems' }">All plugin problems</v-btn>
+    </v-alert>
 
     <!-- Loading -->
     <v-progress-linear v-if="loading" indeterminate color="primary" class="mb-4" />

@@ -30,6 +30,7 @@ pub mod outbound;
 mod plugin_events;
 #[cfg(test)]
 mod plugin_fixture;
+mod plugin_status;
 mod plugins;
 mod rate_limit;
 mod routes;
@@ -168,11 +169,16 @@ pub async fn run() {
 
     migrate_configmap_apps_to_db(&state).await;
     handlers::settings::bind_legacy_credentials_at_startup(&state).await;
+    // Records plugin call outcomes in the plugin_status table.
+    plugin_status::spawn_worker(&state);
 
     // Fetch plugins declared in persisted settings. Failures per-plugin are
     // logged and skipped so a bad plugin URL never blocks startup.
     {
         let settings = handlers::settings::load_settings_from_db(&state).await;
+        state
+            .plugin_telemetry
+            .keep_plugins(plugins::enabled_plugin_names(&settings));
         if !settings.plugins.is_empty() {
             tracing::info!(count = settings.plugins.len(), "fetching plugins");
             let loaded = plugins::fetch_plugins(&settings, &state).await;

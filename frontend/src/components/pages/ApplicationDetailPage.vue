@@ -4,6 +4,7 @@ import { useRouter } from "vue-router";
 import { applicationsApi } from "@/api/applications";
 import { applicationResourcesApi } from "@/api/application_resources";
 import { pluginEventsOf } from "@/api/client";
+import { pluginStatusApi } from "@/api/pluginStatus";
 import { pluginsApi } from "@/api/plugins";
 import { usePolling } from "@/composables/usePolling";
 import { useSnackbar } from "@/composables/useSnackbar";
@@ -16,13 +17,21 @@ import type {
   DiagAgent,
   KubernetesObjectDeletion,
   PluginEventReport,
+  PluginHealth,
   PluginResource,
+  PluginStatus,
   PluginSummary,
   ProvisionedResource,
   UpdateApplicationRequest,
 } from "@/types/api";
 import PluginEventList from "@/components/common/PluginEventList.vue";
-import { summarizeEvents, worstSeverity } from "@/utils/pluginEvents";
+import PluginHealthChip from "@/components/common/PluginHealthChip.vue";
+import {
+  statusTarget,
+  summarizeEvents,
+  worstHealth,
+  worstSeverity,
+} from "@/utils/pluginEvents";
 import ApplicationHealthChip from "@/components/common/ApplicationHealthChip.vue";
 import StatusChip from "@/components/common/StatusChip.vue";
 import AddMemberDialog from "@/components/common/AddMemberDialog.vue";
@@ -92,6 +101,26 @@ const fetchDetail = async () => {
 };
 
 usePolling(fetchDetail, 5000);
+
+// Plugin status for this application: one row per plugin resource and per
+// plugin apply(). Polled more slowly than the detail; errors are ignored
+// (the badge just stays hidden).
+const pluginStatus = ref<PluginStatus[]>([]);
+usePolling(async () => {
+  try {
+    pluginStatus.value = (await pluginStatusApi.forApplication(props.namespace, props.name)) ?? [];
+  } catch {
+    // Older backends have no plugin status endpoint.
+  }
+}, 10000);
+const pluginHealth = computed(() => worstHealth(pluginStatus.value));
+const pluginProblems = computed(() =>
+  pluginStatus.value.filter((s) => s.health !== "healthy"),
+);
+const healthOfPlugin = (plugin: string): PluginHealth | null =>
+  worstHealth(pluginStatus.value.filter((s) => s.plugin === plugin));
+const statusOfResource = (plugin: string, resourceId: string): PluginStatus | undefined =>
+  pluginStatus.value.find((s) => s.plugin === plugin && s.resource_id === resourceId);
 
 // Applications are logical groupings -- there is no single label that
 // selects all their pods. Fetch the whole namespace and filter to pods
@@ -583,6 +612,12 @@ watch(activeTab, async (tab) => {
         :health="detail.health"
         class="ml-3"
       />
+      <PluginHealthChip
+        v-if="detail && pluginHealth"
+        :health="pluginHealth"
+        label="Plugins"
+        class="ml-2"
+      />
       <v-spacer />
       <div v-if="detail" class="d-flex ga-2">
         <AiFixButton
@@ -638,6 +673,32 @@ watch(activeTab, async (tab) => {
     <v-progress-linear v-if="loading" indeterminate color="primary" />
 
     <!-- Tab bar (only when detail is loaded) -->
+    <!-- Plugin problems, on every tab: what's failing or degraded right now. -->
+    <v-alert
+      v-if="detail && pluginProblems.length"
+      :type="pluginHealth === 'failing' ? 'error' : 'warning'"
+      variant="tonal"
+      class="mb-4"
+      data-testid="app-plugin-problems"
+    >
+      <div class="font-weight-medium mb-1">
+        {{ pluginProblems.length }} plugin
+        {{ pluginProblems.length === 1 ? "target is" : "targets are" }}
+        {{ pluginHealth === "failing" ? "failing" : "degraded" }}
+      </div>
+      <div v-for="p in pluginProblems" :key="`${p.plugin}/${p.resource_id}`" class="mb-2">
+        <div class="d-flex align-center ga-2 text-body-2">
+          <PluginHealthChip :health="p.health" size="x-small" />
+          <span class="font-weight-medium">{{ p.plugin }}</span>
+          <span class="text-secondary">{{ statusTarget(p) }}</span>
+          <span v-if="p.health === 'failing'" class="text-caption text-secondary">
+            · {{ p.consecutive_failures }} failed call{{ p.consecutive_failures === 1 ? "" : "s" }} in a row
+          </span>
+        </div>
+        <PluginEventList :events="p.last_events" hide-plugin class="ml-6" />
+      </div>
+    </v-alert>
+
     <v-tabs v-if="detail" v-model="activeTab" class="mb-4">
       <v-tab value="overview" prepend-icon="mdi-view-dashboard-outline">Overview</v-tab>
       <v-tab value="plugins" prepend-icon="mdi-puzzle">Plugins</v-tab>
@@ -893,6 +954,11 @@ watch(activeTab, async (tab) => {
               Associated {{ ap.created_at ? new Date(ap.created_at).toLocaleDateString() : "—" }}
             </div>
           </div>
+          <PluginHealthChip
+            v-if="healthOfPlugin(ap.plugin_name)"
+            :health="healthOfPlugin(ap.plugin_name)!"
+            size="x-small"
+          />
           <v-chip
             :color="ap.is_loaded ? 'success' : 'warning'"
             size="x-small"
@@ -1011,6 +1077,10 @@ watch(activeTab, async (tab) => {
                 <v-chip v-if="resource.singleton" size="x-small" variant="tonal" color="secondary">singleton</v-chip>
                 <v-spacer />
                 <template v-if="infraProvisionedMap.has(`${plugin.name}:${resource.id}`)">
+                  <PluginHealthChip
+                    v-if="statusOfResource(plugin.name, resource.id)"
+                    :health="statusOfResource(plugin.name, resource.id)!.health"
+                  />
                   <v-chip size="small" color="success" variant="tonal">provisioned</v-chip>
                   <v-btn
                     size="small"

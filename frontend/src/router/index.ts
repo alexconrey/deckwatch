@@ -105,6 +105,12 @@ const router = createRouter({
           props: true,
         },
         {
+          path: "plugin-problems",
+          name: "PluginProblems",
+          component: () =>
+            import("@/components/pages/PluginProblemsPage.vue"),
+        },
+        {
           path: "cluster",
           name: "ClusterOverview",
           component: () =>

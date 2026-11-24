@@ -84,7 +84,11 @@ async fn gitops_token_binding_migration_binds_existing_tokens_to_the_default() {
     use sea_orm_migration::MigratorTrait;
 
     let db = Database::connect("sqlite::memory:").await.expect("connect");
-    let before = Migrator::migrations().len() - 1;
+    // Every migration before the token binding one (later ones may exist).
+    let before = Migrator::migrations()
+        .iter()
+        .position(|m| m.name() == "m20261124_000001_gitops_token_binding")
+        .expect("token binding migration");
     Migrator::up(&db, Some(before as u32))
         .await
         .expect("migrate to the previous version");
@@ -134,4 +138,47 @@ async fn gitops_token_binding_migration_binds_existing_tokens_to_the_default() {
         crate::outbound::EndpointBinding::defaults(&[crate::outbound::EndpointId::GithubApi])
     );
     assert_eq!(binding("without-token"), None);
+}
+
+#[tokio::test]
+async fn plugin_status_migration_creates_the_table_and_rolls_back() {
+    use sea_orm::{ConnectionTrait, Database, Statement};
+    use sea_orm_migration::MigratorTrait;
+
+    let db = Database::connect("sqlite::memory:").await.expect("connect");
+    Migrator::up(&db, None).await.expect("migrate");
+    let backend = db.get_database_backend();
+    let count = |db: &sea_orm::DatabaseConnection| {
+        let db = db.clone();
+        async move {
+            db.query_one(Statement::from_string(
+                backend,
+                "SELECT COUNT(*) AS n FROM sqlite_master WHERE type = 'table' AND name = 'plugin_status'",
+            ))
+            .await
+            .expect("query")
+            .expect("row")
+            .try_get::<i64>("", "n")
+            .expect("n")
+        }
+    };
+    assert_eq!(count(&db).await, 1);
+    assert!(crate::entities::plugin_status::Entity::find()
+        .all(&db)
+        .await
+        .expect("entity matches the table")
+        .is_empty());
+
+    // Rolling back the plugin status migration drops only its table.
+    let after = Migrator::migrations()
+        .iter()
+        .position(|m| m.name() == "m20261124_000002_plugin_status")
+        .expect("plugin status migration");
+    let later = Migrator::migrations().len() - after;
+    Migrator::down(&db, Some(later as u32))
+        .await
+        .expect("roll back");
+    assert_eq!(count(&db).await, 0);
+    Migrator::up(&db, None).await.expect("migrate again");
+    assert_eq!(count(&db).await, 1);
 }

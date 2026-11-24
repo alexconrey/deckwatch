@@ -15,12 +15,14 @@ const {
   mockSettingsGet,
   mockSettingsUpdate,
   mockRouterPush,
+  mockForPlugin,
 } = vi.hoisted(() => ({
   mockListPlugins: vi.fn(),
   mockSaveConfig: vi.fn(),
   mockSettingsGet: vi.fn(),
   mockSettingsUpdate: vi.fn(),
   mockRouterPush: vi.fn(),
+  mockForPlugin: vi.fn().mockResolvedValue([]),
 }));
 
 vi.mock("vue-router", () => ({
@@ -34,6 +36,10 @@ vi.mock("@/api/plugins", () => ({
     getSchema: vi.fn(),
     saveConfig: mockSaveConfig,
   },
+}));
+
+vi.mock("@/api/pluginStatus", () => ({
+  pluginStatusApi: { forPlugin: mockForPlugin },
 }));
 
 vi.mock("@/api/settings", () => ({
@@ -464,5 +470,65 @@ describe("PluginSettingsPage — loaded binary info", () => {
     await flushPromises();
 
     expect(wrapper.find('[data-testid="plugin-binary-info"]').exists()).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Plugin status
+// ---------------------------------------------------------------------------
+
+describe("PluginSettingsPage — plugin status", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockSettingsGet.mockResolvedValue(makeSettings());
+  });
+
+  it("shows the plugin's health and what is failing, even when it isn't loaded", async () => {
+    mockListPlugins.mockResolvedValue([]);
+    mockForPlugin.mockResolvedValue([
+      {
+        namespace: "",
+        application: "",
+        plugin: "aws",
+        resource_id: "",
+        health: "failing",
+        last_export: "fetch",
+        last_events: [
+          {
+            plugin: "aws",
+            export: "fetch",
+            severity: "error",
+            code: "plugin.fetch_failed",
+            message: "HTTP 404 fetching plugin",
+            retryable: false,
+          },
+        ],
+        first_failure_at: "2026-11-24T12:00:00+00:00",
+        consecutive_failures: 1,
+        last_success_at: null,
+        last_changed_at: "2026-11-24T12:00:00+00:00",
+        updated_at: "2026-11-24T12:00:00+00:00",
+      },
+    ]);
+
+    const wrapper = mountPage();
+    await flushPromises();
+
+    expect(mockForPlugin).toHaveBeenCalledWith("aws");
+    expect(wrapper.find('[data-testid="plugin-health-chip"]').attributes("data-health")).toBe(
+      "failing",
+    );
+    const problems = wrapper.find('[data-testid="plugin-status-problems"]');
+    expect(problems.text()).toContain("aws (load)");
+    expect(problems.text()).toContain("HTTP 404 fetching plugin");
+  });
+
+  it("shows no badge when the plugin has no status yet", async () => {
+    mockListPlugins.mockResolvedValue([makePlugin([])]);
+    mockForPlugin.mockResolvedValue([]);
+    const wrapper = mountPage();
+    await flushPromises();
+    expect(wrapper.find('[data-testid="plugin-health-chip"]').exists()).toBe(false);
+    expect(wrapper.find('[data-testid="plugin-status-problems"]').exists()).toBe(false);
   });
 });

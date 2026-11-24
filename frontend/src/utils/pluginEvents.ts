@@ -1,4 +1,9 @@
-import type { PluginEventReport, PluginEventSeverity } from "@/types/api";
+import type {
+  PluginEventReport,
+  PluginEventSeverity,
+  PluginHealth,
+  PluginStatus,
+} from "@/types/api";
 
 /** Most severe first. */
 const RANK: Record<PluginEventSeverity, number> = { error: 0, warning: 1, info: 2 };
@@ -45,4 +50,22 @@ export function summarizeEvents(events: PluginEventReport[] | undefined): string
   if (counts.warning) parts.push(`${counts.warning} warning${counts.warning === 1 ? "" : "s"}`);
   if (counts.info) parts.push(`${counts.info} notice${counts.info === 1 ? "" : "s"}`);
   return parts.join(", ");
+}
+
+const HEALTH_RANK: Record<PluginHealth, number> = { failing: 0, degraded: 1, healthy: 2 };
+
+/** The worst health among `statuses`, or null for none. */
+export function worstHealth(statuses: PluginStatus[] | undefined): PluginHealth | null {
+  let worst: PluginHealth | null = null;
+  for (const s of statuses ?? []) {
+    if (worst === null || HEALTH_RANK[s.health] < HEALTH_RANK[worst]) worst = s.health;
+  }
+  return worst;
+}
+
+/** What a status row is about, for people: "shop/web · rds", "vault (load)". */
+export function statusTarget(s: PluginStatus): string {
+  if (!s.application) return `${s.plugin} (load)`;
+  const app = `${s.namespace}/${s.application}`;
+  return s.resource_id ? `${app} · ${s.resource_id}` : `${app} · apply`;
 }
