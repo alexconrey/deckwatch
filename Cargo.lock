@@ -1121,7 +1121,7 @@ dependencies = [
  "ed25519-dalek",
  "extism",
  "futures",
- "hmac 0.12.1",
+ "hmac 0.13.0",
  "jiff 1.0.2",
  "jsonwebtoken",
  "k8s-openapi",
