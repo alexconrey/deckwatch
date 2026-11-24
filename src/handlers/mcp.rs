@@ -671,7 +671,7 @@ fn deckwatch_tool_definitions() -> Vec<serde_json::Value> {
         }),
         serde_json::json!({
             "name": "enable_plugin",
-            "description": "Enable a configured plugin by name. Updates settings immediately and triggers a background refetch of the WASM binary so subsequent deployments use it.",
+            "description": "Enable a configured plugin by name and load it. Updates settings, fetches the WASM binary and calls its metadata(), then returns whether it loaded. Fetch, checksum, metadata and version problems come back as plugin events, in a fenced block of untrusted plugin output.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -2111,28 +2111,36 @@ async fn tool_enable_plugin(state: &AppState, args: &serde_json::Value) -> Resul
         return Ok(format!("plugin '{name}' is already enabled"));
     }
     cfg.enabled = true;
+    let enabled_cfg = cfg.clone();
 
     settings::upsert_settings_to_db_pub(&state.db, &s)
         .await
         .map_err(|e| format!("failed to save settings: {e}"))?;
 
-    // Trigger background refetch so the plugin is live immediately.
-    let state_clone = state.clone();
-    let plugins_cfg = s.plugins.clone();
-    tokio::spawn(async move {
-        let git_token_secrets = settings::load_settings_from_db(&state_clone)
-            .await
-            .git_token_secrets;
-        let snap = settings::DeckwatchSettings {
-            plugins: plugins_cfg,
-            git_token_secrets,
-            ..Default::default()
-        };
-        let loaded = crate::plugins::fetch_plugins(&snap, &state_clone).await;
-        tracing::info!(count = loaded.len(), "plugins reloaded after enable");
-        *state_clone.plugins.write().await = loaded;
-        state_clone.plugin_patch_fingerprints.lock().await.clear();
-    });
+    // Load the plugin now, so the result says whether it works: fetch,
+    // checksum, metadata() and version-check problems come back as events.
+    // Other loaded plugins are left alone.
+    let snap = settings::DeckwatchSettings {
+        plugins: vec![enabled_cfg],
+        git_token_secrets: s.git_token_secrets.clone(),
+        ..Default::default()
+    };
+    let reloaded = crate::plugins::fetch_plugins(&snap, state).await;
+    let loaded = !reloaded.is_empty();
+    {
+        let mut plugins = state.plugins.write().await;
+        crate::plugins::merge_reloaded_plugin(&mut plugins, name, reloaded);
+        // fetch_plugins set the gauge from the single-plugin load.
+        crate::metrics::set_plugins_loaded(plugins.len() as f64);
+        tracing::info!(
+            plugin = name,
+            loaded,
+            count = plugins.len(),
+            "plugin loaded after enable"
+        );
+    }
+    state.plugin_patch_fingerprints.lock().await.clear();
+    let events = state.plugin_telemetry.last_load(name).unwrap_or_default();
 
     audit::log_action(
         &state.db,
@@ -2146,12 +2154,18 @@ async fn tool_enable_plugin(state: &AppState, args: &serde_json::Value) -> Resul
     .await
     .ok();
 
-    Ok(serde_json::json!({
+    let text = serde_json::json!({
         "name": name,
         "enabled": true,
-        "status": "enabled — WASM binary fetch triggered in background"
+        "loaded": loaded,
+        "status": if loaded {
+            "enabled and loaded"
+        } else {
+            "enabled, but the plugin failed to load; see the plugin events below"
+        },
     })
-    .to_string())
+    .to_string();
+    Ok(with_plugin_output(text, &events))
 }
 
 async fn tool_disable_plugin(state: &AppState, args: &serde_json::Value) -> Result<String, String> {
@@ -2480,6 +2494,7 @@ async fn tool_validate_plugin(
             .unwrap_or_default(),
         plugin_outputs: Default::default(),
         provisioned_resources: Default::default(),
+        trace_context: None,
     };
 
     let vr = crate::plugins::fetch_and_validate(&cfg, test_ctx, state).await;
@@ -2522,10 +2537,50 @@ async fn tool_validate_plugin(
             "annotations": vr.test_context.annotations,
         },
         "result": result_summary,
-        "error": vr.error,
+        // Only the host-assigned code here: the message is plugin text and
+        // goes in the fenced block below.
+        "error": vr.error.as_ref().map(|_| failure_note(&vr.events)),
     });
 
-    serde_json::to_string_pretty(&output).map_err(|e| e.to_string())
+    let text = serde_json::to_string_pretty(&output).map_err(|e| e.to_string())?;
+    Ok(with_plugin_output(text, &vr.events))
+}
+
+/// Append what plugins reported to a tool result, inside the untrusted-content
+/// fence. Plugin text never goes into the JSON part of a result.
+fn with_plugin_output(text: String, events: &[crate::plugin_events::PluginEventReport]) -> String {
+    if events.is_empty() {
+        return text;
+    }
+    format!(
+        "{text}\n\nPlugin events ({}):\n{}",
+        events.len(),
+        crate::plugin_events::fence_for_llm(events)
+    )
+}
+
+/// A one-line, host-written note naming the first error's code.
+fn failure_note(events: &[crate::plugin_events::PluginEventReport]) -> String {
+    let code = events
+        .iter()
+        .find(|r| {
+            crate::plugin_events::effective_severity(r.event.severity)
+                == crate::plugins::EventSeverity::Error
+        })
+        .map(|r| r.event.code.as_str())
+        .unwrap_or(crate::plugin_events::codes::UNSPECIFIED);
+    format!("plugin call failed ({code}); see the plugin events below")
+}
+
+/// The MCP error text for a failed handler call. A plugin failure carries
+/// plugin text, so its events are fenced instead of quoted.
+fn handler_error(e: crate::error::AppError) -> String {
+    match e {
+        crate::error::AppError::PluginFailed { events, .. } => {
+            with_plugin_output(failure_note(&events), &events)
+        }
+        other => other.to_string(),
+    }
 }
 
 // ── Plugin resource management tools ────────────────────────────────────────
@@ -2582,10 +2637,12 @@ async fn tool_provision_resource(
         Some(Json(req_body)),
     )
     .await
-    .map_err(|e| format!("{e}"))?;
+    .map_err(handler_error)?;
 
-    let (_status, Json(detail)) = result;
-    serde_json::to_string_pretty(&detail).map_err(|e| e.to_string())
+    let (_status, Json(mut detail)) = result;
+    let events = std::mem::take(&mut detail.plugin_events);
+    let text = serde_json::to_string_pretty(&detail).map_err(|e| e.to_string())?;
+    Ok(with_plugin_output(text, &events))
 }
 
 async fn tool_deprovision_resource(
@@ -2603,7 +2660,7 @@ async fn tool_deprovision_resource(
         .as_str()
         .ok_or("resource_id is required")?;
 
-    application_resources::deprovision(
+    let Json(response) = application_resources::deprovision(
         State(state.clone()),
         axum::extract::Path((
             ns.to_string(),
@@ -2613,16 +2670,24 @@ async fn tool_deprovision_resource(
         )),
     )
     .await
-    .map_err(|e| format!("{e}"))?;
+    .map_err(handler_error)?;
 
-    Ok(serde_json::json!({
+    // The plugin's message is plugin text: it's in the fenced events (as an
+    // `info` event), not in the JSON.
+    let text = serde_json::json!({
         "status": "deprovisioned",
         "namespace": ns,
         "application_name": app_name,
         "plugin_name": plugin_name,
-        "resource_id": resource_id
+        "resource_id": resource_id,
+        "plugin_message": if response.message.is_empty() {
+            "none"
+        } else {
+            "see the plugin events below"
+        },
     })
-    .to_string())
+    .to_string();
+    Ok(with_plugin_output(text, &response.plugin_events))
 }
 
 async fn tool_refresh_resource(
@@ -2640,7 +2705,7 @@ async fn tool_refresh_resource(
         .as_str()
         .ok_or("resource_id is required")?;
 
-    let response = application_resources::refresh(
+    let Json(mut detail) = application_resources::refresh(
         State(state.clone()),
         axum::extract::Path((
             ns.to_string(),
@@ -2650,9 +2715,11 @@ async fn tool_refresh_resource(
         )),
     )
     .await
-    .map_err(|e| format!("{e}"))?;
+    .map_err(handler_error)?;
 
-    serde_json::to_string_pretty(&response.0).map_err(|e| e.to_string())
+    let events = std::mem::take(&mut detail.plugin_events);
+    let text = serde_json::to_string_pretty(&detail).map_err(|e| e.to_string())?;
+    Ok(with_plugin_output(text, &events))
 }
 
 // ── Deployment mutation tools (intercepted from mcp-k8s for audit logging) ──
@@ -3455,3 +3522,7 @@ fn method_not_found(request: &JsonRpcRequest) -> JsonRpcResponse {
 #[cfg(test)]
 #[path = "mcp_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "mcp_plugin_events_tests.rs"]
+mod plugin_events_tests;

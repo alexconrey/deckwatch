@@ -437,6 +437,7 @@ async fn handler_test_state(dir: &std::path::Path) -> AppState {
         encryption_key: String::new(),
         plugins: Default::default(),
         plugin_patch_fingerprints: Default::default(),
+        plugin_telemetry: Default::default(),
     }
 }
 

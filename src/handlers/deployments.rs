@@ -43,6 +43,25 @@ pub struct DeploymentDetailResponse {
     pub ingresses: Vec<IngressSummary>,
 }
 
+/// Response of deployment create and update: the deployment, plus what the
+/// plugins that ran on it reported (warnings included, even on success).
+#[derive(serde::Serialize, Debug)]
+pub struct DeploymentWriteResponse {
+    #[serde(flatten)]
+    pub deployment: DeploymentDetailResponse,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub plugin_events: Vec<crate::plugin_events::PluginEventReport>,
+}
+
+/// The application a Deployment belongs to (`deckwatch.io/application`), or
+/// "" when it isn't part of one.
+fn application_of(labels: Option<&BTreeMap<String, String>>) -> String {
+    labels
+        .and_then(|l| l.get("deckwatch.io/application"))
+        .cloned()
+        .unwrap_or_default()
+}
+
 #[derive(Deserialize)]
 pub struct CreateDeploymentRequest {
     pub name: String,
@@ -296,7 +315,7 @@ pub async fn create(
     State(state): State<AppState>,
     Path(ns): Path<String>,
     Json(req): Json<CreateDeploymentRequest>,
-) -> Result<(StatusCode, Json<DeploymentDetailResponse>), AppError> {
+) -> Result<(StatusCode, Json<DeploymentWriteResponse>), AppError> {
     if req.name.is_empty() {
         return Err(AppError::BadRequest("name is required".to_string()));
     }
@@ -398,12 +417,17 @@ pub async fn create(
     // Apply plugins: inject env vars and sidecars before the kube API call;
     // collect kubernetes_resources and wanted service accounts to apply after
     // the deployment is committed.
-    let (plugin_k8s_resources, plugin_wanted_sas): (
-        Vec<serde_json::Value>,
-        Vec<crate::plugins::WantsServiceAccount>,
-    ) = {
+    let plugin_report: crate::plugins::PluginApplyReport = {
         let plugins = state.plugins.read().await;
         if !plugins.is_empty() {
+            let application = application_of(deployment.metadata.labels.as_ref());
+            let call = crate::plugins::PluginCall::new(
+                &state.plugin_telemetry,
+                crate::plugins::Trigger::DeploymentCreate,
+            )
+            .namespace(&ns)
+            .application(&application)
+            .deployment(&req.name);
             let ctx = crate::plugins::PluginContext {
                 namespace: ns.clone(),
                 deployment_name: req.name.clone(),
@@ -425,24 +449,27 @@ pub async fn create(
                     .collect(),
                 plugin_outputs: Default::default(),
                 provisioned_resources: Default::default(),
+                trace_context: None,
             };
             let dep_annotations = deployment
                 .metadata
                 .annotations
                 .get_or_insert_with(BTreeMap::new);
-            if let Some(spec) = deployment.spec.as_mut() {
-                if let Some(pod_spec) = spec.template.spec.as_mut() {
-                    crate::plugins::apply_plugins(&plugins, &ctx, pod_spec, dep_annotations)
-                } else {
-                    (vec![], vec![])
+            match deployment
+                .spec
+                .as_mut()
+                .and_then(|spec| spec.template.spec.as_mut())
+            {
+                Some(pod_spec) => {
+                    crate::plugins::apply_plugins(&plugins, &ctx, pod_spec, dep_annotations, &call)
                 }
-            } else {
-                (vec![], vec![])
+                None => Default::default(),
             }
         } else {
-            (vec![], vec![])
+            Default::default()
         }
     };
+    let plugin_events = plugin_report.reports();
 
     let t = K8sTimer::new("deployments", "create");
     let created = api.create(&PostParams::default(), &deployment).await;
@@ -451,20 +478,9 @@ pub async fn create(
 
     // Apply plugin-declared kubernetes resources (CRDs, ExternalSecrets, etc.)
     // and wanted service accounts after the deployment is committed.
-    // Best-effort: failures are logged but do not roll back the deployment.
-    if !plugin_k8s_resources.is_empty() || !plugin_wanted_sas.is_empty() {
-        let kube_client = state.kube_client.clone();
-        let ns_clone = ns.clone();
-        tokio::spawn(async move {
-            crate::plugins::apply_kubernetes_resources(&plugin_k8s_resources, &kube_client).await;
-            crate::plugins::apply_wanted_service_accounts(
-                &plugin_wanted_sas,
-                &ns_clone,
-                &kube_client,
-            )
-            .await;
-        });
-    }
+    // Best-effort: failures are logged and reported as plugin events, but do
+    // not roll back the deployment.
+    spawn_plugin_followups(&state, &ns, plugin_report);
     let detail = deployment_detail(&created);
 
     if let Err(e) = audit::log_action(
@@ -483,19 +499,47 @@ pub async fn create(
 
     Ok((
         StatusCode::CREATED,
-        Json(DeploymentDetailResponse {
-            detail,
-            pods: vec![],
-            ingresses: vec![],
+        Json(DeploymentWriteResponse {
+            deployment: DeploymentDetailResponse {
+                detail,
+                pods: vec![],
+                ingresses: vec![],
+            },
+            plugin_events,
         }),
     ))
+}
+
+/// Apply the Kubernetes objects and ServiceAccounts plugins asked for, after
+/// the Deployment is committed, without holding up the response.
+fn spawn_plugin_followups(state: &AppState, ns: &str, report: crate::plugins::PluginApplyReport) {
+    if report.kubernetes_resources.is_empty() && report.wanted_service_accounts.is_empty() {
+        return;
+    }
+    let kube_client = state.kube_client.clone();
+    let telemetry = state.plugin_telemetry.clone();
+    let ns = ns.to_string();
+    tokio::spawn(async move {
+        crate::plugins::apply_kubernetes_resources(
+            &report.kubernetes_resources,
+            &kube_client,
+            &telemetry,
+        )
+        .await;
+        crate::plugins::apply_wanted_service_accounts(
+            &report.wanted_service_accounts,
+            &ns,
+            &kube_client,
+        )
+        .await;
+    });
 }
 
 pub async fn update(
     State(state): State<AppState>,
     Path((ns, name)): Path<(String, String)>,
     Json(req): Json<UpdateDeploymentRequest>,
-) -> Result<Json<DeploymentDetailResponse>, AppError> {
+) -> Result<Json<DeploymentWriteResponse>, AppError> {
     let api = state.deployments_api(&ns)?;
     let t = K8sTimer::new("deployments", "get");
     let existing = api.get(&name).await;
@@ -618,12 +662,17 @@ pub async fn update(
 
     // Apply plugins after user edits; collect kubernetes_resources and
     // wanted service accounts to apply after the deployment replace is committed.
-    let (plugin_k8s_resources, plugin_wanted_sas): (
-        Vec<serde_json::Value>,
-        Vec<crate::plugins::WantsServiceAccount>,
-    ) = {
+    let plugin_report: crate::plugins::PluginApplyReport = {
         let plugins = state.plugins.read().await;
         if !plugins.is_empty() {
+            let application = application_of(dep.metadata.labels.as_ref());
+            let call = crate::plugins::PluginCall::new(
+                &state.plugin_telemetry,
+                crate::plugins::Trigger::DeploymentUpdate,
+            )
+            .namespace(&ns)
+            .application(&application)
+            .deployment(&name);
             let ctx = crate::plugins::PluginContext {
                 namespace: ns.clone(),
                 deployment_name: name.clone(),
@@ -645,40 +694,31 @@ pub async fn update(
                     .collect(),
                 plugin_outputs: Default::default(),
                 provisioned_resources: Default::default(),
+                trace_context: None,
             };
             let dep_annotations = dep.metadata.annotations.get_or_insert_with(BTreeMap::new);
-            if let Some(spec) = dep.spec.as_mut() {
-                if let Some(pod_spec) = spec.template.spec.as_mut() {
-                    crate::plugins::apply_plugins(&plugins, &ctx, pod_spec, dep_annotations)
-                } else {
-                    (vec![], vec![])
+            match dep
+                .spec
+                .as_mut()
+                .and_then(|spec| spec.template.spec.as_mut())
+            {
+                Some(pod_spec) => {
+                    crate::plugins::apply_plugins(&plugins, &ctx, pod_spec, dep_annotations, &call)
                 }
-            } else {
-                (vec![], vec![])
+                None => Default::default(),
             }
         } else {
-            (vec![], vec![])
+            Default::default()
         }
     };
+    let plugin_events = plugin_report.reports();
 
     let t = K8sTimer::new("deployments", "replace");
     let updated = api.replace(&name, &PostParams::default(), &dep).await;
     t.finish(updated.is_ok());
     let updated = updated?;
 
-    if !plugin_k8s_resources.is_empty() || !plugin_wanted_sas.is_empty() {
-        let kube_client = state.kube_client.clone();
-        let ns_clone = ns.clone();
-        tokio::spawn(async move {
-            crate::plugins::apply_kubernetes_resources(&plugin_k8s_resources, &kube_client).await;
-            crate::plugins::apply_wanted_service_accounts(
-                &plugin_wanted_sas,
-                &ns_clone,
-                &kube_client,
-            )
-            .await;
-        });
-    }
+    spawn_plugin_followups(&state, &ns, plugin_report);
 
     let detail = deployment_detail(&updated);
     let pods = list_pods_for_deployment(&state, &ns, &updated).await?;
@@ -698,10 +738,13 @@ pub async fn update(
         tracing::warn!(error = %e, "failed to write audit log");
     }
 
-    Ok(Json(DeploymentDetailResponse {
-        detail,
-        pods,
-        ingresses,
+    Ok(Json(DeploymentWriteResponse {
+        deployment: DeploymentDetailResponse {
+            detail,
+            pods,
+            ingresses,
+        },
+        plugin_events,
     }))
 }
 
@@ -1307,3 +1350,7 @@ fn build_node_affinity(input: NodeAffinityInput) -> Option<Affinity> {
 #[cfg(test)]
 #[path = "deployments_tests.rs"]
 mod handlers_deployments_tests;
+
+#[cfg(test)]
+#[path = "deployments_plugin_events_tests.rs"]
+mod plugin_events_tests;

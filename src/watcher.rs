@@ -1837,24 +1837,23 @@ async fn reconcile_application_plugins(state: &AppState) {
                                 .collect(),
                             plugin_outputs: Default::default(),
                             provisioned_resources,
+                            trace_context: None,
                         };
 
+                        let call = crate::plugins::PluginCall::new(
+                            &state.plugin_telemetry,
+                            crate::plugins::Trigger::Reconcile,
+                        )
+                        .namespace(ns)
+                        .application(app_name)
+                        .deployment(&dep_name);
                         for plugin in crate::plugins::sort_by_dependencies(&plugins) {
-                            match crate::plugins::run_plugin(plugin, &ctx) {
-                                Ok(result) => {
-                                    // Warnings are already logged inside run_plugin.
-                                    final_annotations.extend(result.deployment_annotations.clone());
-                                    final_labels.extend(result.deployment_labels.clone());
-                                }
-                                Err(e) => {
-                                    tracing::warn!(
-                                        plugin = %plugin.name,
-                                        namespace = %ns,
-                                        deployment = %dep_name,
-                                        error = %e,
-                                        "reconcile_application_plugins: plugin apply() failed"
-                                    );
-                                }
+                            // The funnel logs failures and warnings in the
+                            // plugin's span.
+                            let outcome = crate::plugins::run_plugin(plugin, &ctx, &call);
+                            if let Some(result) = &outcome.result {
+                                final_annotations.extend(result.deployment_annotations.clone());
+                                final_labels.extend(result.deployment_labels.clone());
                             }
                         }
                     }
@@ -2184,21 +2183,27 @@ async fn reconcile_pending_resources(state: &AppState) {
             namespace: ns.to_string(),
             resource_id: resource_id.clone(),
             fields,
+            trace_context: None,
         };
 
-        let result = match crate::plugins::run_provision(plugin, &req) {
-            Ok(r) => r,
-            Err(e) => {
-                tracing::warn!(
-                    namespace = %ns,
-                    application = %app_name,
-                    plugin = %plugin_name,
-                    resource_id = %resource_id,
-                    error = %e,
-                    "reconcile_pending_resources: provision() failed, will retry next cycle"
-                );
-                continue;
-            }
+        let call = crate::plugins::PluginCall::new(
+            &state.plugin_telemetry,
+            crate::plugins::Trigger::StatusPoll,
+        )
+        .namespace(&ns)
+        .application(&app_name)
+        .resource(&resource_id);
+        let (result, outcome) = crate::plugins::run_provision(plugin, &req, &call).take_result();
+        let Some(result) = result else {
+            tracing::warn!(
+                namespace = %ns,
+                application = %app_name,
+                plugin = %plugin_name,
+                resource_id = %resource_id,
+                error = %outcome.failure_summary(),
+                "reconcile_pending_resources: provision() failed, will retry next cycle"
+            );
+            continue;
         };
 
         let current_state: HashMap<String, String> =
@@ -2269,8 +2274,9 @@ async fn reconcile_pending_resources(state: &AppState) {
         // same way the provision/refresh handlers do.
         if !result.kubernetes_resources.is_empty() {
             crate::plugins::apply_kubernetes_resources(
-                &result.kubernetes_resources,
+                &outcome.k8s_resources(&result.kubernetes_resources),
                 &state.kube_client,
+                &state.plugin_telemetry,
             )
             .await;
         }

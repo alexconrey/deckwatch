@@ -304,10 +304,13 @@ pub fn record_plugin_execution(plugin: &str, operation: &str, status: &str, dura
 }
 
 /// Record a plugin error. Covers both WASM-level failures and errors the
-/// plugin itself reported via `result.errors`.
-/// - `error_type`: `fetch_failed`, `metadata_failed`, `apply_failed`,
-///   `provision_failed`, `deprovision_failed`, `reported_error`,
-///   `k8s_resource_failed`, `dependency_cycle`, `sa_conflict`
+/// plugin itself reported.
+/// - `error_type`: a host event code without `plugin.` (`fetch_failed`,
+///   `checksum_mismatch`, `load_failed`, `trap`, `timeout`, `output_invalid`,
+///   `k8s_apply_failed`, `policy_rejected`, `unspecified`; see
+///   `plugin_events::codes::metric_label`), `reported_error` for an error
+///   event the plugin reported, or `version_incompatible`,
+///   `dependency_cycle`, `unmet_dependency`. Never a plugin-supplied string.
 pub fn record_plugin_error(plugin: &str, error_type: &str) {
     counter!(
         "deckwatch_plugin_errors_total",
@@ -323,14 +326,73 @@ pub fn set_plugins_loaded(count: f64) {
 }
 
 /// Record application of a plugin-emitted Kubernetes resource.
+/// - `kind`: the object's kind, which the plugin chose. Kinds outside
+///   [`PLUGIN_K8S_KINDS`] are recorded as `other` so a plugin can't create
+///   label values.
 /// - `status`: `ok` or `error`
 pub fn record_plugin_k8s_resource(kind: &str, status: &str) {
     counter!(
         "deckwatch_plugin_k8s_resources_total",
-        "kind" => kind.to_owned(),
+        "kind" => bounded_plugin_kind(kind),
         "status" => status.to_owned(),
     )
     .increment(1);
+}
+
+/// Kinds plugins commonly emit, kept as their own `kind` label value.
+pub const PLUGIN_K8S_KINDS: &[&str] = &[
+    "ConfigMap",
+    "CronJob",
+    "Deployment",
+    "ExternalSecret",
+    "Ingress",
+    "Job",
+    "NetworkPolicy",
+    "PersistentVolumeClaim",
+    "PodMonitor",
+    "Role",
+    "RoleBinding",
+    "Secret",
+    "SecretProviderClass",
+    "Service",
+    "ServiceAccount",
+    "ServiceMonitor",
+];
+
+fn bounded_plugin_kind(kind: &str) -> &'static str {
+    PLUGIN_K8S_KINDS
+        .iter()
+        .find(|k| **k == kind)
+        .copied()
+        .unwrap_or("other")
+}
+
+/// Count one normalized plugin event.
+/// - `severity`: `info`, `warning` or `error`
+/// - `source`: `plugin` (the plugin reported it) or `host` (deckwatch
+///   detected it)
+pub fn record_plugin_event(plugin: &str, severity: &'static str, source: &'static str) {
+    counter!(
+        "deckwatch_plugin_events_total",
+        "plugin" => plugin.to_owned(),
+        "severity" => severity,
+        "source" => source,
+    )
+    .increment(1);
+}
+
+/// Count plugin events that were dropped instead of being logged or
+/// exported.
+/// - `reason`: `rate_limited` (per-plugin rate limit), `over_cap` (more than
+///   the per-call maximum), or `queue_full` (the background sinks fell
+///   behind)
+pub fn record_plugin_events_dropped(plugin: &str, reason: &'static str, count: u64) {
+    counter!(
+        "deckwatch_plugin_events_dropped_total",
+        "plugin" => plugin.to_owned(),
+        "reason" => reason,
+    )
+    .increment(count);
 }
 
 /// Record how long a single plugin reconciliation took for an application.
