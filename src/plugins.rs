@@ -475,6 +475,27 @@ pub fn sha256_hex(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
 
+/// Swap in a freshly reloaded copy of one plugin, leaving every other loaded
+/// plugin untouched.
+///
+/// `reloaded` is the output of [`fetch_plugins`] run for just `name`: one
+/// entry if the new binary loaded, or none if it failed — in which case the
+/// plugin is unloaded, matching what a full reload does with a broken plugin.
+/// The replacement keeps the plugin's original position in the list; a plugin
+/// that wasn't loaded before is appended.
+pub fn merge_reloaded_plugin(
+    current: &mut Vec<LoadedPlugin>,
+    name: &str,
+    reloaded: Vec<LoadedPlugin>,
+) {
+    let position = current.iter().position(|p| p.name == name);
+    current.retain(|p| p.name != name);
+    let at = position.unwrap_or(current.len());
+    for (offset, plugin) in reloaded.into_iter().filter(|p| p.name == name).enumerate() {
+        current.insert(at + offset, plugin);
+    }
+}
+
 /// Current UTC time as an RFC 3339 string, without a direct `chrono` dependency.
 fn now_rfc3339() -> String {
     let d = std::time::SystemTime::now()
@@ -1881,6 +1902,91 @@ mod tests {
             sha256: sha256_hex(&[]),
             loaded_at: String::new(),
         }
+    }
+
+    fn with_sha(mut p: LoadedPlugin, sha: &str) -> LoadedPlugin {
+        p.sha256 = sha.to_string();
+        p
+    }
+
+    fn names_and_shas(plugins: &[LoadedPlugin]) -> Vec<(String, String)> {
+        plugins
+            .iter()
+            .map(|p| (p.name.clone(), p.sha256.clone()))
+            .collect()
+    }
+
+    // Regression: uploading one plugin used to replace the whole loaded set
+    // with the single-plugin reload, unloading every other plugin.
+    #[test]
+    fn merge_reloaded_plugin_keeps_other_plugins_and_position() {
+        let mut current = vec![
+            with_sha(make_plugin("AWS", vec![], vec![]), "aws-old"),
+            with_sha(make_plugin("entra", vec![], vec![]), "entra"),
+            with_sha(make_plugin("example", vec![], vec![]), "example"),
+        ];
+        let reloaded = vec![with_sha(make_plugin("entra", vec![], vec![]), "entra-new")];
+
+        merge_reloaded_plugin(&mut current, "entra", reloaded);
+
+        assert_eq!(
+            names_and_shas(&current),
+            vec![
+                ("AWS".into(), "aws-old".into()),
+                ("entra".into(), "entra-new".into()),
+                ("example".into(), "example".into()),
+            ]
+        );
+    }
+
+    // A broken upload unloads only that plugin, as a full reload would.
+    #[test]
+    fn merge_reloaded_plugin_failed_reload_unloads_only_that_plugin() {
+        let mut current = vec![
+            make_plugin("AWS", vec![], vec![]),
+            make_plugin("entra", vec![], vec![]),
+        ];
+
+        merge_reloaded_plugin(&mut current, "AWS", vec![]);
+
+        let names: Vec<_> = current.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(names, vec!["entra"]);
+    }
+
+    // First upload for a configured-but-not-yet-loaded plugin is appended.
+    #[test]
+    fn merge_reloaded_plugin_appends_newly_loaded_plugin() {
+        let mut current = vec![make_plugin("AWS", vec![], vec![])];
+
+        merge_reloaded_plugin(
+            &mut current,
+            "entra",
+            vec![make_plugin("entra", vec![], vec![])],
+        );
+
+        let names: Vec<_> = current.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(names, vec!["AWS", "entra"]);
+    }
+
+    // Only entries for the named plugin are merged; anything else in the
+    // reload result is ignored rather than duplicated.
+    #[test]
+    fn merge_reloaded_plugin_ignores_unrelated_entries() {
+        let mut current = vec![with_sha(make_plugin("AWS", vec![], vec![]), "aws")];
+        let reloaded = vec![
+            with_sha(make_plugin("entra", vec![], vec![]), "entra-new"),
+            with_sha(make_plugin("AWS", vec![], vec![]), "stray"),
+        ];
+
+        merge_reloaded_plugin(&mut current, "entra", reloaded);
+
+        assert_eq!(
+            names_and_shas(&current),
+            vec![
+                ("AWS".into(), "aws".into()),
+                ("entra".into(), "entra-new".into()),
+            ]
+        );
     }
 
     #[test]
