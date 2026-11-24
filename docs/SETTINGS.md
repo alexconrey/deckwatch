@@ -165,14 +165,14 @@ every interaction.
 | `global` | All tools (via `initialize` response `instructions` field) |
 | `namespaces` | `create_namespace`, `list_namespaces`, `create_application`, etc. |
 | `deployments` | `create_deployment`, `update_deployment`, `scale_deployment`, etc. |
-| `applications` | `create_application`, `attach_addon`, `detach_addon`, `list_templates` |
+| `applications` | `create_application`, `list_applications`, `scale_application`, `list_templates`, etc. |
 | `gitops` | `set_gitops`, `trigger_build`, `list_builds`, `get_build_log`, etc. |
 | `ingresses` | `create_ingress`, `update_ingress`, `list_ingresses`, etc. |
 | `pods` | `list_pods`, `get_pod_logs`, `exec_pod`, `evict_pod`, etc. |
 | `secrets` | `list_secrets`, `get_secret`, `create_secret`, etc. |
 | `nodes` | `list_nodes`, `cordon_node`, `uncordon_node`, `drain_node` |
 | `storage` | `list_pvcs`, `create_pvc`, `list_storageclasses`, etc. |
-| `plugins` | `list_plugins`, `enable_plugin`, `disable_plugin`, `validate_plugin` |
+| `plugins` | `list_plugins`, `enable_plugin`, `validate_plugin`, `associate_plugin`, `provision_resource`, etc. |
 
 Example — enforcing team-based namespaces:
 

@@ -4,6 +4,7 @@ import { useRoute, useRouter } from "vue-router";
 import { pluginsApi } from "@/api/plugins";
 import { settingsApi } from "@/api/settings";
 import { useSnackbar } from "@/composables/useSnackbar";
+import { formatTimestamp } from "@/utils/format";
 import type { ConfigField, PluginConfig, PluginSummary } from "@/types/api";
 
 const route = useRoute();
@@ -125,6 +126,16 @@ function requiredRule(field: ConfigField) {
     !field.required || !!field.env_source || !!v || `${field.label} is required`;
 }
 
+async function copySha256() {
+  if (!plugin.value?.sha256) return;
+  try {
+    await navigator.clipboard.writeText(plugin.value.sha256);
+    success("SHA-256 copied");
+  } catch {
+    showError("Could not copy to clipboard");
+  }
+}
+
 // --- Save ---
 async function save() {
   saving.value = true;
@@ -211,6 +222,26 @@ async function save() {
           <div class="text-right">
             <v-chip size="small" color="success" variant="tonal">Loaded</v-chip>
             <div class="text-caption text-secondary mt-1">v{{ plugin.version }}</div>
+          </div>
+        </div>
+        <div
+          v-if="plugin.sha256 || plugin.loaded_at"
+          class="text-caption text-secondary mt-3"
+          data-testid="plugin-binary-info"
+        >
+          <div v-if="plugin.sha256" class="d-flex align-center ga-1">
+            <span>SHA-256:</span>
+            <code class="text-truncate" data-testid="plugin-sha256" :title="plugin.sha256">{{ plugin.sha256 }}</code>
+            <v-btn
+              icon="mdi-content-copy"
+              size="x-small"
+              variant="text"
+              aria-label="Copy SHA-256"
+              @click="copySha256"
+            />
+          </div>
+          <div v-if="plugin.loaded_at" data-testid="plugin-loaded-at">
+            Loaded {{ formatTimestamp(plugin.loaded_at) }}
           </div>
         </div>
       </v-card>

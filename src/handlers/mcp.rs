@@ -662,7 +662,7 @@ fn deckwatch_tool_definitions() -> Vec<serde_json::Value> {
         // ── Plugin management ──────────────────────────────────────────────
         serde_json::json!({
             "name": "list_plugins",
-            "description": "List all configured plugins — name, enabled state, source, and whether each is currently loaded in memory and ready to run.",
+            "description": "List all configured plugins — name, enabled state, source, and whether each is currently loaded in memory and ready to run. For loaded plugins, also reports the plugin's self-reported `version`, the `sha256` and `wasm_size_bytes` of the exact WASM binary in memory, and `loaded_at` (RFC 3339). Compare `sha256` with `shasum -a 256` of a local file to verify which build is running; these fields are null when the plugin is not loaded.",
             "inputSchema": {
                 "type": "object",
                 "properties": {},
@@ -826,7 +826,7 @@ fn deckwatch_tool_definitions() -> Vec<serde_json::Value> {
         }),
         serde_json::json!({
             "name": "get_plugin_config",
-            "description": "Get the current configuration of a loaded plugin, including all config field values (secrets masked). Use this to audit plugin settings or understand what is configured before making changes.",
+            "description": "Get the current configuration of a loaded plugin, including all config field values (secrets masked), plus the loaded binary's `version`, `sha256`, `wasm_size_bytes` and `loaded_at` (null when not loaded). Use this to audit plugin settings or understand what is configured before making changes.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -1995,11 +1995,38 @@ async fn tool_disable_monitoring(
 // Plugin management tools
 // ---------------------------------------------------------------------------
 
+/// Identity of the WASM binary currently loaded for a plugin: self-reported
+/// `version` plus the `sha256`, size and load time of the bytes in memory.
+/// All values are `null` when the plugin is not loaded.
+fn loaded_binary_fields(
+    lp: Option<&crate::plugins::LoadedPlugin>,
+) -> serde_json::Map<String, serde_json::Value> {
+    use serde_json::Value;
+    let mut m = serde_json::Map::new();
+    m.insert(
+        "version".into(),
+        lp.map_or(Value::Null, |p| p.metadata.version.clone().into()),
+    );
+    m.insert(
+        "sha256".into(),
+        lp.map_or(Value::Null, |p| p.sha256.clone().into()),
+    );
+    m.insert(
+        "wasm_size_bytes".into(),
+        lp.map_or(Value::Null, |p| p.wasm_bytes.len().into()),
+    );
+    m.insert(
+        "loaded_at".into(),
+        lp.map_or(Value::Null, |p| p.loaded_at.clone().into()),
+    );
+    m
+}
+
 async fn tool_list_plugins(state: &AppState) -> Result<String, String> {
     let s = settings::load_settings_from_db(state).await;
     let loaded = state.plugins.read().await;
-    let loaded_names: std::collections::HashSet<&str> =
-        loaded.iter().map(|p| p.name.as_str()).collect();
+    let loaded_by_name: std::collections::HashMap<&str, &crate::plugins::LoadedPlugin> =
+        loaded.iter().map(|p| (p.name.as_str(), p)).collect();
 
     let list: Vec<serde_json::Value> = s
         .plugins
@@ -2023,13 +2050,18 @@ async fn tool_list_plugins(state: &AppState) -> Result<String, String> {
                     format!("upload: {filename}")
                 }
             };
-            serde_json::json!({
+            let lp = loaded_by_name.get(cfg.name.as_str()).copied();
+            let mut entry = serde_json::json!({
                 "name": cfg.name,
                 "enabled": cfg.enabled,
-                "loaded": loaded_names.contains(cfg.name.as_str()),
+                "loaded": lp.is_some(),
                 "source": source_summary,
                 "token_secret": cfg.token_secret,
-            })
+            });
+            if let Some(obj) = entry.as_object_mut() {
+                obj.extend(loaded_binary_fields(lp));
+            }
+            entry
         })
         .collect();
 
@@ -2292,20 +2324,28 @@ async fn tool_get_plugin_config(
     // Append any config keys that exist in settings but were not declared in
     // the schema (e.g. keys added manually before the plugin published a schema,
     // or internal keys like CURRENT_TIMESTAMP that plugins read internally).
+    // Undeclared keys are where operators put cloud credentials by hand
+    // (see `PluginConfig::config`), so treat them as secret: report that a
+    // value is set without revealing it.
     for (key, val) in &cfg.config {
         if !schema_keys.contains(key.as_str()) {
+            let value = if val.is_empty() {
+                serde_json::Value::Null
+            } else {
+                serde_json::Value::String("***".to_string())
+            };
             config_entries.push(serde_json::json!({
                 "key": key,
                 "label": key,
                 "description": "",
                 "field_type": "string",
-                "value": val,
-                "is_secret": false,
+                "value": value,
+                "is_secret": true,
             }));
         }
     }
 
-    let result = serde_json::json!({
+    let mut result = serde_json::json!({
         "name": cfg.name,
         "enabled": cfg.enabled,
         "status": status,
@@ -2314,6 +2354,9 @@ async fn tool_get_plugin_config(
         "config": config_entries,
         "config_schema_fields": schema_fields.len(),
     });
+    if let Some(obj) = result.as_object_mut() {
+        obj.extend(loaded_binary_fields(loaded_plugin));
+    }
 
     serde_json::to_string_pretty(&result).map_err(|e| e.to_string())
 }
@@ -2690,8 +2733,9 @@ async fn tool_mcp_update_deployment(
 
     // Patch serviceAccountName if requested.
     if let Some(ref sa) = service_account {
-        let api: kube::Api<k8s_openapi::api::apps::v1::Deployment> =
-            kube::Api::namespaced(state.kube_client.clone(), ns);
+        // deployments_api enforces the namespace allowlist; building the Api
+        // directly let a service_account-only update reach any namespace.
+        let api = state.deployments_api(ns).map_err(|e| e.to_string())?;
         let patch = serde_json::json!({
             "spec": { "template": { "spec": { "serviceAccountName": sa } } }
         });

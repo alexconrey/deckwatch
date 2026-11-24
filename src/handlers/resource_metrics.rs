@@ -493,7 +493,11 @@ mod tests {
 
     #[test]
     fn urlencode_preserves_label_selector_chars() {
+        // `=` and `,` stay literal everywhere, including inside set-based
+        // selectors; the API server decodes the query value either way.
         assert_eq!(urlencode("app=foo,env=prod"), "app=foo,env=prod");
-        assert_eq!(urlencode("app in (a, b)"), "app%20in%20%28a%2C%20b%29");
+        assert_eq!(urlencode("app in (a, b)"), "app%20in%20%28a,%20b%29");
+        // Query delimiters are still escaped, so a selector can't add params.
+        assert_eq!(urlencode("app=foo&watch=true"), "app=foo%26watch=true");
     }
 }

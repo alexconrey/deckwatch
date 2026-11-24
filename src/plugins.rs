@@ -462,6 +462,48 @@ pub struct LoadedPlugin {
     /// Metadata from the plugin's `metadata()` export — populated at load time.
     /// Plugins without a `metadata()` export get a default with no dependencies.
     pub metadata: PluginMetadata,
+    /// Lowercase hex SHA-256 of `wasm_bytes`, computed once at load time.
+    /// Identifies the exact binary in memory even when two builds report the
+    /// same `metadata.version` (e.g. an uploaded fix build without a version bump).
+    pub sha256: String,
+    /// RFC 3339 UTC timestamp of when this binary was loaded into memory.
+    pub loaded_at: String,
+}
+
+/// Lowercase hex SHA-256 digest of `bytes` — same format as `shasum -a 256`.
+pub fn sha256_hex(bytes: &[u8]) -> String {
+    format!("{:x}", Sha256::digest(bytes))
+}
+
+/// Swap in a freshly reloaded copy of one plugin, leaving every other loaded
+/// plugin untouched.
+///
+/// `reloaded` is the output of [`fetch_plugins`] run for just `name`: one
+/// entry if the new binary loaded, or none if it failed — in which case the
+/// plugin is unloaded, matching what a full reload does with a broken plugin.
+/// The replacement keeps the plugin's original position in the list; a plugin
+/// that wasn't loaded before is appended.
+pub fn merge_reloaded_plugin(
+    current: &mut Vec<LoadedPlugin>,
+    name: &str,
+    reloaded: Vec<LoadedPlugin>,
+) {
+    let position = current.iter().position(|p| p.name == name);
+    current.retain(|p| p.name != name);
+    let at = position.unwrap_or(current.len());
+    for (offset, plugin) in reloaded.into_iter().filter(|p| p.name == name).enumerate() {
+        current.insert(at + offset, plugin);
+    }
+}
+
+/// Current UTC time as an RFC 3339 string, without a direct `chrono` dependency.
+fn now_rfc3339() -> String {
+    let d = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default();
+    sea_orm::prelude::DateTimeUtc::from_timestamp(d.as_secs() as i64, 0)
+        .map(|t| t.to_rfc3339())
+        .unwrap_or_default()
 }
 
 // ── Validation ────────────────────────────────────────────────────────────────
@@ -520,6 +562,8 @@ pub async fn fetch_and_validate(
     let size = bytes.len();
     let plugin = LoadedPlugin {
         name: cfg.name.clone(),
+        sha256: sha256_hex(&bytes),
+        loaded_at: now_rfc3339(),
         wasm_bytes: Arc::new(bytes),
         allowed_hosts: cfg.allowed_hosts.clone(),
         config: cfg.config.clone(),
@@ -646,7 +690,8 @@ pub async fn fetch_plugins(settings: &DeckwatchSettings, state: &AppState) -> Ve
         let fetch_start = std::time::Instant::now();
         match fetch_bytes(cfg, &http, settings, state).await {
             Ok(bytes) => {
-                tracing::info!(plugin = %cfg.name, bytes = bytes.len(), "loaded plugin");
+                let sha256 = sha256_hex(&bytes);
+                tracing::info!(plugin = %cfg.name, bytes = bytes.len(), sha256 = %sha256, "loaded plugin");
                 let metadata = load_metadata_from_bytes(&bytes, &cfg.allowed_hosts, &cfg.config)
                     .unwrap_or_else(|e| {
                         tracing::debug!(plugin = %cfg.name, error = %e, "metadata() not exported or failed; using defaults");
@@ -678,6 +723,8 @@ pub async fn fetch_plugins(settings: &DeckwatchSettings, state: &AppState) -> Ve
                     inherit_env_keys: cfg.inherit_env_keys.clone(),
                     inherit_env_file_keys: cfg.inherit_env_file_keys.clone(),
                     metadata,
+                    sha256,
+                    loaded_at: now_rfc3339(),
                 });
                 metrics::record_plugin_load(&cfg.name, "loaded");
             }
@@ -732,9 +779,7 @@ async fn fetch_bytes(
     // development workflows aren't blocked while still surfacing the gap.
     match &cfg.sha256 {
         Some(expected_hex) => {
-            let mut hasher = Sha256::new();
-            hasher.update(&bytes);
-            let actual_hex = format!("{:x}", hasher.finalize());
+            let actual_hex = sha256_hex(&bytes);
             if actual_hex != *expected_hex {
                 return Err(anyhow::anyhow!(
                     "SHA-256 mismatch for plugin '{}': expected {expected_hex}, got {actual_hex}",
@@ -1080,6 +1125,35 @@ async fn apply_one_resource(
     Ok(())
 }
 
+/// Deckwatch's own secrets. Plugin config, including `inherit_env_keys`, is
+/// editable through settings and the MCP `update_plugin_config` tool, so a
+/// plugin must never be able to pull these out of the process environment:
+/// the encryption key decrypts every stored credential, and the database URL
+/// can carry a password.
+const NON_INHERITABLE_ENV: &[&str] = &["DECKWATCH_ENCRYPTION_KEY", "DECKWATCH_DATABASE_URL"];
+
+/// `std::env::var` for `inherit_env_keys` / `inherit_env_file_keys`,
+/// refusing [`NON_INHERITABLE_ENV`].
+fn inherited_env_var(plugin: &str, key: &str) -> Option<String> {
+    inherited_env_var_from(plugin, key, |k| std::env::var(k).ok())
+}
+
+fn inherited_env_var_from(
+    plugin: &str,
+    key: &str,
+    lookup: impl Fn(&str) -> Option<String>,
+) -> Option<String> {
+    if NON_INHERITABLE_ENV.contains(&key) {
+        tracing::warn!(
+            plugin,
+            key,
+            "refusing to pass deckwatch secret env var to plugin"
+        );
+        return None;
+    }
+    lookup(key)
+}
+
 pub fn run_provision(
     plugin: &LoadedPlugin,
     req: &ResourceProvisionRequest,
@@ -1114,13 +1188,13 @@ pub fn run_provision(
         .insert("CURRENT_TIMESTAMP".to_string(), now_ts.to_string());
 
     for key in &plugin.inherit_env_keys {
-        if let Ok(val) = std::env::var(key) {
+        if let Some(val) = inherited_env_var(&plugin.name, key) {
             manifest.config.insert(key.clone(), val);
         }
     }
 
     for (config_key, env_var) in &plugin.inherit_env_file_keys {
-        if let Ok(path) = std::env::var(env_var) {
+        if let Some(path) = inherited_env_var(&plugin.name, env_var) {
             match std::fs::read_to_string(&path) {
                 Ok(content) => {
                     manifest
@@ -1235,12 +1309,12 @@ pub fn run_deprovision(
         .insert("CURRENT_TIMESTAMP".to_string(), now_ts.to_string());
 
     for key in &plugin.inherit_env_keys {
-        if let Ok(val) = std::env::var(key) {
+        if let Some(val) = inherited_env_var(&plugin.name, key) {
             manifest.config.insert(key.clone(), val);
         }
     }
     for (config_key, env_var) in &plugin.inherit_env_file_keys {
-        if let Ok(path) = std::env::var(env_var) {
+        if let Some(path) = inherited_env_var(&plugin.name, env_var) {
             if let Ok(content) = std::fs::read_to_string(&path) {
                 manifest
                     .config
@@ -1335,7 +1409,7 @@ pub fn run_plugin(plugin: &LoadedPlugin, ctx: &PluginContext) -> anyhow::Result<
     // Inject inherited env vars from the deckwatch process environment.
     // Applied after static config so live/rotated values override static entries.
     for key in &plugin.inherit_env_keys {
-        if let Ok(val) = std::env::var(key) {
+        if let Some(val) = inherited_env_var(&plugin.name, key) {
             manifest.config.insert(key.clone(), val);
         }
     }
@@ -1345,7 +1419,7 @@ pub fn run_plugin(plugin: &LoadedPlugin, ctx: &PluginContext) -> anyhow::Result<
     // with the content (e.g. exchange a workload identity token for credentials).
     // Applied last so file contents take final precedence.
     for (config_key, env_var) in &plugin.inherit_env_file_keys {
-        if let Ok(path) = std::env::var(env_var) {
+        if let Some(path) = inherited_env_var(&plugin.name, env_var) {
             match std::fs::read_to_string(&path) {
                 Ok(content) => {
                     manifest
@@ -1854,7 +1928,119 @@ mod tests {
                 depends_on: depends_on.into_iter().map(String::from).collect(),
                 ..Default::default()
             },
+            sha256: sha256_hex(&[]),
+            loaded_at: String::new(),
         }
+    }
+
+    fn with_sha(mut p: LoadedPlugin, sha: &str) -> LoadedPlugin {
+        p.sha256 = sha.to_string();
+        p
+    }
+
+    fn names_and_shas(plugins: &[LoadedPlugin]) -> Vec<(String, String)> {
+        plugins
+            .iter()
+            .map(|p| (p.name.clone(), p.sha256.clone()))
+            .collect()
+    }
+
+    // Regression: uploading one plugin used to replace the whole loaded set
+    // with the single-plugin reload, unloading every other plugin.
+    #[test]
+    fn merge_reloaded_plugin_keeps_other_plugins_and_position() {
+        let mut current = vec![
+            with_sha(make_plugin("AWS", vec![], vec![]), "aws-old"),
+            with_sha(make_plugin("entra", vec![], vec![]), "entra"),
+            with_sha(make_plugin("example", vec![], vec![]), "example"),
+        ];
+        let reloaded = vec![with_sha(make_plugin("entra", vec![], vec![]), "entra-new")];
+
+        merge_reloaded_plugin(&mut current, "entra", reloaded);
+
+        assert_eq!(
+            names_and_shas(&current),
+            vec![
+                ("AWS".into(), "aws-old".into()),
+                ("entra".into(), "entra-new".into()),
+                ("example".into(), "example".into()),
+            ]
+        );
+    }
+
+    // A broken upload unloads only that plugin, as a full reload would.
+    #[test]
+    fn merge_reloaded_plugin_failed_reload_unloads_only_that_plugin() {
+        let mut current = vec![
+            make_plugin("AWS", vec![], vec![]),
+            make_plugin("entra", vec![], vec![]),
+        ];
+
+        merge_reloaded_plugin(&mut current, "AWS", vec![]);
+
+        let names: Vec<_> = current.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(names, vec!["entra"]);
+    }
+
+    // First upload for a configured-but-not-yet-loaded plugin is appended.
+    #[test]
+    fn merge_reloaded_plugin_appends_newly_loaded_plugin() {
+        let mut current = vec![make_plugin("AWS", vec![], vec![])];
+
+        merge_reloaded_plugin(
+            &mut current,
+            "entra",
+            vec![make_plugin("entra", vec![], vec![])],
+        );
+
+        let names: Vec<_> = current.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(names, vec!["AWS", "entra"]);
+    }
+
+    // Only entries for the named plugin are merged; anything else in the
+    // reload result is ignored rather than duplicated.
+    #[test]
+    fn merge_reloaded_plugin_ignores_unrelated_entries() {
+        let mut current = vec![with_sha(make_plugin("AWS", vec![], vec![]), "aws")];
+        let reloaded = vec![
+            with_sha(make_plugin("entra", vec![], vec![]), "entra-new"),
+            with_sha(make_plugin("AWS", vec![], vec![]), "stray"),
+        ];
+
+        merge_reloaded_plugin(&mut current, "entra", reloaded);
+
+        assert_eq!(
+            names_and_shas(&current),
+            vec![
+                ("AWS".into(), "aws".into()),
+                ("entra".into(), "entra-new".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn sha256_hex_matches_shasum_format() {
+        // `printf '' | shasum -a 256` and `printf 'abc' | shasum -a 256`
+        assert_eq!(
+            sha256_hex(b""),
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
+        assert_eq!(
+            sha256_hex(b"abc"),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+    }
+
+    #[test]
+    fn now_rfc3339_is_parseable_utc() {
+        let ts = now_rfc3339();
+        let parsed = sea_orm::prelude::DateTimeWithTimeZone::parse_from_rfc3339(&ts)
+            .expect("loaded_at should be valid RFC 3339");
+        assert_eq!(parsed.offset().local_minus_utc(), 0, "should be UTC");
+        assert!(
+            parsed.timestamp() > 1_700_000_000,
+            "timestamp should be recent"
+        );
     }
 
     #[test]
@@ -2131,5 +2317,18 @@ mod tests {
             "existing container image should not be overwritten"
         );
         assert_eq!(pod_spec.containers[1].name, "new-sidecar");
+    }
+
+    #[test]
+    fn inherited_env_var_refuses_deckwatch_secrets() {
+        let env = |k: &str| Some(format!("value-of-{k}"));
+        for key in NON_INHERITABLE_ENV {
+            assert_eq!(inherited_env_var_from("evil", key, env), None, "{key}");
+        }
+        assert_eq!(
+            inherited_env_var_from("aws", "AWS_REGION", env).as_deref(),
+            Some("value-of-AWS_REGION")
+        );
+        assert_eq!(inherited_env_var_from("aws", "UNSET", |_| None), None);
     }
 }

@@ -790,3 +790,7 @@ fn split_ui_path(rest: &str) -> Option<UiAction> {
     }
     None
 }
+
+#[cfg(test)]
+#[path = "routes_tests.rs"]
+mod routes_tests;

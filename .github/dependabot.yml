@@ -59,6 +59,17 @@ updates:
     commit-message:
       prefix: "chore(deps)"
       prefix-development: "chore(dev-deps)"
+    ignore:
+      # TypeScript 7 is the native compiler and no longer exports ./lib/tsc,
+      # so vue-tsc cannot load it (ERR_PACKAGE_PATH_NOT_EXPORTED, see #194).
+      # Hold back 7+ only; 6.x is still the JS compiler and should be offered.
+      # Bump manually once vue-tsc supports the native compiler.
+      - dependency-name: typescript
+        versions: [">=7"]
+      # vue-tsc 3 reports template type errors in our components (see #189).
+      # Remove this once the frontend type-checks cleanly with it.
+      - dependency-name: vue-tsc
+        update-types: ["version-update:semver-major"]
     groups:
       frontend-prod:
         dependency-type: production

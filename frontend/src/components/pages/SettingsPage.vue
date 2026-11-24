@@ -1280,6 +1280,10 @@ onMounted(load);
               v-model="notifications.webhook_url"
               label="Webhook URL"
               placeholder="https://hooks.slack.com/services/T00/B00/xxx"
+              :hint="notifications.webhook_url === 'configured'
+                ? 'A webhook URL is stored but hidden. Enter a new URL to replace it.'
+                : ''"
+              :persistent-hint="notifications.webhook_url === 'configured'"
               variant="outlined"
               density="comfortable"
               class="mb-4"
@@ -3153,7 +3157,7 @@ onMounted(load);
               <v-col cols="6">
                 <v-text-field
                   v-model="plugin.config[key]"
-                  label="Value"
+                  :label="plugin.config[key] === 'configured' ? 'Value (stored, hidden; type to replace)' : 'Value'"
                   density="compact"
                   variant="outlined"
                   hide-details

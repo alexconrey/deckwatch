@@ -350,6 +350,33 @@ async fn test_update_deployment_service_account_only_attempts_patch() {
     }
 }
 
+/// Regression: a service_account-only update built its Deployment Api directly
+/// and skipped the namespace allowlist, so it could repoint workloads in any
+/// namespace (e.g. kube-system) at an arbitrary service account.
+#[tokio::test]
+async fn test_update_deployment_service_account_respects_namespace_allowlist() {
+    let mut state = build_test_state().await;
+    state.allowed_namespaces = vec!["team-a".to_string()];
+    let resp = handle_tool_call(
+        &state,
+        &tool_call_req(
+            53,
+            "update_deployment",
+            json!({
+                "namespace": "kube-system",
+                "name": "coredns",
+                "service_account": "attacker-sa"
+            }),
+        ),
+    )
+    .await;
+    let rendered = serde_json::to_string(&resp).expect("serialize response");
+    assert!(
+        rendered.contains("Namespace 'kube-system' is not in the allowed list"),
+        "service_account patch must be refused outside the allowlist: {rendered}"
+    );
+}
+
 #[tokio::test]
 async fn test_update_deployment_service_account_in_schema() {
     let state = build_test_state().await;
@@ -759,4 +786,90 @@ users:
             std::collections::HashMap::new(),
         )),
     }
+}
+
+// ---------------------------------------------------------------------------
+// Plugin binary identity (version + sha256) in list_plugins / get_plugin_config
+// ---------------------------------------------------------------------------
+
+async fn state_with_plugins() -> crate::state::AppState {
+    let state = build_test_state().await;
+    let s = settings::DeckwatchSettings {
+        plugins: serde_json::from_value(json!([
+        { "name": "aws", "enabled": true, "source": { "type": "upload", "filename": "aws.wasm" } },
+        { "name": "gcp", "enabled": true, "source": { "type": "url", "url": "https://example.com/gcp.wasm" } }
+    ]))
+        .expect("plugin configs"),
+        ..Default::default()
+    };
+    settings::upsert_settings_to_db_pub(&state.db, &s)
+        .await
+        .expect("save settings");
+
+    let bytes = b"\0asm-fix-build".to_vec();
+    state
+        .plugins
+        .write()
+        .await
+        .push(crate::plugins::LoadedPlugin {
+            name: "aws".to_string(),
+            sha256: crate::plugins::sha256_hex(&bytes),
+            wasm_bytes: std::sync::Arc::new(bytes),
+            allowed_hosts: vec![],
+            config: Default::default(),
+            inherit_env_keys: vec![],
+            inherit_env_file_keys: Default::default(),
+            metadata: crate::plugins::PluginMetadata {
+                name: "aws".to_string(),
+                version: "0.7.2".to_string(),
+                ..Default::default()
+            },
+            loaded_at: "2026-11-24T12:00:00+00:00".to_string(),
+        });
+    state
+}
+
+#[tokio::test]
+async fn test_list_plugins_reports_loaded_binary_identity() {
+    let state = state_with_plugins().await;
+    let out: serde_json::Value =
+        serde_json::from_str(&tool_list_plugins(&state).await.expect("ok")).unwrap();
+    let plugins = out["plugins"].as_array().expect("plugins array");
+
+    let aws = plugins.iter().find(|p| p["name"] == "aws").expect("aws");
+    assert_eq!(aws["loaded"], true);
+    assert_eq!(aws["version"], "0.7.2");
+    assert_eq!(
+        aws["sha256"],
+        crate::plugins::sha256_hex(b"\0asm-fix-build")
+    );
+    assert_eq!(aws["wasm_size_bytes"], 14);
+    assert_eq!(aws["loaded_at"], "2026-11-24T12:00:00+00:00");
+    // Existing fields are still present.
+    assert_eq!(aws["enabled"], true);
+    assert_eq!(aws["source"], "upload: aws.wasm");
+
+    let gcp = plugins.iter().find(|p| p["name"] == "gcp").expect("gcp");
+    assert_eq!(gcp["loaded"], false);
+    for key in ["version", "sha256", "wasm_size_bytes", "loaded_at"] {
+        assert!(gcp[key].is_null(), "{key} should be null when not loaded");
+    }
+}
+
+#[tokio::test]
+async fn test_get_plugin_config_reports_loaded_binary_identity() {
+    let state = state_with_plugins().await;
+    let out: serde_json::Value = serde_json::from_str(
+        &tool_get_plugin_config(&state, &json!({ "name": "aws" }))
+            .await
+            .expect("ok"),
+    )
+    .unwrap();
+    assert_eq!(out["status"], "loaded");
+    assert_eq!(out["version"], "0.7.2");
+    assert_eq!(
+        out["sha256"],
+        crate::plugins::sha256_hex(b"\0asm-fix-build")
+    );
+    assert_eq!(out["loaded_at"], "2026-11-24T12:00:00+00:00");
 }

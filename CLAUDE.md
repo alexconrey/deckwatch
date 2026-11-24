@@ -56,7 +56,7 @@ src/                              # Rust backend
     ingresses.rs                  # CRUD + auto-service + IngressClass discovery
     gitops.rs                     # GitOps config CRUD (DB-backed)
     logs.rs                       # Log streaming (SSE) + bulk history
-    mcp.rs                        # MCP server (JSON-RPC 2.0, 17 tools)
+    mcp.rs                        # MCP server (JSON-RPC 2.0, 34 deckwatch tools + mcp-k8s)
     monitoring.rs                 # PodMonitor CRD management
     diagnostics.rs                # AI diagnostic job creation
     ai_fix.rs                     # AI fix job creation
@@ -184,10 +184,15 @@ cd frontend && npx vitest run                 # Frontend (~70+ tests)
 
 CI runs on PRs to main via `.github/workflows/ci.yml`:
 - `cargo check --locked`
+- `cargo check --locked --all-targets` (tests must compile; they are not run in CI yet)
 - `cargo clippy -- -D warnings`
 - `cargo fmt --check`
 - Frontend: `pnpm install && vite build`
 - `helm lint`
+
+The Rust toolchain is pinned in `rust-toolchain.toml` and must match the
+`rust:<version>` image tag in the `Dockerfile` (CI fails if they differ), so
+bump both in the same PR.
 
 Publish workflow (`.github/workflows/publish.yml`) builds multi-arch image to
 GHCR on tag push.
@@ -270,24 +275,62 @@ builds the multi-arch image automatically.
 Deckwatch exposes an MCP endpoint at `POST /mcp` (JSON-RPC 2.0, MCP 2025-11-25 spec).
 Claude Code connects via `claude mcp add --transport http <name> <url>/mcp`.
 
-5 deckwatch-specific tools (create_application, list_addons, list_templates,
-configure_gitops, get_gitops_status) plus 160+ upstream K8s tools from mcp-k8s
-(deployments, pods, services, ingresses, secrets, configmaps, RBAC, CRDs, etc.).
+34 deckwatch-specific tools (`deckwatch_tool_definitions()` in
+`src/handlers/mcp.rs`) plus 200+ upstream K8s tools from mcp-k8s (deployments,
+pods, services, ingresses, secrets, configmaps, RBAC, CRDs, etc.):
 
-## Addons
+- **Applications:** `create_application`, `list_applications`, `get_application`,
+  `restart_application`, `scale_application`, `list_templates`
+- **GitOps & builds:** `set_gitops`, `get_gitops`, `trigger_build`, `list_builds`,
+  `get_build_log`, `watch_build`, `generate_local_build`
+- **Ingress:** `create_ingress`, `update_ingress`, `list_ingress_templates`,
+  `create_ingress_template`, `update_ingress_template`, `delete_ingress_template`
+- **Monitoring:** `get_monitoring`, `enable_monitoring`, `disable_monitoring`
+- **Plugins:** `list_plugins`, `enable_plugin`, `disable_plugin`,
+  `update_plugin_config`, `get_plugin_config`, `validate_plugin`,
+  `associate_plugin`, `disassociate_plugin`
+- **Plugin resources:** `list_application_resources`, `provision_resource`,
+  `deprovision_resource`, `refresh_resource`
 
-Addons are sidecar containers attached to deployments via the `/api/addons`
-catalog. The addon system injects the sidecar container and its default env
-vars into the primary container automatically.
+`submit_agent_feedback` is listed only when agent feedback is enabled in
+settings. Deckwatch also replaces the upstream `update_deployment`,
+`create_pod`, `apply_manifest` and `exec_pod` with its own implementations, and
+intercepts `create_deployment`, `delete_deployment`, `scale_deployment` and
+`restart_deployment` to audit-log them.
 
-Available addons: `redis`, `memcached`, `nginx-proxy`, `fluent-bit`,
-`otel-collector`, `postgres`.
+## Plugins
 
-The **postgres** addon is unique — it provisions a PersistentVolumeClaim
-(`{deployment}-{container}-data`) alongside the sidecar for durable storage.
-Detaching the addon cleans up both the volume and the PVC. The `storage` field
-on `AttachAddonRequest` controls PVC size (default `1Gi`). Injected env vars:
-`PG_HOST=localhost`, `PGDATA`, `POSTGRES_DB`, `POSTGRES_USER`, `POSTGRES_PASSWORD`.
+Sidecars and other workload injection come from external WASM plugins built on
+[deckwatch-plugin-sdk](https://github.com/alexconrey/deckwatch-plugin-sdk). They
+replaced the built-in addon system, which was removed in #171 (there is no
+`/api/addons`). The old sidecars are now the
+`alexconrey/deckwatch-plugin-{redis,memcached,nginx-proxy,fluent-bit,postgresql,otel}`
+plugins.
+
+- **Configured** in settings `plugins[]` (Settings → Plugins, `PUT /api/settings`,
+  or the MCP plugin tools). The WASM comes from a GitHub file or release, a URL,
+  or `POST /api/plugins/{name}/upload`. Enabled plugins load at startup and on
+  settings changes. They run in extism with WASI disabled, and outbound HTTP is
+  limited to each plugin's `allowed_hosts`.
+- **Per deployment:** every loaded plugin's `apply()` runs when a deployment is
+  created or updated through the REST API (`POST`/`PUT` handlers in
+  `src/handlers/deployments.rs`; MCP `create_deployment` does not run them).
+  Each plugin decides whether to act, usually based on deployment annotations
+  that it defines.
+- **Per application:** plugins that declare resources are provisioned from the
+  application's Infrastructure tab or with MCP `provision_resource`.
+  `reconcile_application_plugins()` in `src/watcher.rs` then server-side-applies
+  their env vars and sidecars to every Deployment and CronJob labelled
+  `deckwatch.io/application=<app>`, every 10 s. Associations (`associate_plugin`,
+  Plugins tab) are stored, but neither path reads them.
+- Plugin output can include Kubernetes objects of any kind. Deckwatch
+  server-side-applies them with its own credentials.
+
+Key files: `src/plugins.rs` (fetch, execute, merge), `src/handlers/plugins.rs`
+(`/api/plugins`), `src/handlers/applications.rs` (associations),
+`src/handlers/application_resources.rs` (provisioning), `src/watcher.rs`
+(reconciler), `PluginConfig` in `src/handlers/settings.rs`. Guide:
+`docs/PLUGINS.md`.
 
 ## Feature Flags
 

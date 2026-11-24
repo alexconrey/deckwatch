@@ -34,9 +34,9 @@ tags:
   - name: GitOps
   - name: Git
   - name: Diagnostics
-  - name: Addons
   - name: Templates
   - name: Settings
+  - name: Plugins
   - name: Registry
   - name: OCI
 
@@ -501,32 +501,7 @@ paths:
       tags: [CronJobs]
       responses: { "200": { description: OK } }
 
-  # -------------------------------------------------------------- addons / templates
-  /api/addons:
-    get:
-      tags: [Addons]
-      summary: List addon catalog
-      responses: { "200": { description: OK } }
-  /api/namespaces/{ns}/deployments/{name}/addons/{addon_id}:
-    parameters:
-      - $ref: "#/components/parameters/Namespace"
-      - $ref: "#/components/parameters/Name"
-      - in: path
-        name: addon_id
-        required: true
-        schema: { type: string }
-    post:
-      tags: [Addons]
-      summary: Attach an addon to a deployment
-      responses: { "200": { description: OK } }
-    patch:
-      tags: [Addons]
-      summary: Update attached addon config
-      responses: { "200": { description: OK } }
-    delete:
-      tags: [Addons]
-      summary: Detach an addon
-      responses: { "204": { description: Detached } }
+  # -------------------------------------------------------------- templates
   /api/templates:
     get:
       tags: [Templates]
@@ -709,6 +684,76 @@ paths:
           application/json:
             schema: { $ref: "#/components/schemas/DeckwatchSettings" }
       responses: { "200": { description: Updated } }
+
+  # -------------------------------------------------------------- plugins
+  /api/plugins:
+    get:
+      tags: [Plugins]
+      summary: List loaded WASM plugins
+      description: |
+        Returns every plugin currently loaded in memory. Configured-but-not-loaded
+        plugins (disabled, fetch failed, version incompatible) are omitted.
+
+        `version` is self-reported by the plugin's `metadata()` export and is not
+        guaranteed to be unique per build. `sha256` is computed by deckwatch from
+        the exact bytes loaded, so it identifies the running binary; compare it with
+        `shasum -a 256 plugin.wasm`.
+      responses:
+        "200":
+          description: Loaded plugins
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/PluginSummary" }
+  /api/plugins/{name}/schema:
+    parameters:
+      - $ref: "#/components/parameters/Name"
+    get:
+      tags: [Plugins]
+      summary: Config schema for a loaded plugin
+      responses:
+        "200":
+          description: Config fields declared by the plugin
+          content:
+            application/json:
+              schema: { type: array, items: { type: object } }
+        "404": { description: Plugin not found or not loaded }
+  /api/plugins/{name}/config:
+    parameters:
+      - $ref: "#/components/parameters/Name"
+    post:
+      tags: [Plugins]
+      summary: Save plugin config values (Secret-typed fields are encrypted)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: { type: string }
+      responses:
+        "204": { description: Saved }
+        "404": { description: Plugin not found in settings }
+  /api/plugins/{name}/upload:
+    parameters:
+      - $ref: "#/components/parameters/Name"
+    post:
+      tags: [Plugins]
+      summary: Upload a WASM binary and reload the plugin from it
+      description: |
+        Stores the body as `/data/uploads/{name}.wasm`, switches the plugin source
+        to `upload`, and reloads it in the background. Once reloaded, the plugin's
+        `sha256` in `GET /api/plugins` matches `shasum -a 256` of the uploaded file.
+      requestBody:
+        required: true
+        content:
+          application/octet-stream:
+            schema: { type: string, format: binary }
+      responses:
+        "204": { description: Uploaded; reload started }
+        "400": { description: Empty body or not a WASM binary }
+        "404": { description: Plugin not found in settings }
 
   # -------------------------------------------------------------- registry UI
   /api/registry/enabled:
@@ -1023,3 +1068,30 @@ components:
             properties:
               name: { type: string }
               url:  { type: string }
+
+    PluginSummary:
+      type: object
+      description: A WASM plugin currently loaded in memory.
+      required: [name, version, description, provides, depends_on, config_schema, resources, wasm_size_bytes, sha256, loaded_at]
+      properties:
+        name:            { type: string, example: aws }
+        version:
+          type: string
+          description: Self-reported by the plugin's `metadata()` export. Empty when the plugin has no `metadata()` export.
+          example: "0.7.2"
+        description:     { type: string }
+        provides:        { type: array, items: { type: string } }
+        depends_on:      { type: array, items: { type: string } }
+        config_schema:   { type: array, items: { type: object } }
+        resources:       { type: array, items: { type: object } }
+        wasm_size_bytes: { type: integer, description: Size of the loaded WASM binary }
+        sha256:
+          type: string
+          description: Lowercase hex SHA-256 of the WASM bytes loaded, computed by deckwatch at load time. Same format as `shasum -a 256`.
+          pattern: "^[0-9a-f]{64}$"
+          example: 3f1c2e0b9a7d4c5e6f8a1b2c3d4e5f60718293a4b5c6d7e8f9012a3b4c5d6e7f
+        loaded_at:
+          type: string
+          format: date-time
+          description: When this binary was loaded into memory (UTC).
+          example: "2026-11-24T12:00:00+00:00"

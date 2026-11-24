@@ -1029,6 +1029,10 @@ export interface PluginSummary {
   resources: PluginResource[];
   mcp_tuning_fields: McpTuningField[];
   wasm_size_bytes: number;
+  /** Lowercase hex SHA-256 of the loaded WASM bytes (same format as `shasum -a 256`). */
+  sha256?: string;
+  /** RFC 3339 UTC timestamp of when the binary was loaded. */
+  loaded_at?: string;
 }
 
 // --- Application plugin association types (Feature 2) ---

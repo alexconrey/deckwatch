@@ -1,7 +1,8 @@
 //! Plugin API handlers.
 //!
 //! Exposes:
-//! - `GET /api/plugins` — list all loaded plugins with metadata including `config_schema`
+//! - `GET /api/plugins` — list all loaded plugins with metadata including `config_schema`,
+//!   self-reported `version`, and the `sha256`/`loaded_at` of the binary in memory
 //! - `GET /api/plugins/{name}/schema` — return `config_schema` for a named plugin
 //! - `POST /api/plugins/{name}/config` — save plugin config, encrypting `Secret`-typed fields
 //! - `POST /api/plugins/{name}/upload` — upload a WASM binary directly for local dev/testing
@@ -28,6 +29,28 @@ pub struct PluginSummary {
     pub config_schema: Vec<ConfigField>,
     pub resources: Vec<crate::plugins::PluginResource>,
     pub wasm_size_bytes: usize,
+    /// Lowercase hex SHA-256 of the WASM bytes currently loaded. Compare with
+    /// `shasum -a 256 plugin.wasm` to confirm exactly which binary is running.
+    pub sha256: String,
+    /// RFC 3339 UTC timestamp of when the binary was loaded into memory.
+    pub loaded_at: String,
+}
+
+impl From<&crate::plugins::LoadedPlugin> for PluginSummary {
+    fn from(p: &crate::plugins::LoadedPlugin) -> Self {
+        PluginSummary {
+            name: p.name.clone(),
+            version: p.metadata.version.clone(),
+            description: p.metadata.description.clone(),
+            provides: p.metadata.provides.clone(),
+            depends_on: p.metadata.depends_on.clone(),
+            config_schema: p.metadata.config_schema.clone(),
+            resources: p.metadata.resources.clone(),
+            wasm_size_bytes: p.wasm_bytes.len(),
+            sha256: p.sha256.clone(),
+            loaded_at: p.loaded_at.clone(),
+        }
+    }
 }
 
 /// GET /api/plugins
@@ -37,19 +60,7 @@ pub async fn list_plugins(
     State(state): State<AppState>,
 ) -> Result<Json<Vec<PluginSummary>>, AppError> {
     let plugins = state.plugins.read().await;
-    let summaries: Vec<PluginSummary> = plugins
-        .iter()
-        .map(|p| PluginSummary {
-            name: p.name.clone(),
-            version: p.metadata.version.clone(),
-            description: p.metadata.description.clone(),
-            provides: p.metadata.provides.clone(),
-            depends_on: p.metadata.depends_on.clone(),
-            config_schema: p.metadata.config_schema.clone(),
-            resources: p.metadata.resources.clone(),
-            wasm_size_bytes: p.wasm_bytes.len(),
-        })
-        .collect();
+    let summaries: Vec<PluginSummary> = plugins.iter().map(PluginSummary::from).collect();
     Ok(Json(summaries))
 }
 
@@ -180,7 +191,8 @@ pub async fn upload_plugin_wasm(
         .await
         .map_err(|e| AppError::BadRequest(format!("failed to write WASM: {e}")))?;
 
-    tracing::info!(plugin = %name, bytes = body.len(), path = %dest.display(), "WASM uploaded");
+    let sha256 = crate::plugins::sha256_hex(&body);
+    tracing::info!(plugin = %name, bytes = body.len(), sha256 = %sha256, path = %dest.display(), "WASM uploaded");
 
     // Update plugin source to Upload and trigger reload.
     let mut settings = crate::handlers::settings::load_settings_from_db(&state).await;
@@ -198,7 +210,9 @@ pub async fn upload_plugin_wasm(
         .await
         .map_err(|e| AppError::BadRequest(format!("failed to save settings: {e}")))?;
 
-    // Reload in background.
+    // Reload just this plugin in the background and swap it into the loaded
+    // set. Replacing the whole set with the single-plugin fetch result would
+    // unload every other plugin until the next full reload.
     let state_clone = state.clone();
     let name_clone = name.clone();
     let plugin_snapshot = settings.plugins.iter().find(|p| p.name == name).cloned();
@@ -208,9 +222,17 @@ pub async fn upload_plugin_wasm(
                 plugins: vec![cfg],
                 ..Default::default()
             };
-            let loaded = crate::plugins::fetch_plugins(&s, &state_clone).await;
-            tracing::info!(plugin = %name_clone, count = loaded.len(), "plugin reload after upload");
-            *state_clone.plugins.write().await = loaded;
+            let reloaded = crate::plugins::fetch_plugins(&s, &state_clone).await;
+            if reloaded.is_empty() {
+                tracing::warn!(plugin = %name_clone, "uploaded plugin failed to load; it is now unloaded");
+            }
+            let mut plugins = state_clone.plugins.write().await;
+            crate::plugins::merge_reloaded_plugin(&mut plugins, &name_clone, reloaded);
+            // fetch_plugins set the gauge from the single-plugin fetch; restore
+            // it to the real number of loaded plugins.
+            crate::metrics::set_plugins_loaded(plugins.len() as f64);
+            tracing::info!(plugin = %name_clone, loaded = plugins.len(), "plugin reload after upload");
+            drop(plugins);
             state_clone.plugin_patch_fingerprints.lock().await.clear();
         });
     }
@@ -222,7 +244,7 @@ pub async fn upload_plugin_wasm(
         &name,
         "",
         &format!(
-            "uploaded WASM binary for plugin '{name}' ({} bytes)",
+            "uploaded WASM binary for plugin '{name}' ({} bytes, sha256 {sha256})",
             body.len()
         ),
         "",
@@ -232,3 +254,7 @@ pub async fn upload_plugin_wasm(
 
     Ok(StatusCode::NO_CONTENT)
 }
+
+#[cfg(test)]
+#[path = "plugins_tests.rs"]
+mod tests;

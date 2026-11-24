@@ -1,5 +1,6 @@
 #![allow(dead_code, unused_imports)]
-use std::sync::OnceLock;
+use std::collections::HashSet;
+use std::sync::{LazyLock, Mutex, OnceLock};
 use std::time::Instant;
 
 use axum::extract::{MatchedPath, Request, State};
@@ -455,6 +456,94 @@ fn one() -> u64 {
     1
 }
 
+// ── label bounding for the unauthenticated /api/frontend-metrics endpoint ──
+//
+// Every distinct label value becomes a Prometheus series that lives for the
+// life of the process and is rendered on every /metrics scrape. The payload
+// comes from an unauthenticated client, so unbounded labels let anyone grow
+// memory and scrape size without limit. Free-form labels are capped in
+// length, charset and number of distinct values; enumerable ones are mapped
+// onto fixed sets. Anything else is recorded as "other".
+
+const MAX_FRONTEND_LABEL_LEN: usize = 128;
+const MAX_FRONTEND_LABEL_VALUES: usize = 512;
+const OTHER_LABEL: &str = "other";
+
+/// Distinct values seen so far for one free-form label.
+#[derive(Default)]
+struct LabelSet(Mutex<HashSet<String>>);
+
+impl LabelSet {
+    fn bound(&self, value: String, max_values: usize) -> String {
+        let well_formed = !value.is_empty()
+            && value.len() <= MAX_FRONTEND_LABEL_LEN
+            && value.bytes().all(|b| b.is_ascii_graphic());
+        if !well_formed {
+            return OTHER_LABEL.to_string();
+        }
+        let mut seen = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        if seen.contains(&value) || seen.len() < max_values {
+            seen.insert(value.clone());
+            value
+        } else {
+            OTHER_LABEL.to_string()
+        }
+    }
+}
+
+static FRONTEND_ROUTES: LazyLock<LabelSet> = LazyLock::new(LabelSet::default);
+static FRONTEND_API_PATHS: LazyLock<LabelSet> = LazyLock::new(LabelSet::default);
+static FRONTEND_ERROR_KINDS: LazyLock<LabelSet> = LazyLock::new(LabelSet::default);
+
+fn route_label(route: String) -> String {
+    FRONTEND_ROUTES.bound(route, MAX_FRONTEND_LABEL_VALUES)
+}
+
+fn api_path_label(path: String) -> String {
+    FRONTEND_API_PATHS.bound(path, MAX_FRONTEND_LABEL_VALUES)
+}
+
+fn error_kind_label(kind: String) -> String {
+    FRONTEND_ERROR_KINDS.bound(kind, MAX_FRONTEND_LABEL_VALUES)
+}
+
+fn method_label(method: &str) -> &'static str {
+    match method.to_ascii_uppercase().as_str() {
+        "GET" => "GET",
+        "POST" => "POST",
+        "PUT" => "PUT",
+        "PATCH" => "PATCH",
+        "DELETE" => "DELETE",
+        "HEAD" => "HEAD",
+        "OPTIONS" => "OPTIONS",
+        _ => OTHER_LABEL,
+    }
+}
+
+fn status_class_label(status: u16) -> &'static str {
+    match status / 100 {
+        1 => "1xx",
+        2 => "2xx",
+        3 => "3xx",
+        4 => "4xx",
+        5 => "5xx",
+        _ => OTHER_LABEL,
+    }
+}
+
+/// Metric names emitted by the `web-vitals` library.
+fn web_vital_label(name: &str) -> &'static str {
+    match name {
+        "CLS" => "CLS",
+        "FCP" => "FCP",
+        "FID" => "FID",
+        "INP" => "INP",
+        "LCP" => "LCP",
+        "TTFB" => "TTFB",
+        _ => OTHER_LABEL,
+    }
+}
+
 /// POST /api/frontend-metrics — accepts a batch, records into the same
 /// prometheus recorder as the backend. Silently drops malformed batches
 /// (return 204 either way) so the browser never retries with a bad payload.
@@ -467,23 +556,25 @@ pub async fn ingest_frontend_metrics(
     };
 
     for pv in metrics.page_views {
-        counter!("deckwatch_frontend_page_views_total", "route" => pv.route).increment(pv.count);
+        counter!("deckwatch_frontend_page_views_total", "route" => route_label(pv.route))
+            .increment(pv.count);
     }
 
     for call in metrics.api_calls {
-        let status_class = format!("{}xx", call.status / 100);
+        let path = api_path_label(call.path);
+        let method = method_label(&call.method);
         counter!(
             "deckwatch_frontend_api_calls_total",
-            "path" => call.path.clone(),
-            "method" => call.method.clone(),
-            "status" => status_class,
+            "path" => path.clone(),
+            "method" => method,
+            "status" => status_class_label(call.status),
         )
         .increment(1);
 
         histogram!(
             "deckwatch_frontend_api_call_duration_seconds",
-            "path" => call.path,
-            "method" => call.method,
+            "path" => path,
+            "method" => method,
         )
         .record(call.duration_ms / 1000.0);
     }
@@ -491,8 +582,8 @@ pub async fn ingest_frontend_metrics(
     for err in metrics.errors {
         counter!(
             "deckwatch_frontend_errors_total",
-            "kind" => err.kind,
-            "route" => err.route,
+            "kind" => error_kind_label(err.kind),
+            "route" => route_label(err.route),
         )
         .increment(1);
     }
@@ -500,7 +591,7 @@ pub async fn ingest_frontend_metrics(
     if let Some(nav) = metrics.navigation_timing {
         histogram!(
             "deckwatch_frontend_page_load_seconds",
-            "route" => nav.route,
+            "route" => route_label(nav.route),
         )
         .record(nav.load_time_ms / 1000.0);
     }
@@ -509,17 +600,22 @@ pub async fn ingest_frontend_metrics(
         // CLS is unitless; the rest are milliseconds. Convert to seconds
         // for the ms-family so histogram buckets match the rest of the
         // frontend timing metrics.
-        let value = match vital.name.as_str() {
+        let name = web_vital_label(&vital.name);
+        let value = match name {
             "CLS" => vital.value,
             _ => vital.value / 1000.0,
         };
         histogram!(
             "deckwatch_frontend_web_vital",
-            "name" => vital.name,
-            "route" => vital.route,
+            "name" => name,
+            "route" => route_label(vital.route),
         )
         .record(value);
     }
 
     StatusCode::NO_CONTENT
 }
+
+#[cfg(test)]
+#[path = "metrics_tests.rs"]
+mod metrics_tests;
