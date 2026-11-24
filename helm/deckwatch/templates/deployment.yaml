@@ -65,6 +65,11 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.namespace
+            # reportingInstance on the Kubernetes Events deckwatch publishes.
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
             - name: DECKWATCH_SETTINGS_CONFIGMAP
               value: {{ .Values.settings.configMapName | default "deckwatch-config" | quote }}
             - name: DECKWATCH_DATABASE_URL

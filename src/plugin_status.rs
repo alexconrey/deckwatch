@@ -31,6 +31,7 @@ use tokio::sync::{mpsc, oneshot};
 
 use crate::entities::plugin_status;
 use crate::plugin_events::{Health, PluginEventReport};
+use crate::plugin_k8s_events::{KubeEventRequest, KubeEventSink};
 use crate::state::AppState;
 
 /// Most events kept on a row.
@@ -44,7 +45,7 @@ pub const QUEUE_CAPACITY: usize = 1024;
 pub const UNCHANGED_REWRITE_SECS: i64 = 300;
 
 /// Which row an update is for.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct StatusKey {
     /// `"{ns}/{app}"`, or `""` for plugin-wide state.
     pub application_id: String,
@@ -80,11 +81,16 @@ impl StatusKey {
 }
 
 /// The outcome of one call (or one reconcile cycle) for a target.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct StatusUpdate {
     pub key: StatusKey,
     /// The export that produced it.
     pub export: String,
+    /// What triggered the call (`plugins::Trigger::as_str`).
+    pub trigger: String,
+    /// The workloads it's about, for Kubernetes Events. Empty means every
+    /// Deployment of the application (or none, for plugin-wide rows).
+    pub targets: Vec<crate::plugin_k8s_events::WorkloadRef>,
     pub health: Health,
     pub events: Vec<PluginEventReport>,
     pub trace_id: Option<String>,
@@ -112,6 +118,8 @@ pub(crate) enum SinkMsg {
     ForgetApplication(String),
     /// Keep only these plugins' rows (disabled or removed plugins go).
     KeepPlugins(Vec<String>),
+    /// Publish a Kubernetes Event that isn't tied to a status change.
+    KubeEvent(KubeEventRequest),
     /// Reply once everything queued before has been applied.
     Flush(oneshot::Sender<()>),
 }
@@ -307,23 +315,41 @@ fn now_utc() -> DateTimeUtc {
     DateTimeUtc::from_timestamp(d.as_secs() as i64, d.subsec_nanos()).unwrap_or_default()
 }
 
-/// Start the worker that applies status updates, and connect it to
-/// `state.plugin_telemetry`. Call once, after `AppState` is built. Until
-/// then (and in tests that don't call it), updates are discarded.
+/// Start the worker that applies status updates and publishes Kubernetes
+/// Events, and connect it to `state.plugin_telemetry`. Call once, after
+/// `AppState` is built. Until then (and in tests that don't call it),
+/// updates are discarded.
 pub fn spawn_worker(state: &AppState) {
+    spawn_worker_with(state, KubeEventSink::new(state.kube_client.clone()));
+}
+
+/// [`spawn_worker`] with a given Kubernetes Event sink (tests use a short
+/// republish interval).
+pub(crate) fn spawn_worker_with(state: &AppState, kube: KubeEventSink) {
     let (tx, rx) = mpsc::channel(QUEUE_CAPACITY);
     if !state.plugin_telemetry.connect(tx) {
         tracing::warn!("plugin status worker already running");
         return;
     }
-    tokio::spawn(run_worker(state.clone(), rx));
+    tokio::spawn(run_worker(state.clone(), rx, kube));
 }
 
-async fn run_worker(state: AppState, mut rx: mpsc::Receiver<SinkMsg>) {
+async fn run_worker(state: AppState, mut rx: mpsc::Receiver<SinkMsg>, kube: KubeEventSink) {
     while let Some(msg) = rx.recv().await {
         match msg {
-            SinkMsg::Status(update) => match apply_update(&state.db, &update, now_utc()).await {
-                Ok(Some(transition)) => {
+            SinkMsg::Status(update) => {
+                let transition = match apply_update(&state.db, &update, now_utc()).await {
+                    Ok(transition) => transition,
+                    Err(e) => {
+                        tracing::warn!(
+                            plugin = %update.key.plugin,
+                            error = %e,
+                            "failed to record plugin status"
+                        );
+                        None
+                    }
+                };
+                if let Some(transition) = transition {
                     tracing::info!(
                         plugin = %update.key.plugin,
                         application = %update.key.application_id,
@@ -332,13 +358,15 @@ async fn run_worker(state: AppState, mut rx: mpsc::Receiver<SinkMsg>) {
                         "plugin status changed"
                     );
                 }
-                Ok(None) => {}
-                Err(e) => tracing::warn!(
-                    plugin = %update.key.plugin,
-                    error = %e,
-                    "failed to record plugin status"
-                ),
-            },
+                if let Some(event) = crate::plugin_k8s_events::event_for(&update, transition) {
+                    kube.spawn_publish(KubeEventRequest {
+                        application_id: update.key.application_id.clone(),
+                        targets: update.targets.clone(),
+                        event,
+                    });
+                }
+            }
+            SinkMsg::KubeEvent(request) => kube.spawn_publish(request),
             SinkMsg::Forget(key) => {
                 let result = plugin_status::Entity::delete_many()
                     .filter(plugin_status::Column::ApplicationId.eq(&key.application_id))
@@ -369,6 +397,7 @@ async fn run_worker(state: AppState, mut rx: mpsc::Receiver<SinkMsg>) {
                 }
             }
             SinkMsg::Flush(done) => {
+                kube.idle().await;
                 let _ = done.send(());
             }
         }
@@ -381,13 +410,17 @@ async fn run_worker(state: AppState, mut rx: mpsc::Receiver<SinkMsg>) {
 #[derive(Debug, Default)]
 pub struct ApplyAggregate {
     by_plugin: BTreeMap<String, StatusUpdate>,
+    /// Each plugin's health on each workload, to pick the Event targets.
+    healths: BTreeMap<String, Vec<(crate::plugin_k8s_events::WorkloadRef, Health)>>,
 }
 
 impl ApplyAggregate {
+    /// Add one plugin's `apply()` outcome on one workload.
     pub fn add(
         &mut self,
         application_id: &str,
         plugin: &str,
+        target: Option<crate::plugin_k8s_events::WorkloadRef>,
         health: Health,
         events: Vec<PluginEventReport>,
         trace_id: Option<String>,
@@ -398,10 +431,8 @@ impl ApplyAggregate {
             .or_insert_with(|| StatusUpdate {
                 key: StatusKey::apply(application_id, plugin),
                 export: "apply".to_string(),
-                health: Health::Healthy,
-                events: Vec::new(),
-                trace_id: None,
-                merge: false,
+                trigger: "reconcile".to_string(),
+                ..Default::default()
             });
         entry.health = entry.health.max(health);
         for e in events {
@@ -412,9 +443,28 @@ impl ApplyAggregate {
         if entry.trace_id.is_none() {
             entry.trace_id = trace_id;
         }
+        if let Some(target) = target {
+            self.healths
+                .entry(plugin.to_string())
+                .or_default()
+                .push((target, health));
+        }
     }
 
-    pub fn into_updates(self) -> impl Iterator<Item = StatusUpdate> {
+    /// One update per plugin. Its targets are the workloads where the plugin
+    /// did worst (all of them when it was healthy everywhere), so a failure
+    /// on one Deployment isn't reported on the others.
+    pub fn into_updates(mut self) -> impl Iterator<Item = StatusUpdate> {
+        for (plugin, update) in self.by_plugin.iter_mut() {
+            update.targets = self
+                .healths
+                .remove(plugin)
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|(_, h)| update.health == Health::Healthy || *h == update.health)
+                .map(|(t, _)| t)
+                .collect();
+        }
         self.by_plugin.into_values()
     }
 }
@@ -441,6 +491,7 @@ pub fn failures_by_plugin(
             trace_id: events.first().and_then(|e| e.trace_id.clone()),
             events,
             merge: true,
+            ..Default::default()
         })
         .collect()
 }

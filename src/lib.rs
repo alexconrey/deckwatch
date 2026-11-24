@@ -30,6 +30,7 @@ pub mod outbound;
 mod plugin_events;
 #[cfg(test)]
 mod plugin_fixture;
+mod plugin_k8s_events;
 mod plugin_status;
 mod plugins;
 mod rate_limit;
@@ -465,3 +466,5 @@ pub mod testing {
 
 #[cfg(test)]
 mod integration_tests;
+#[cfg(test)]
+mod live_plugin_events_tests;

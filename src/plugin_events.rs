@@ -114,10 +114,13 @@ pub mod codes {
 // ── Health ───────────────────────────────────────────────────────────────────
 
 /// The state one call (or a set of calls) leaves a plugin in.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum Health {
     /// No warnings or errors.
+    #[default]
     Healthy,
     /// The call worked but reported warnings.
     Degraded,
@@ -765,6 +768,12 @@ impl PluginTelemetry {
         if !self.send(crate::plugin_status::SinkMsg::Status(update)) {
             crate::metrics::record_plugin_events_dropped(&plugin, "queue_full", 1);
         }
+    }
+
+    /// Publish a Kubernetes Event that isn't tied to a status change
+    /// (a deprovision, released fields). Never waits.
+    pub fn kube_event(&self, request: crate::plugin_k8s_events::KubeEventRequest) {
+        self.send(crate::plugin_status::SinkMsg::KubeEvent(request));
     }
 
     /// Remove a target's status (its resource was deprovisioned).

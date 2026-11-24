@@ -1985,6 +1985,24 @@ fn report_fields_released(
             .plugin_telemetry
             .log_events(plugin, "provision", std::slice::from_ref(&event));
     }
+    state
+        .plugin_telemetry
+        .kube_event(crate::plugin_k8s_events::KubeEventRequest {
+            application_id: app.unwrap_or_default(),
+            targets: vec![crate::plugin_k8s_events::WorkloadRef {
+                api_version: api_version.to_string(),
+                kind: kind.to_string(),
+                namespace: ns.to_string(),
+                name: name.to_string(),
+                uid: meta.uid.clone(),
+            }],
+            event: crate::plugin_k8s_events::KubeEvent {
+                warning: false,
+                reason: crate::plugin_k8s_events::reasons::FIELDS_RELEASED,
+                action: "ReleaseFields".to_string(),
+                note: crate::plugin_k8s_events::note(&event.message),
+            },
+        });
 }
 
 async fn reconcile_application_plugins(state: &AppState, sweep: &mut PluginFieldSweep) {
@@ -2203,6 +2221,7 @@ async fn reconcile_application_plugins(state: &AppState, sweep: &mut PluginField
                             apply_status.add(
                                 app_id,
                                 &outcome.plugin,
+                                crate::plugin_k8s_events::WorkloadRef::of_deployment(&dep),
                                 outcome.health(),
                                 outcome.reports(),
                                 outcome.trace_id.clone(),
@@ -2648,10 +2667,12 @@ async fn reconcile_pending_resources(state: &AppState) {
                     .report(crate::plugin_status::StatusUpdate {
                         key: status_key,
                         export: "provision".to_string(),
+                        trigger: "status_poll".to_string(),
                         health: crate::plugin_events::Health::Failing,
                         trace_id: outcome.trace_id.clone(),
                         events: failures,
                         merge: true,
+                        ..Default::default()
                     });
             }
         }

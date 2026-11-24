@@ -424,7 +424,7 @@ pub mod fake_kube {
         pub body: Value,
     }
 
-    type Handler = dyn Fn(&str, &str, &Value) -> Option<(u16, Value)> + Send + Sync;
+    type Handler = dyn Fn(&str, &str, &str, &Value) -> Option<(u16, Value)> + Send + Sync;
 
     #[derive(Clone)]
     pub struct FakeKube {
@@ -447,6 +447,14 @@ pub mod fake_kube {
         pub fn new(
             handler: impl Fn(&str, &str, &Value) -> Option<(u16, Value)> + Send + Sync + 'static,
         ) -> Self {
+            Self::with_query(move |method, path, _query, body| handler(method, path, body))
+        }
+
+        /// Like [`Self::new`], with the decoded query string:
+        /// `handler(method, path, query, body)`.
+        pub fn with_query(
+            handler: impl Fn(&str, &str, &str, &Value) -> Option<(u16, Value)> + Send + Sync + 'static,
+        ) -> Self {
             Self {
                 requests: Arc::default(),
                 handler: Arc::new(handler),
@@ -463,13 +471,18 @@ pub mod fake_kube {
                     let body: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
                     let method = parts.method.to_string();
                     let path = parts.uri.path().to_string();
+                    let query = parts.uri.query().unwrap_or_default().to_string();
                     fake.requests.lock().unwrap().push(Recorded {
                         method: method.clone(),
                         path: path.clone(),
-                        query: parts.uri.query().unwrap_or_default().to_string(),
+                        query: query.clone(),
                         body: body.clone(),
                     });
-                    let (code, json) = (fake.handler)(&method, &path, &body)
+                    let query = query
+                        .replace("%3D", "=")
+                        .replace("%2F", "/")
+                        .replace('+', " ");
+                    let (code, json) = (fake.handler)(&method, &path, &query, &body)
                         .unwrap_or_else(|| status(404, "NotFound"));
                     let response = axum::http::Response::builder()
                         .status(code)
@@ -536,4 +549,184 @@ pub async fn serve_bytes(bytes: Vec<u8>) -> String {
         let _ = axum::serve(listener, app).await;
     });
     format!("http://{addr}/plugin.wasm")
+}
+
+/// Just enough of the Kubernetes API for plugin Events: Deployments to
+/// attach them to (typed and metadata reads), events.k8s.io/v1 writes (the
+/// Recorder's POST and series PATCH), and core/v1 Event LISTs that serve the
+/// stored Events back the way the API server converts them, for `get_events`
+/// and deckwatch's event views.
+pub mod fake_events {
+    use std::sync::{Arc, Mutex};
+
+    use serde_json::{json, Value};
+
+    use super::fake_kube::{status, FakeKube};
+
+    #[derive(Default)]
+    struct State {
+        deployments: Vec<Value>,
+        events: Vec<Value>,
+    }
+
+    #[derive(Clone, Default)]
+    pub struct FakeEventsApi {
+        state: Arc<Mutex<State>>,
+    }
+
+    impl FakeEventsApi {
+        /// `deployments` are `(namespace, name, application label)`; each gets
+        /// UID `uid-{name}`.
+        pub fn with_deployments(deployments: &[(&str, &str, &str)]) -> Self {
+            let api = Self::default();
+            api.state.lock().unwrap().deployments = deployments
+                .iter()
+                .map(|(ns, name, app)| {
+                    json!({
+                        "apiVersion": "apps/v1",
+                        "kind": "Deployment",
+                        "metadata": {
+                            "name": name, "namespace": ns, "uid": format!("uid-{name}"),
+                            "labels": { "deckwatch.io/application": app },
+                        },
+                        "spec": {
+                            "selector": { "matchLabels": { "app": name } },
+                            "template": { "spec": { "containers": [{ "name": "app", "image": "app:1" }] } },
+                        },
+                    })
+                })
+                .collect();
+            api
+        }
+
+        /// The events.k8s.io/v1 Events written so far.
+        pub fn events(&self) -> Vec<Value> {
+            self.state.lock().unwrap().events.clone()
+        }
+
+        pub fn kube(&self) -> FakeKube {
+            let api = self.clone();
+            FakeKube::with_query(move |method, path, query, body| {
+                api.handle(method, path, query, body)
+            })
+        }
+
+        fn handle(
+            &self,
+            method: &str,
+            path: &str,
+            query: &str,
+            body: &Value,
+        ) -> Option<(u16, Value)> {
+            let mut st = self.state.lock().unwrap();
+            let segments: Vec<&str> = path.trim_matches('/').split('/').collect();
+            // Only `deckwatch.io/application=<app>` selectors are needed.
+            let app_selector = query
+                .split('&')
+                .find_map(|kv| kv.strip_prefix("labelSelector="))
+                .and_then(|sel| sel.strip_prefix("deckwatch.io/application="))
+                .map(str::to_string);
+            match (method, segments.as_slice()) {
+                ("GET", ["apis", "apps", "v1", "namespaces", ns, "deployments"]) => {
+                    let items: Vec<Value> = st
+                        .deployments
+                        .iter()
+                        .filter(|d| d["metadata"]["namespace"] == *ns)
+                        .filter(|d| {
+                            app_selector.as_deref().is_none_or(|app| {
+                                d["metadata"]["labels"]["deckwatch.io/application"] == app
+                            })
+                        })
+                        .map(|d| {
+                            json!({
+                                "apiVersion": "meta.k8s.io/v1",
+                                "kind": "PartialObjectMetadata",
+                                "metadata": d["metadata"],
+                            })
+                        })
+                        .collect();
+                    Some((
+                        200,
+                        json!({
+                            "apiVersion": "meta.k8s.io/v1",
+                            "kind": "PartialObjectMetadataList",
+                            "metadata": { "resourceVersion": "1" },
+                            "items": items,
+                        }),
+                    ))
+                }
+                ("GET", ["apis", "apps", "v1", "namespaces", ns, "deployments", name]) => st
+                    .deployments
+                    .iter()
+                    .find(|d| d["metadata"]["namespace"] == *ns && d["metadata"]["name"] == *name)
+                    .map(|d| {
+                        (
+                            200,
+                            json!({
+                                "apiVersion": "meta.k8s.io/v1",
+                                "kind": "PartialObjectMetadata",
+                                "metadata": d["metadata"],
+                            }),
+                        )
+                    }),
+                ("POST", ["apis", "events.k8s.io", "v1", "namespaces", _ns, "events"]) => {
+                    let mut event = body.clone();
+                    event["metadata"]["resourceVersion"] = json!("1");
+                    st.events.push(event.clone());
+                    Some((201, event))
+                }
+                ("PATCH", ["apis", "events.k8s.io", "v1", "namespaces", _ns, "events", name]) => {
+                    let stored = st
+                        .events
+                        .iter_mut()
+                        .find(|e| e["metadata"]["name"] == *name)?;
+                    if let Some(series) = body.get("series") {
+                        stored["series"] = series.clone();
+                    }
+                    Some((200, stored.clone()))
+                }
+                ("GET", ["api", "v1", "namespaces", ns, "events"]) => {
+                    let items: Vec<Value> = st
+                        .events
+                        .iter()
+                        .filter(|e| e["metadata"]["namespace"] == *ns)
+                        .map(core_event)
+                        .collect();
+                    Some((
+                        200,
+                        json!({
+                            "apiVersion": "v1", "kind": "EventList",
+                            "metadata": { "resourceVersion": "1" }, "items": items,
+                        }),
+                    ))
+                }
+                ("GET", _) => Some(status(404, "NotFound")),
+                _ => None,
+            }
+        }
+    }
+
+    /// An events.k8s.io/v1 Event as core/v1 serves it.
+    fn core_event(e: &Value) -> Value {
+        let mut core = json!({
+            "apiVersion": "v1",
+            "kind": "Event",
+            "metadata": e["metadata"],
+            "involvedObject": e["regarding"],
+            "reason": e["reason"],
+            "message": e["note"],
+            "type": e["type"],
+            "action": e["action"],
+            "eventTime": e["eventTime"],
+            "reportingComponent": e["reportingController"],
+            "reportingInstance": e["reportingInstance"],
+        });
+        if let Some(series) = e.get("series").filter(|s| !s.is_null()) {
+            core["series"] = json!({
+                "count": series["count"],
+                "lastObservedTime": series["lastObservedTime"],
+            });
+        }
+        core
+    }
 }

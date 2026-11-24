@@ -1431,7 +1431,13 @@ async fn reconcile_records_the_plugin_apply_status_of_the_application() {
 
     let cluster = FakeCluster::with_objects(vec![shop_deployment(deckwatch_update_entry())]);
     let state = reconcile_test_state(&cluster).await;
-    crate::plugin_status::spawn_worker(&state);
+    // The fake cluster serves workloads only; Events go to a stub.
+    let events =
+        crate::plugin_fixture::fake_kube::FakeKube::new(|_, _, body| Some((201, body.clone())));
+    crate::plugin_status::spawn_worker_with(
+        &state,
+        crate::plugin_k8s_events::KubeEventSink::new(events.client()),
+    );
     *state.plugins.write().await = vec![FixturePlugin::new()
         .export("apply", Behavior::Trap)
         .loaded("vault")];
@@ -1469,6 +1475,16 @@ async fn reconcile_records_the_plugin_apply_status_of_the_application() {
     assert_eq!(row.health, "healthy");
     assert_eq!(row.consecutive_failures, 0);
     assert!(row.first_failure_at.is_none());
+
+    // The failure and the recovery each became an Event on the Deployment
+    // (the second failing cycle was folded).
+    let reasons: Vec<String> = events
+        .requests()
+        .iter()
+        .filter(|r| r.method == "POST")
+        .map(|r| r.body["reason"].as_str().unwrap_or_default().to_string())
+        .collect();
+    assert_eq!(reasons, vec!["PluginApplyFailed", "PluginRecovered"]);
 }
 
 /// The release is reported as an `info` plugin event against the plugin
