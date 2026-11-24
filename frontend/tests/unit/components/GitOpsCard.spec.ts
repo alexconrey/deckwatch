@@ -27,6 +27,13 @@ vi.mock("@/api/diagnostics", () => ({
   },
 }));
 
+// useAiSettings, imported via AiFixButton and LogViewer's DiagnoseButton,
+// fetches /api/settings as soon as it is imported. Stubbing the components
+// doesn't stop the import, so mock the API it calls.
+vi.mock("@/api/settings", () => ({
+  settingsApi: { get: vi.fn().mockResolvedValue({}) },
+}));
+
 import { gitopsApi } from "@/api/gitops";
 
 const vuetify = createVuetify({ components, directives });
