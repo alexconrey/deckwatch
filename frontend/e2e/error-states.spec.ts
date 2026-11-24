@@ -22,7 +22,7 @@ test.describe("Error states", () => {
     await expect(page).toHaveURL(/\/deployments$/);
   });
 
-  test("a forbidden namespace surfaces the 403 message", async ({ page, mockApi }) => {
+  test("a forbidden namespace surfaces the 403 message", async ({ app, page, mockApi }) => {
     mockApi.on(
       "GET",
       "/namespaces/team-a/deployments",
@@ -32,7 +32,7 @@ test.describe("Error states", () => {
     await page.goto("/deployments");
     await expect(page.getByRole("cell", { name: "web", exact: true })).toBeVisible();
 
-    await page.getByTestId("namespace-switcher").locator("input").click();
+    await app.namespaceSwitcher().click();
     await page.getByRole("option", { name: "team-a" }).click();
 
     await expect(
