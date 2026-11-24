@@ -52,6 +52,12 @@ rules:
   - apiGroups: ["", "events.k8s.io"]
     resources: ["events"]
     verbs: ["get", "list", "watch"]
+  # Plugin failures and notices are published as Kubernetes Events on the
+  # affected Deployments (kube-rs Recorder, events.k8s.io/v1). Repeats are
+  # folded into a series with a PATCH.
+  - apiGroups: ["events.k8s.io"]
+    resources: ["events"]
+    verbs: ["create", "patch"]
   - apiGroups: ["autoscaling"]
     resources: ["horizontalpodautoscalers"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]

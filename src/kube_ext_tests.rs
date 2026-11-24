@@ -1218,3 +1218,41 @@ fn pod_summary_spec_containers_without_runtime_status() {
 // Silence unused warning if Condition import isn't strictly needed.
 #[allow(dead_code)]
 fn _condition_used(_: Condition) {}
+
+/// Events written through events.k8s.io/v1 (the Recorder deckwatch uses for
+/// plugin Events) have no count, first/lastTimestamp or source; the summary
+/// falls back to series, eventTime and reportingComponent.
+#[test]
+fn event_summary_reads_events_written_through_events_k8s_io() {
+    let event: k8s_openapi::api::core::v1::Event = serde_json::from_value(serde_json::json!({
+        "metadata": { "name": "web.1", "namespace": "shop" },
+        "involvedObject": { "kind": "Deployment", "name": "web", "namespace": "shop" },
+        "reason": "PluginApplyFailed",
+        "message": "plugin aws: plugin.trap: trapped",
+        "type": "Warning",
+        "eventTime": "2026-11-24T12:00:00.000000Z",
+        "series": { "count": 4, "lastObservedTime": "2026-11-24T12:15:00.000000Z" },
+        "reportingComponent": "deckwatch",
+    }))
+    .unwrap();
+    let s = event_summary(&event);
+    assert_eq!(s.count, Some(4));
+    assert!(s
+        .first_timestamp
+        .as_deref()
+        .unwrap()
+        .starts_with("2026-11-24T12:00:00"));
+    assert!(s
+        .last_timestamp
+        .as_deref()
+        .unwrap()
+        .starts_with("2026-11-24T12:15:00"));
+    assert_eq!(s.source_component.as_deref(), Some("deckwatch"));
+
+    // Without a series it's one occurrence, at eventTime.
+    let mut single = event.clone();
+    single.series = None;
+    let s = event_summary(&single);
+    assert_eq!(s.count, Some(1));
+    assert_eq!(s.first_timestamp, s.last_timestamp);
+}

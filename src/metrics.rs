@@ -381,6 +381,13 @@ pub fn record_plugin_event(plugin: &str, severity: &'static str, source: &'stati
     .increment(1);
 }
 
+/// Count Kubernetes Events about plugins.
+/// - `result`: `published`, `folded` (a repeat within the republish
+///   interval), `dropped` (too many in flight) or `error`
+pub fn record_plugin_k8s_event(result: &'static str) {
+    counter!("deckwatch_plugin_k8s_events_total", "result" => result).increment(1);
+}
+
 /// Count plugin events that were dropped instead of being logged or
 /// exported.
 /// - `reason`: `rate_limited` (per-plugin rate limit), `over_cap` (more than

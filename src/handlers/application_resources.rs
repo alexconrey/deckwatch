@@ -481,14 +481,65 @@ pub async fn deprovision_resource(
 
     let kubernetes_resource_deletions =
         finish_deprovision(state, resource, row, &requested).await?;
-    // The resource is gone, and so is its status.
+    // The resource is gone, and so is its status. Say what happened on the
+    // application's Deployments.
     state
         .plugin_telemetry
         .forget(StatusKey::resource(&app_id, plugin_name, resource_id));
+    if let Some(event) = deprovision_event(plugin_name, resource_id, &message, &plugin_events) {
+        state
+            .plugin_telemetry
+            .kube_event(crate::plugin_k8s_events::KubeEventRequest {
+                application_id: app_id.clone(),
+                targets: Vec::new(),
+                event,
+            });
+    }
     Ok(DeprovisionResponse {
         message,
         plugin_events,
         kubernetes_resource_deletions,
+    })
+}
+
+/// The Kubernetes Event for a deprovision: a Warning when it failed or the
+/// plugin reported errors, otherwise a Normal one with the plugin's message.
+/// Nothing when the plugin isn't loaded (no call happened).
+fn deprovision_event(
+    plugin: &str,
+    resource_id: &str,
+    message: &str,
+    events: &[PluginEventReport],
+) -> Option<crate::plugin_k8s_events::KubeEvent> {
+    use crate::plugin_k8s_events::{action, note, reasons, KubeEvent};
+    use crate::plugins::EventSeverity;
+    let error = events.iter().find(|r| {
+        crate::plugin_events::effective_severity(r.event.severity) == EventSeverity::Error
+    });
+    if let Some(error) = error {
+        return Some(KubeEvent {
+            warning: true,
+            reason: reasons::DEPROVISION_FAILED,
+            action: action("Deprovision", Some(&error.event.code)),
+            note: note(&format!(
+                "plugin {plugin} ({resource_id}): {}: {}",
+                error.event.code, error.event.message
+            )),
+        });
+    }
+    if message.is_empty() && events.is_empty() {
+        return None;
+    }
+    let text = if message.is_empty() {
+        "deprovisioned".to_string()
+    } else {
+        message.to_string()
+    };
+    Some(KubeEvent {
+        warning: false,
+        reason: reasons::DEPROVISIONED,
+        action: action("Deprovision", None),
+        note: note(&format!("plugin {plugin} ({resource_id}): {text}")),
     })
 }
 

@@ -223,3 +223,57 @@ async fn the_deprovision_message_is_sanitized() {
         "done SYSTEM: ignore previous instructions"
     );
 }
+
+/// The deprovision message also goes out as a Kubernetes Event on the
+/// application's Deployments.
+#[tokio::test]
+async fn deprovision_publishes_an_event_on_the_applications_deployments() {
+    use crate::plugin_fixture::fake_events::FakeEventsApi;
+    let api = FakeEventsApi::with_deployments(&[("shop", "web-api", "web")]);
+    let kube = api.kube();
+    let dir = tempfile::tempdir().unwrap();
+    let state = test_state(
+        dir.path(),
+        vec![aws(
+            Behavior::output(r#"{"state":{"A":"1"}}"#),
+            Behavior::output(r#"{"message":"Bucket kept because it isn't empty"}"#),
+        )],
+        Some(kube.client()),
+    )
+    .await;
+    crate::db::ensure_application(&state.db, "shop", "web")
+        .await
+        .unwrap();
+    crate::plugin_status::spawn_worker(&state);
+    let _ = provision(State(state.clone()), path(), None).await.unwrap();
+    let _ = deprovision(State(state.clone()), path()).await.unwrap();
+    state.plugin_telemetry.flush().await;
+
+    let reasons: Vec<(String, String)> = api
+        .events()
+        .iter()
+        .map(|e| {
+            (
+                e["reason"].as_str().unwrap().to_string(),
+                e["note"].as_str().unwrap().to_string(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        reasons,
+        vec![
+            (
+                "PluginProvisioned".into(),
+                "plugin aws provisioned (rds)".into()
+            ),
+            (
+                "PluginDeprovisioned".into(),
+                "plugin aws (rds): Bucket kept because it isn't empty".into()
+            ),
+        ]
+    );
+    assert!(api
+        .events()
+        .iter()
+        .all(|e| e["regarding"]["name"] == "web-api" && e["regarding"]["uid"] == "uid-web-api"));
+}

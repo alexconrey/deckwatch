@@ -22,6 +22,7 @@ fn status(key: StatusKey, health: Health, message: &str) -> StatusUpdate {
         }],
         trace_id: None,
         merge: false,
+        ..Default::default()
     }
 }
 

@@ -1032,6 +1032,10 @@ async fn handle_tool_call(state: &AppState, request: &JsonRpcRequest) -> JsonRpc
     // print adversarial text into it. See src/log_sanitize.rs for details.
     let result = if tool_name == "get_pod_logs" {
         result.map(|text| crate::log_sanitize::sanitize_logs(&text))
+    } else if tool_name == "get_events" {
+        // Event messages are untrusted too: deckwatch publishes plugin text
+        // as Events, and any controller or workload with RBAC can write one.
+        result.map(|text| fence_events(&text))
     } else {
         result
     };
@@ -1043,6 +1047,16 @@ async fn handle_tool_call(state: &AppState, request: &JsonRpcRequest) -> JsonRpc
         ),
         Err(e) => error_response(request, -32000, &e),
     }
+}
+
+/// `get_events` output inside the untrusted-content fence, one line per
+/// event as mcp-k8s formats it.
+fn fence_events(text: &str) -> String {
+    crate::log_sanitize::fence_untrusted(
+        "KUBERNETES EVENTS",
+        "the Kubernetes API (event messages can come from plugins, controllers and workloads)",
+        &crate::log_sanitize::sanitize_logs(text),
+    )
 }
 
 /// The tool name as logged. The client chooses it, so an unknown name is cut

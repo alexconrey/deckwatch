@@ -388,6 +388,30 @@ Where they show up:
   when the plugin is disabled or removed. The reconcile loop records one
   `apply()` outcome per plugin and application per cycle, the worst across
   the application's Deployments.
+- **Kubernetes Events** on the affected Deployments, from reporting
+  controller `deckwatch` (events.k8s.io/v1, through kube-rs `Recorder`).
+  They show up in `kubectl describe deployment`, deckwatch's event views and
+  MCP `get_events` (fenced as untrusted text there). Reasons:
+
+  | Reason | Type | When |
+  |---|---|---|
+  | `PluginApplyFailed` | Warning | `apply()` failed or reported an error (deployment create/update, reconcile) |
+  | `PluginApplyWarning` | Warning | `apply()` reported a warning |
+  | `PluginProvisionFailed` | Warning | `provision()` failed or reported an error (provision, refresh, status polling) |
+  | `PluginProvisionWarning` | Warning | `provision()` reported a warning |
+  | `PluginProvisioned` | Normal | an operator's provision or refresh worked |
+  | `PluginDeprovisionFailed` | Warning | `deprovision()` failed or reported an error |
+  | `PluginDeprovisioned` | Normal | `deprovision()` worked; the note is its message |
+  | `PluginRecovered` | Normal | a failing target works again |
+  | `PluginFieldsReleased` | Normal | the reconciler removed what provisioned resources had added to a workload |
+
+  The action carries the event code (e.g. `Apply plugin.trap`). The same
+  Event on the same workload is published at most every 5 minutes, and the
+  Recorder folds repeats into a series, so a persistent failure is one Event
+  whose count goes up (`kubectl describe` shows `(x12 over 1h)`). Provision
+  and deprovision Events go on every Deployment of the application. The
+  chart's ClusterRole grants `create` and `patch` on `events.k8s.io` events;
+  set `POD_NAME` (the chart does) to fill `reportingInstance`.
 - **The logs**, as `plugin event:` lines inside the call's `plugin {export}`
   span, next to the plugin's own `log_*` output (target `extism::pdk`).
 

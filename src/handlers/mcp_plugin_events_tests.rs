@@ -283,3 +283,45 @@ async fn enable_plugin_reports_a_fetch_failure() {
     assert_fenced(&events, codes::FETCH_FAILED);
     assert!(events.contains("[error] demo (fetch)"), "{events}");
 }
+
+/// Plugin Events published through the Recorder reach agents through MCP
+/// `get_events`, inside the untrusted-content fence.
+#[tokio::test]
+async fn get_events_shows_plugin_events_fenced() {
+    use crate::plugin_fixture::fake_events::FakeEventsApi;
+    use crate::plugin_k8s_events::{KubeEvent, KubeEventRequest, KubeEventSink, WorkloadRef};
+
+    let api = FakeEventsApi::with_deployments(&[("shop", "web", "web")]);
+    let kube = api.kube();
+    let dir = tempfile::tempdir().unwrap();
+    let state = test_state(dir.path(), vec![], Some(kube.client())).await;
+    KubeEventSink::new(kube.client())
+        .publish(KubeEventRequest {
+            application_id: "shop/web".into(),
+            targets: vec![WorkloadRef::deployment("shop", "web", None)],
+            event: KubeEvent {
+                warning: true,
+                reason: crate::plugin_k8s_events::reasons::APPLY_FAILED,
+                action: "Apply plugin.trap".into(),
+                note: format!("plugin aws: plugin.trap: {INJECTION}"),
+            },
+        })
+        .await;
+
+    let text = call(&state, "get_events", json!({ "namespace": "shop" }))
+        .await
+        .unwrap();
+    assert!(
+        text.starts_with(
+            "The section between the BEGIN and END UNTRUSTED KUBERNETES EVENTS markers"
+        ),
+        "{text}"
+    );
+    assert!(text.contains("Warning Deployment web"), "{text}");
+    let begin = text
+        .find("----- BEGIN UNTRUSTED KUBERNETES EVENTS ")
+        .unwrap();
+    let end = text.find("----- END UNTRUSTED KUBERNETES EVENTS ").unwrap();
+    let at = text.find(INJECTION).unwrap();
+    assert!(begin < at && at < end, "{text}");
+}

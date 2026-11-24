@@ -843,10 +843,11 @@ impl PluginLoad {
         crate::plugin_status::StatusUpdate {
             key: crate::plugin_status::StatusKey::plugin_wide(&self.name),
             export: export.as_str().to_string(),
+            trigger: Trigger::Load.as_str().to_string(),
             health: self.health(),
             events: reports,
             trace_id: self.trace_id.clone(),
-            merge: false,
+            ..Default::default()
         }
     }
 
@@ -1735,6 +1736,8 @@ pub struct CallOutcome<T> {
     /// Masks this call's secret config values in events added later, such as
     /// a failure to apply a Kubernetes object the plugin returned.
     pub scrubber: Arc<SecretScrubber>,
+    /// What triggered the call.
+    pub trigger: Trigger,
 }
 
 impl<T> CallOutcome<T> {
@@ -1767,10 +1770,11 @@ impl<T> CallOutcome<T> {
         crate::plugin_status::StatusUpdate {
             key,
             export: self.export.as_str().to_string(),
+            trigger: self.trigger.as_str().to_string(),
             health: self.health(),
             events: self.reports(),
             trace_id: self.trace_id.clone(),
-            merge: false,
+            ..Default::default()
         }
     }
 
@@ -1789,6 +1793,7 @@ impl<T> CallOutcome<T> {
             events,
             trace_id,
             scrubber,
+            trigger,
         } = self;
         let failed = result.is_none();
         let rest = CallOutcome {
@@ -1798,6 +1803,7 @@ impl<T> CallOutcome<T> {
             events,
             trace_id,
             scrubber,
+            trigger,
         };
         (result, rest)
     }
@@ -2309,6 +2315,7 @@ fn call_export<T: PluginOutput>(
             events,
             trace_id,
             scrubber: Arc::new(scrubber),
+            trigger: call.trigger,
         }
     })
 }

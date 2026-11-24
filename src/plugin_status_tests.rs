@@ -28,6 +28,7 @@ fn update(health: Health, events: Vec<PluginEventReport>) -> StatusUpdate {
         events,
         trace_id: None,
         merge: false,
+        ..Default::default()
     }
 }
 
@@ -194,12 +195,15 @@ fn unchanged_healthy_rows_are_rewritten_only_every_few_minutes() {
 
 #[test]
 fn reconcile_outcomes_are_combined_per_plugin_with_the_worst_health() {
+    use crate::plugin_k8s_events::WorkloadRef;
+    let dep = |name: &str| Some(WorkloadRef::deployment("shop", name, None));
     let mut agg = ApplyAggregate::default();
     let warn = report("slow", EventSeverity::Warning);
-    agg.add("shop/web", "aws", Health::Healthy, vec![], None);
+    agg.add("shop/web", "aws", dep("a"), Health::Healthy, vec![], None);
     agg.add(
         "shop/web",
         "aws",
+        dep("b"),
         Health::Failing,
         vec![warn.clone()],
         Some("t1".into()),
@@ -207,11 +211,13 @@ fn reconcile_outcomes_are_combined_per_plugin_with_the_worst_health() {
     agg.add(
         "shop/web",
         "aws",
+        dep("c"),
         Health::Degraded,
         vec![warn.clone()],
         Some("t2".into()),
     );
-    agg.add("shop/web", "vault", Health::Healthy, vec![], None);
+    agg.add("shop/web", "vault", dep("a"), Health::Healthy, vec![], None);
+    agg.add("shop/web", "vault", dep("b"), Health::Healthy, vec![], None);
     let updates: Vec<_> = agg.into_updates().collect();
     assert_eq!(updates.len(), 2);
     let aws = &updates[0];
@@ -219,7 +225,11 @@ fn reconcile_outcomes_are_combined_per_plugin_with_the_worst_health() {
     assert_eq!(aws.health, Health::Failing);
     assert_eq!(aws.events, vec![warn], "each event once");
     assert_eq!(aws.trace_id.as_deref(), Some("t1"));
+    assert_eq!(aws.trigger, "reconcile");
+    let names = |u: &StatusUpdate| u.targets.iter().map(|t| t.name.clone()).collect::<Vec<_>>();
+    assert_eq!(names(aws), vec!["b"], "only where it failed");
     assert_eq!(updates[1].health, Health::Healthy);
+    assert_eq!(names(&updates[1]), vec!["a", "b"], "healthy everywhere");
 }
 
 #[test]

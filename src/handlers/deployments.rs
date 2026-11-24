@@ -470,12 +470,12 @@ pub async fn create(
         }
     };
     let plugin_events = plugin_report.reports();
-    report_apply_status(&state, &ns, &application, &plugin_report);
 
     let t = K8sTimer::new("deployments", "create");
     let created = api.create(&PostParams::default(), &deployment).await;
     t.finish(created.is_ok());
     let created = created?;
+    report_apply_status(&state, &ns, &application, &created, &plugin_report);
 
     // Apply plugin-declared kubernetes resources (CRDs, ExternalSecrets, etc.)
     // and wanted service accounts after the deployment is committed.
@@ -512,22 +512,28 @@ pub async fn create(
 }
 
 /// Record each plugin's `apply()` outcome as the status of its `apply` row
-/// for the Deployment's application. A Deployment outside any application
+/// for the Deployment's application, once the Deployment exists (its
+/// Kubernetes Events need its UID). A Deployment outside any application
 /// has no status row (its events still reach the response and the logs).
 fn report_apply_status(
     state: &AppState,
     ns: &str,
     application: &str,
+    deployment: &Deployment,
     report: &crate::plugins::PluginApplyReport,
 ) {
     if application.is_empty() {
         return;
     }
     let application_id = format!("{ns}/{application}");
+    let target = crate::plugin_k8s_events::WorkloadRef::of_deployment(deployment);
     for outcome in &report.outcomes {
-        state.plugin_telemetry.report(outcome.status_update(
-            crate::plugin_status::StatusKey::apply(&application_id, &outcome.plugin),
+        let mut update = outcome.status_update(crate::plugin_status::StatusKey::apply(
+            &application_id,
+            &outcome.plugin,
         ));
+        update.targets = target.iter().cloned().collect();
+        state.plugin_telemetry.report(update);
     }
 }
 
@@ -745,12 +751,12 @@ pub async fn update(
         }
     };
     let plugin_events = plugin_report.reports();
-    report_apply_status(&state, &ns, &application, &plugin_report);
 
     let t = K8sTimer::new("deployments", "replace");
     let updated = api.replace(&name, &PostParams::default(), &dep).await;
     t.finish(updated.is_ok());
     let updated = updated?;
+    report_apply_status(&state, &ns, &application, &updated, &plugin_report);
 
     spawn_plugin_followups(&state, &ns, &application, plugin_report);
 
