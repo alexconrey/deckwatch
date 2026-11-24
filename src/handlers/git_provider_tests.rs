@@ -618,3 +618,21 @@ fn provider_names_are_distinct() {
     sorted.dedup();
     assert_eq!(names.len(), sorted.len());
 }
+
+/// Known-answer test (RFC 4231 test case 2) so a crypto crate upgrade can't
+/// silently change what a valid webhook signature looks like. The other tests
+/// compute the expected MAC with the same `hmac` crate, which would not catch it.
+#[test]
+fn verify_hmac_sha256_matches_rfc4231_vector() {
+    let mac = "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843";
+    assert!(verify_hmac_sha256("Jefe", b"what do ya want for nothing?", mac).is_ok());
+    // Uppercase hex is accepted too (GitHub sends lowercase, but be lenient).
+    assert!(
+        verify_hmac_sha256("Jefe", b"what do ya want for nothing?", &mac.to_uppercase()).is_ok()
+    );
+    // One flipped nibble, wrong key, or wrong body must fail.
+    let bad = format!("{}4", &mac[..63]);
+    assert!(verify_hmac_sha256("Jefe", b"what do ya want for nothing?", &bad).is_err());
+    assert!(verify_hmac_sha256("jefe", b"what do ya want for nothing?", mac).is_err());
+    assert!(verify_hmac_sha256("Jefe", b"what do ya want for nothing!", mac).is_err());
+}

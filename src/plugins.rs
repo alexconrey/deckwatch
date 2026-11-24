@@ -472,7 +472,7 @@ pub struct LoadedPlugin {
 
 /// Lowercase hex SHA-256 digest of `bytes` — same format as `shasum -a 256`.
 pub fn sha256_hex(bytes: &[u8]) -> String {
-    format!("{:x}", Sha256::digest(bytes))
+    crate::crypto::hex_lower(&Sha256::digest(bytes))
 }
 
 /// Swap in a freshly reloaded copy of one plugin, leaving every other loaded

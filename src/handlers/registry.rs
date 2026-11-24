@@ -275,7 +275,7 @@ fn repo_dir(root: &Path, name: &str) -> Option<PathBuf> {
 fn digest_bytes(bytes: &[u8]) -> String {
     let mut h = Sha256::new();
     h.update(bytes);
-    format!("sha256:{:x}", h.finalize())
+    format!("sha256:{}", crate::crypto::hex_lower(&h.finalize()))
 }
 
 // ------------------------------------------------------------------ errors
@@ -1420,6 +1420,19 @@ mod tests {
             assert!(!is_valid_reference(r), "{r:?} should be rejected");
         }
         assert!(!is_valid_reference(&"a".repeat(129)));
+    }
+
+    /// Known-answer test: OCI digests must stay `sha256:` + lowercase hex.
+    #[test]
+    fn digest_bytes_known_answer() {
+        assert_eq!(
+            digest_bytes(b"abc"),
+            "sha256:ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+        assert_eq!(
+            digest_bytes(b""),
+            "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
     }
 
     #[test]
