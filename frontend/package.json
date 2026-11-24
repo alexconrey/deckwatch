@@ -21,7 +21,7 @@
     "vue-chartjs": "^5.3.7",
     "vue-router": "^4.6.5",
     "vuetify": "^3.13.8",
-    "web-vitals": "^4.2.4"
+    "web-vitals": "^6.2.3"
   },
   "devDependencies": {
     "@pinia/testing": "^0.1.7",
