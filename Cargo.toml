@@ -44,7 +44,7 @@ async-trait = "0.1"
 # Cloud-agnostic object storage trait — S3 backend for the embedded OCI
 # registry. See docs/S3_REGISTRY.md for the rationale; the `aws` feature
 # pulls in the standard AWS credential chain (env, IMDS, IRSA).
-object_store = { version = "0.11", features = ["aws"] }
+object_store = { version = "0.14", features = ["aws"] }
 bytes = "1"
 ed25519-dalek = { version = "3", features = ["rand_core"] }
 rcgen = "0.13"
