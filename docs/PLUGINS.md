@@ -374,6 +374,20 @@ Where they show up:
   tools `provision_resource`, `refresh_resource`, `deprovision_resource`,
   `validate_plugin` and `enable_plugin` return them too, inside a fence that
   marks them as untrusted text.
+- **Plugin status**: the current state of every call target (a provisioned
+  resource, a plugin's `apply()` for an application, or the plugin's own
+  load): healthy, degraded or failing, the latest events, when the current
+  run of failures started, how many calls in a row failed, and the last
+  success. The application and plugin pages show it as badges, and
+  **Problems** in the top bar (shown while anything is failing or degraded)
+  lists every failing or degraded target. The API is `GET /api/plugin-status`
+  (filter with `health=failing,degraded`, `plugin`, `namespace`),
+  `GET /api/namespaces/{ns}/applications/{name}/plugin-status` and
+  `GET /api/plugins/{name}/status`. It holds current state only: a row is
+  replaced on every call, and removed with its resource, its application, or
+  when the plugin is disabled or removed. The reconcile loop records one
+  `apply()` outcome per plugin and application per cycle, the worst across
+  the application's Deployments.
 - **The logs**, as `plugin event:` lines inside the call's `plugin {export}`
   span, next to the plugin's own `log_*` output (target `extism::pdk`).
 

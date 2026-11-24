@@ -826,6 +826,75 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/DeprovisionResponse" }
 
+  # ----------------------------------------------------------- plugin status
+  /api/plugin-status:
+    get:
+      tags: [Plugins]
+      summary: Current state of every plugin call target
+      description: |
+        One row per target: a provisioned resource, a plugin's `apply()` for an
+        application (`resource_id` empty), or the plugin itself (`namespace`
+        and `application` empty; fetch and load). Current state only: the
+        latest events, not a history. Most severe first, then most recently
+        updated. Rows in namespaces outside the allowlist are omitted.
+      parameters:
+        - in: query
+          name: health
+          required: false
+          schema: { type: string }
+          description: Comma-separated healths to include, e.g. `failing,degraded`
+        - in: query
+          name: plugin
+          required: false
+          schema: { type: string }
+        - in: query
+          name: namespace
+          required: false
+          schema: { type: string }
+      responses:
+        "200":
+          description: Plugin status rows
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/PluginStatus" }
+
+  /api/namespaces/{ns}/applications/{name}/plugin-status:
+    parameters:
+      - $ref: "#/components/parameters/Namespace"
+      - $ref: "#/components/parameters/Name"
+    get:
+      tags: [Plugins]
+      summary: Plugin status rows for one application
+      responses:
+        "200":
+          description: Plugin status rows
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/PluginStatus" }
+
+  /api/plugins/{name}/status:
+    parameters:
+      - in: path
+        name: name
+        required: true
+        schema: { type: string }
+        description: Configured plugin name
+    get:
+      tags: [Plugins]
+      summary: Plugin status rows for one plugin, its load included
+      responses:
+        "200":
+          description: Plugin status rows
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/PluginStatus" }
+
   # -------------------------------------------------------------- plugins
   /api/plugins:
     get:
@@ -1222,6 +1291,27 @@ components:
               namespace: { type: string }
               outcome: { type: string, enum: [deleted, not_found, refused, failed] }
               reason: { type: string, description: Why it was refused or failed }
+
+    PluginStatus:
+      type: object
+      required: [namespace, application, plugin, resource_id, health, last_export, last_events, consecutive_failures, last_changed_at, updated_at]
+      properties:
+        namespace: { type: string, description: Empty for plugin-wide rows }
+        application: { type: string, description: Empty for plugin-wide rows }
+        plugin: { type: string }
+        resource_id: { type: string, description: The plugin resource id; empty for apply() and plugin-wide rows }
+        health: { type: string, enum: [healthy, degraded, failing] }
+        last_export: { type: string, description: The export of the last recorded call }
+        last_events:
+          type: array
+          description: The latest call's events (at most 10)
+          items: { $ref: "#/components/schemas/PluginEventReport" }
+        trace_id: { type: string }
+        first_failure_at: { type: string, format: date-time, nullable: true, description: When the current run of failures started }
+        consecutive_failures: { type: integer }
+        last_success_at: { type: string, format: date-time, nullable: true }
+        last_changed_at: { type: string, format: date-time, description: When the health last changed }
+        updated_at: { type: string, format: date-time }
 
     PluginFailedError:
       type: object
