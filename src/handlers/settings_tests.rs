@@ -158,7 +158,9 @@ fn test_build_settings_defaults_from_empty_json() {
     assert_eq!(settings.build_settings.platform_flag, "--custom-platform");
     assert!(settings.build_settings.cache_enabled);
     assert_eq!(settings.build_settings.snapshot_mode, "redo");
-    assert!(settings.build_settings.docker_media_types);
+    // crane dropped --docker-media-types, so the field is a no-op kept for
+    // backward compat and defaults to false.
+    assert!(!settings.build_settings.docker_media_types);
     assert_eq!(settings.build_settings.job_ttl_seconds, 3600);
     assert_eq!(settings.build_settings.kaniko_backoff_limit, 0);
     assert_eq!(settings.build_settings.crane_backoff_limit, 1);
@@ -205,7 +207,7 @@ fn test_build_settings_backwards_compat() {
         settings.build_settings.kaniko_image,
         "gcr.io/kaniko-project/executor:v1.24.0"
     );
-    assert!(settings.build_settings.docker_media_types);
+    assert!(!settings.build_settings.docker_media_types);
 }
 
 #[test]
