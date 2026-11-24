@@ -3,6 +3,7 @@ pub mod audit;
 mod auth;
 mod auto_rollback;
 mod config;
+mod cross_origin;
 mod crypto;
 mod db;
 mod entities;
