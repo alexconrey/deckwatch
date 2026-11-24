@@ -19,6 +19,12 @@ serviceAccount:
 # Empty string = all namespaces.
 namespaces: ""
 
+# Log filter, passed to deckwatch as RUST_LOG (tracing EnvFilter syntax, for
+# example "deckwatch=debug,tower_http=info"). Empty uses the built-in default,
+# "deckwatch=info,tower_http=info,mcp_k8s=info,extism::pdk=info": deckwatch,
+# HTTP responses, the embedded mcp-k8s library, and plugin log lines.
+logFilter: ""
+
 service:
   type: ClusterIP
   port: 80
