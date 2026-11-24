@@ -184,10 +184,15 @@ cd frontend && npx vitest run                 # Frontend (~70+ tests)
 
 CI runs on PRs to main via `.github/workflows/ci.yml`:
 - `cargo check --locked`
+- `cargo check --locked --all-targets` (tests must compile; they are not run in CI yet)
 - `cargo clippy -- -D warnings`
 - `cargo fmt --check`
 - Frontend: `pnpm install && vite build`
 - `helm lint`
+
+The Rust toolchain is pinned in `rust-toolchain.toml` and must match the
+`rust:<version>` image tag in the `Dockerfile` (CI fails if they differ), so
+bump both in the same PR.
 
 Publish workflow (`.github/workflows/publish.yml`) builds multi-arch image to
 GHCR on tag push.
