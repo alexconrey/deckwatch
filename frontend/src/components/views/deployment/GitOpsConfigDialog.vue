@@ -430,7 +430,7 @@ onMounted(() => {
           class="mb-1"
         >
           <template #item="{ props: itemProps, item }">
-            <v-list-item v-bind="itemProps" :title="item.raw.title" :subtitle="item.raw.subtitle" />
+            <v-list-item v-bind="itemProps" :title="item.title" :subtitle="item.subtitle" />
           </template>
         </v-select>
         <v-text-field
@@ -480,7 +480,7 @@ onMounted(() => {
               persistent-hint
             >
               <template #item="{ props: itemProps, item }">
-                <v-list-item v-bind="itemProps" :title="item.raw.title" :subtitle="item.raw.subtitle" />
+                <v-list-item v-bind="itemProps" :title="item.title" :subtitle="item.subtitle" />
               </template>
             </v-select>
           </v-col>
@@ -503,7 +503,7 @@ onMounted(() => {
           class="mb-1"
         >
           <template #item="{ props: itemProps, item }">
-            <v-list-item v-bind="itemProps" :title="item.raw.title" :subtitle="item.raw.subtitle" />
+            <v-list-item v-bind="itemProps" :title="item.title" :subtitle="item.subtitle" />
           </template>
         </v-select>
         <v-row v-if="useCustomRegistry" dense align="center" class="mb-2">

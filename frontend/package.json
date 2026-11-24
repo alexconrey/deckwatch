@@ -20,7 +20,7 @@
     "vue": "^3.5.46",
     "vue-chartjs": "^5.3.7",
     "vue-router": "^4.6.5",
-    "vuetify": "^3.13.8",
+    "vuetify": "^4.3.4",
     "web-vitals": "^4.2.4"
   },
   "devDependencies": {
