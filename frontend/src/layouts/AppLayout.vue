@@ -20,7 +20,7 @@ const showCreateNs = ref(false);
 const isDark = computed(() => theme.global.current.value.dark);
 const toggleTheme = () => {
   const next = isDark.value ? "deckwatchLight" : "deckwatchDark";
-  theme.global.name.value = next;
+  theme.change(next);
   localStorage.setItem("deckwatch-theme", next);
 };
 

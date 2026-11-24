@@ -81,7 +81,7 @@ src/                            # Rust backend
     addons.rs                   # hardcoded addon catalog + attach/detach
     templates.rs                # deployment templates CRUD
     monitoring.rs               # Prometheus integration toggle
-frontend/                       # Vite + Vue 3 + Vuetify 3 + TS + Pinia
+frontend/                       # Vite + Vue 3 + Vuetify 4 + TS + Pinia
   src/
     App.vue                     # <router-view> only
     main.ts                     # createApp, plugins (pinia, vuetify, router)

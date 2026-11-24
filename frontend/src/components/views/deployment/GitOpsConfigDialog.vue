@@ -445,7 +445,7 @@ onMounted(() => {
           class="mb-2"
         />
 
-        <v-row dense>
+        <v-row density="compact">
           <v-col cols="6">
             <v-autocomplete
               v-model="form.branch"
@@ -506,7 +506,7 @@ onMounted(() => {
             <v-list-item v-bind="itemProps" :title="item.title" :subtitle="item.subtitle" />
           </template>
         </v-select>
-        <v-row v-if="useCustomRegistry" dense align="center" class="mb-2">
+        <v-row v-if="useCustomRegistry" density="compact" class="mb-2 align-center">
           <v-col :cols="canBrowseRegistry ? 10 : 12">
             <v-text-field
               v-model="form.ociRepository"
@@ -535,7 +535,7 @@ onMounted(() => {
           </v-col>
         </v-row>
 
-        <v-row dense>
+        <v-row density="compact">
           <v-col cols="6">
             <v-text-field
               v-model="form.dockerfilePath"
@@ -574,7 +574,7 @@ onMounted(() => {
         <v-divider class="my-3" />
         <div class="text-subtitle-2 mb-2">Polling</div>
 
-        <v-row dense>
+        <v-row density="compact">
           <v-col cols="6">
             <v-text-field
               v-model.number="form.pollInterval"

@@ -555,7 +555,7 @@ const probeHints: Record<string, string> = {
     </v-row>
 
     <div class="text-subtitle-2 mb-2">Replicas</div>
-    <v-row dense align="center" class="mb-2">
+    <v-row density="compact" class="mb-2 align-center">
       <v-col cols="12" md="9">
         <v-slider
           :model-value="form.replicas"
@@ -591,7 +591,7 @@ const probeHints: Record<string, string> = {
       reference the port from Services and Ingresses.
     </div>
 
-    <v-row v-for="(portRow, i) in form.ports" :key="i" dense align="center">
+    <v-row v-for="(portRow, i) in form.ports" :key="i" density="compact" class="align-center">
       <v-col cols="4" md="3">
         <v-text-field
           v-model.number="portRow.port"
@@ -649,7 +649,7 @@ const probeHints: Record<string, string> = {
     <v-divider class="my-4" />
     <div class="text-subtitle-2 mb-2">Environment Variables</div>
 
-    <v-row v-for="(env, i) in form.env" :key="i" dense>
+    <v-row v-for="(env, i) in form.env" :key="i" density="compact">
       <v-col cols="5">
         <v-text-field
           v-model="env.name"
@@ -694,7 +694,7 @@ const probeHints: Record<string, string> = {
       configured.
     </div>
 
-    <v-row dense>
+    <v-row density="compact">
       <v-col cols="6" md="3">
         <v-text-field
           v-model="form.cpuRequest"
@@ -794,7 +794,7 @@ const probeHints: Record<string, string> = {
           density="compact"
         />
         <template v-if="(form as any)[probeKey].enabled">
-          <v-row dense class="mt-2">
+          <v-row density="compact" class="mt-2">
             <v-col cols="12" md="3">
               <v-select
                 v-model="(form as any)[probeKey].probeType"
@@ -843,7 +843,7 @@ const probeHints: Record<string, string> = {
               />
             </v-col>
           </v-row>
-          <v-row dense>
+          <v-row density="compact">
             <v-col cols="6" md="2">
               <v-text-field
                 v-model.number="(form as any)[probeKey].initialDelay"
@@ -897,7 +897,7 @@ const probeHints: Record<string, string> = {
     <v-divider class="my-4" />
     <div class="text-subtitle-2 mb-2">Advanced</div>
 
-    <v-row dense>
+    <v-row density="compact">
       <v-col cols="12" md="6">
         <v-text-field
           v-model="form.command"

@@ -137,7 +137,7 @@ function handleSave() {
         <v-row
           v-for="(row, i) in nodeSelector"
           :key="i"
-          dense
+          density="compact"
           class="mb-1"
         >
           <v-col cols="5">
@@ -196,7 +196,7 @@ function handleSave() {
           <v-row
             v-for="(expr, ei) in term.match_expressions"
             :key="ei"
-            dense
+            density="compact"
             class="mb-1"
           >
             <v-col cols="4">
@@ -295,7 +295,7 @@ function handleSave() {
           <v-row
             v-for="(expr, ei) in term.match_expressions"
             :key="ei"
-            dense
+            density="compact"
             class="mb-1"
           >
             <v-col cols="4">

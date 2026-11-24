@@ -115,7 +115,7 @@ See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the full design.
 | Layer | Technology |
 |-------|-----------|
 | Backend | Rust, Axum, kube-rs, k8s-openapi, SeaORM |
-| Frontend | Vue 3, Vuetify 3, TypeScript, Vite |
+| Frontend | Vue 3, Vuetify 4, TypeScript, Vite |
 | Database | SQLite (default), Postgres, MySQL via SeaORM |
 | Container build | Kaniko (rootless, in-cluster) |
 | Packaging | Docker (multi-stage, distroless runtime), Helm |
