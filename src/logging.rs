@@ -10,7 +10,11 @@ use tracing_subscriber::EnvFilter;
 /// - `extism::pdk`: plugin log lines. extism turns a plugin's PDK `log_*`
 ///   calls into host `tracing` events with this target and a `plugin` field
 ///   holding the extism instance id.
-pub const DEFAULT_LOG_FILTER: &str = "deckwatch=info,tower_http=info,mcp_k8s=info,extism::pdk=info";
+/// - `opentelemetry` (warnings and errors): the OpenTelemetry SDK's own
+///   reports, such as failed OTLP exports and dropped spans. It logs nothing
+///   unless OTLP export is configured (`src/telemetry.rs`).
+pub const DEFAULT_LOG_FILTER: &str =
+    "deckwatch=info,tower_http=info,mcp_k8s=info,extism::pdk=info,opentelemetry=warn";
 
 /// `RUST_LOG` when it is set and valid, otherwise [`DEFAULT_LOG_FILTER`].
 pub fn env_filter() -> EnvFilter {
