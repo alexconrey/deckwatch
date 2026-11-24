@@ -22,6 +22,10 @@ use crate::entities::builds;
 use crate::entities::gitops_configs;
 use crate::kube_ext::deployment_phase;
 use crate::metrics;
+use crate::outbound::github::GitHubToken;
+use crate::outbound::{
+    CredentialSource, EndpointBinding, EndpointId, EndpointPolicy, EndpointSettings,
+};
 use crate::plugins::{SidecarSpec, VolumeMountSpec, VolumeSpec};
 use crate::state::AppState;
 
@@ -61,18 +65,20 @@ pub async fn run_poller(state: AppState) {
     let mut interval = tokio::time::interval(std::time::Duration::from_secs(10));
     let mut pending_interval = tokio::time::interval(std::time::Duration::from_secs(30));
     let mut gauge_interval = tokio::time::interval(std::time::Duration::from_secs(60));
-    let http_client = reqwest::Client::new();
+    let outbound = crate::outbound::global();
+    let git_http = outbound.client(crate::outbound::Purpose::Git);
+    let registry_http = outbound.client(crate::outbound::Purpose::Registry);
 
     loop {
         tokio::select! {
             _ = interval.tick() => {
                 let cycle_start = Instant::now();
 
-                if let Err(e) = poll_cycle(&state, &http_client).await {
+                if let Err(e) = poll_cycle(&state, &git_http).await {
                     tracing::error!(error = %e, "watcher poll cycle failed");
                 }
 
-                if let Err(e) = monitor_builds(&state, &http_client).await {
+                if let Err(e) = monitor_builds(&state, &registry_http).await {
                     tracing::error!(error = %e, "watcher build monitor failed");
                 }
 
@@ -149,20 +155,30 @@ async fn check_and_build(
     let branch = &config.branch;
     // Resolve the git token. Shared token_secret takes priority over any
     // per-app encrypted_token so that switching from per-app to shared
-    // tokens works even if a stale encrypted_token row remains.
-    let token = if !config.token_secret.is_empty() {
+    // tokens works even if a stale encrypted_token row remains. The source
+    // decides which GitHub API host the token may be sent to.
+    let (token, token_source) = if !config.token_secret.is_empty() {
         // Shared token from settings (looked up by name). Settings were already
         // loaded once by poll_cycle so no additional DB round-trip is needed.
         // resolve_token tries encrypted_token first, then falls back to
         // reading the k8s secret (secret_name/namespace) — same as plugins.rs.
         crate::plugins::resolve_git_token(&config.token_secret, settings, state)
             .await
-            .unwrap_or_default()
+            .unwrap_or_else(|| (String::new(), CredentialSource::Stored(None)))
     } else if let Some(encrypted) = config.encrypted_token.as_deref() {
-        // Per-app encrypted token (stored on the gitops config itself)
-        crate::crypto::decrypt(&state.encryption_key, encrypted).unwrap_or_default()
+        // Per-app encrypted token (stored on the gitops config itself), bound
+        // to the GitHub API host recorded when it was saved.
+        (
+            crate::crypto::decrypt(&state.encryption_key, encrypted).unwrap_or_default(),
+            CredentialSource::Stored(parse_token_binding(config.token_binding.as_deref())),
+        )
     } else {
-        String::new()
+        (String::new(), CredentialSource::Stored(None))
+    };
+    let token_label = if config.token_secret.is_empty() {
+        "per-application git token".to_string()
+    } else {
+        format!("git token '{}'", config.token_secret)
     };
 
     let auth_user = resolve_git_auth_user(&config.git_auth_user, repo_url);
@@ -188,8 +204,22 @@ async fn check_and_build(
     };
 
     if (!include_paths.is_empty() || !exclude_paths.is_empty()) && !last_sha.is_empty() {
-        if let Some(changed) =
-            check_paths_github(http, repo_url, &token, last_sha, &remote_sha).await
+        let token = GitHubToken {
+            token: &token,
+            label: &token_label,
+            source: &token_source,
+        };
+        let endpoints = settings.endpoints.clone().unwrap_or_default();
+        if let Some(changed) = github_changed_files(
+            http,
+            &endpoints,
+            &crate::outbound::global().policy(),
+            repo_url,
+            token,
+            last_sha,
+            &remote_sha,
+        )
+        .await
         {
             let dominated_by_excludes = !changed.iter().any(|f| {
                 let included =
@@ -338,50 +368,44 @@ fn parse_ref_sha(resp: &str, branch: &str) -> anyhow::Result<String> {
     anyhow::bail!("branch '{branch}' not found in remote refs")
 }
 
-async fn check_paths_github(
+/// The stored binding of a per-application git token (`None` for tokens
+/// saved before bindings existed, which are bound to the defaults).
+pub fn parse_token_binding(raw: Option<&str>) -> Option<EndpointBinding> {
+    raw.and_then(|s| serde_json::from_str(s).ok())
+}
+
+/// Files changed between `base` and `head` when `repo_url` is hosted on the
+/// configured GitHub web host, via the configured GitHub API. `None` when the
+/// repo is not on GitHub or the lookup fails (the caller then builds without
+/// path filtering). The token is only sent if its binding matches the API
+/// host.
+pub async fn github_changed_files(
     http: &reqwest::Client,
+    endpoints: &EndpointSettings,
+    policy: &EndpointPolicy,
     repo_url: &str,
-    token: &str,
+    token: GitHubToken<'_>,
     base: &str,
     head: &str,
 ) -> Option<Vec<String>> {
-    if !repo_url.contains("github.com") {
-        return None;
-    }
-
-    let parts: Vec<&str> = repo_url
-        .trim_end_matches('/')
-        .trim_end_matches(".git")
-        .rsplitn(3, '/')
-        .collect();
-    if parts.len() < 2 {
-        return None;
-    }
-    let repo = parts[0];
-    let owner = parts[1];
-
-    let url = format!("https://api.github.com/repos/{owner}/{repo}/compare/{base}...{head}");
-
-    let resp = http
-        .get(&url)
-        .header("Authorization", format!("Bearer {token}"))
-        .header("User-Agent", "deckwatch")
-        .header("Accept", "application/vnd.github+json")
-        .send()
+    let web = endpoints.resolve(EndpointId::GithubWeb, policy).ok()?;
+    let (owner, repo) = crate::outbound::github::repo_on_host(repo_url, &web)?;
+    let api = match endpoints.resolve(EndpointId::GithubApi, policy) {
+        Ok(api) => api,
+        Err(e) => {
+            tracing::warn!(error = %e, "invalid GitHub API endpoint; skipping path filter");
+            return None;
+        }
+    };
+    match crate::outbound::github::compare_files(http, &api, &owner, &repo, base, head, Some(token))
         .await
-        .ok()?
-        .json::<serde_json::Value>()
-        .await
-        .ok()?;
-
-    let files = resp
-        .get("files")?
-        .as_array()?
-        .iter()
-        .filter_map(|f| f.get("filename")?.as_str().map(|s| s.to_string()))
-        .collect();
-
-    Some(files)
+    {
+        Ok(files) => Some(files),
+        Err(e) => {
+            tracing::warn!(repo = %repo_url, error = %e, "GitHub compare failed; skipping path filter");
+            None
+        }
+    }
 }
 
 pub async fn trigger_build_public(

@@ -2,9 +2,12 @@
 //!
 //! The binary (`src/main.rs`) only calls [`run`]; everything else lives in
 //! this library so the integration tests in `tests/` can drive real code
-//! paths. `audit` stays public as it was in the binary.
+//! paths (see `tests/outbound_tls.rs`). [`outbound`] and [`anthropic`] are
+//! the public outbound HTTP API, `audit` stays public as it was in the
+//! binary, and [`testing`] re-exports what the contract tests need.
 
-mod anthropic;
+mod ai_provider;
+pub mod anthropic;
 pub mod audit;
 mod auth;
 mod auto_rollback;
@@ -22,6 +25,7 @@ mod log_sanitize;
 mod metrics;
 mod migrations;
 mod notifications;
+pub mod outbound;
 mod plugins;
 mod rate_limit;
 mod routes;
@@ -66,6 +70,34 @@ pub async fn run() {
         registry_storage = %config.registry_storage,
         "starting deckwatch"
     );
+
+    // Outbound HTTP clients (timeouts, user agent, extra trusted CAs). A
+    // broken DECKWATCH_EXTRA_CA_FILE stops startup here, naming the file,
+    // rather than surfacing later as TLS errors on every outbound call.
+    match outbound::OutboundHttp::from_env() {
+        Ok(http) => {
+            match http.extra_ca() {
+                Some(bundle) => tracing::info!(
+                    file = %bundle.path().display(),
+                    certificates = bundle.len(),
+                    "trusting extra CA certificates in addition to the system roots"
+                ),
+                None => tracing::info!("outbound TLS trusts the system roots only"),
+            }
+            if http.policy().allow_insecure {
+                tracing::warn!(
+                    "{}=true: http:// endpoints are accepted for any host",
+                    outbound::ALLOW_INSECURE_ENDPOINTS_ENV
+                );
+            }
+            outbound::install_global(http);
+        }
+        Err(e) => {
+            tracing::error!(error = %e, "invalid outbound HTTP configuration; refusing to start");
+            eprintln!("deckwatch: {e}");
+            std::process::exit(1);
+        }
+    }
 
     // --- Database ---
     let db_backend = db::backend_name(&config.database_url);
@@ -126,6 +158,7 @@ pub async fn run() {
     };
 
     migrate_configmap_apps_to_db(&state).await;
+    handlers::settings::bind_legacy_credentials_at_startup(&state).await;
 
     // Fetch plugins declared in persisted settings. Failures per-plugin are
     // logged and skipped so a bad plugin URL never blocks startup.
@@ -403,6 +436,16 @@ async fn migrate_configmap_apps_to_db(state: &AppState) {
             );
         }
     }
+}
+
+/// Entry points for the outbound HTTP contract tests
+/// (`tests/outbound_tls.rs`). Not a stable API.
+#[doc(hidden)]
+pub mod testing {
+    pub use crate::handlers::prometheus_query::{execute_range, PodSeries};
+    pub use crate::handlers::tracing_handler::{fetch_jaeger_compat, TraceSummary};
+    pub use crate::notifications::{build_payload, post_webhook, NotificationEvent};
+    pub use crate::watcher::{check_remote_head, github_changed_files};
 }
 
 #[cfg(test)]

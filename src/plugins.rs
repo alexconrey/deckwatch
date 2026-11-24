@@ -581,10 +581,7 @@ pub async fn fetch_and_validate(
     state: &AppState,
 ) -> ValidationResult {
     let settings = crate::handlers::settings::load_settings_from_db(state).await;
-    let http = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(30))
-        .build()
-        .unwrap_or_default();
+    let http = crate::outbound::global().client(crate::outbound::Purpose::PluginDownload);
 
     let start = std::time::Instant::now();
 
@@ -724,10 +721,7 @@ fn load_metadata_from_bytes(
 /// Fetch and load all enabled plugins from their configured sources.
 /// Per-plugin errors are logged and skipped; a broken plugin never blocks startup.
 pub async fn fetch_plugins(settings: &DeckwatchSettings, state: &AppState) -> Vec<LoadedPlugin> {
-    let http = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(30))
-        .build()
-        .unwrap_or_default();
+    let http = crate::outbound::global().client(crate::outbound::Purpose::PluginDownload);
 
     let mut loaded = Vec::new();
     for cfg in &settings.plugins {
@@ -806,11 +800,23 @@ async fn fetch_bytes(
             .map_err(|e| anyhow::anyhow!("failed to read uploaded plugin {filename}: {e}"));
     }
 
-    let url = resolve_url(&cfg.source);
+    let endpoints = settings.endpoints.clone().unwrap_or_default();
+    let policy = crate::outbound::global().policy();
+    let (url, github_endpoint) = resolve_url(&cfg.source, &endpoints, &policy)?;
     let mut builder = http.get(&url);
 
     if let Some(token_secret_name) = &cfg.token_secret {
-        if let Some(token) = resolve_git_token(token_secret_name, settings, state).await {
+        if let Some((token, source)) = resolve_git_token(token_secret_name, settings, state).await {
+            // GitHub downloads only carry the token to the GitHub host it
+            // was saved for. `url` sources are operator-chosen hosts and
+            // keep their existing behaviour.
+            if let Some(endpoint) = &github_endpoint {
+                crate::outbound::authorize(
+                    &format!("git token '{token_secret_name}'"),
+                    &source,
+                    endpoint,
+                )?;
+            }
             builder = builder.bearer_auth(token);
         }
     }
@@ -850,7 +856,15 @@ async fn fetch_bytes(
     Ok(bytes)
 }
 
-fn resolve_url(source: &PluginSource) -> String {
+/// Download URL for a plugin source, plus the GitHub endpoint it points at
+/// (for token binding) when the source is a GitHub repository. GitHub
+/// sources use the configured GitHub web base (releases) or raw base.
+fn resolve_url(
+    source: &PluginSource,
+    endpoints: &crate::outbound::EndpointSettings,
+    policy: &crate::outbound::EndpointPolicy,
+) -> anyhow::Result<(String, Option<crate::outbound::Endpoint>)> {
+    use crate::outbound::EndpointId;
     match source {
         PluginSource::Github {
             repo,
@@ -858,27 +872,32 @@ fn resolve_url(source: &PluginSource) -> String {
             path,
             use_release,
         } => {
-            if *use_release {
-                format!("https://github.com/{repo}/releases/download/{git_ref}/{path}")
+            let (id, url_path) = if *use_release {
+                (
+                    EndpointId::GithubWeb,
+                    format!("/{repo}/releases/download/{git_ref}/{path}"),
+                )
             } else {
-                format!("https://raw.githubusercontent.com/{repo}/{git_ref}/{path}")
-            }
+                (EndpointId::GithubRaw, format!("/{repo}/{git_ref}/{path}"))
+            };
+            let endpoint = endpoints.resolve(id, policy)?;
+            Ok((endpoint.url(&url_path), Some(endpoint)))
         }
-        PluginSource::Url { url } => url.clone(),
+        PluginSource::Url { url } => Ok((url.clone(), None)),
         // Upload source has no URL — handled in fetch_bytes before this is called.
-        PluginSource::Upload { filename } => {
-            format!("file://{UPLOADS_DIR}/{filename}")
-        }
+        PluginSource::Upload { filename } => Ok((format!("file://{UPLOADS_DIR}/{filename}"), None)),
     }
 }
 
 /// Resolve a git token by display name: tries `encrypted_token` first, then
 /// falls back to reading the `token` key from the referenced k8s secret.
+/// The source says which GitHub hosts the token may be sent to
+/// (`crate::outbound::binding`).
 pub async fn resolve_git_token(
     secret_ref_name: &str,
     settings: &DeckwatchSettings,
     state: &AppState,
-) -> Option<String> {
+) -> Option<(String, crate::outbound::CredentialSource)> {
     let entry = settings
         .git_token_secrets
         .iter()
@@ -886,7 +905,11 @@ pub async fn resolve_git_token(
 
     if let Some(enc) = &entry.encrypted_token {
         if !state.encryption_key.is_empty() {
-            return crate::crypto::decrypt(&state.encryption_key, enc).ok();
+            let token = crate::crypto::decrypt(&state.encryption_key, enc).ok()?;
+            return Some((
+                token,
+                crate::outbound::CredentialSource::Stored(entry.binding.clone()),
+            ));
         }
     }
 
@@ -898,7 +921,11 @@ pub async fn resolve_git_token(
     let secrets_api = state.secrets_api(ns).ok()?;
     let secret = secrets_api.get(&entry.secret_name).await.ok()?;
     let raw = secret.data?.get("token")?.0.clone();
-    String::from_utf8(raw).ok()
+    let token = String::from_utf8(raw).ok()?;
+    Some((
+        token,
+        crate::outbound::CredentialSource::KubernetesSecret(entry.secret_name.clone()),
+    ))
 }
 
 // ── Dependency resolution ─────────────────────────────────────────────────────

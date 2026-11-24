@@ -2102,14 +2102,7 @@ async fn tool_enable_plugin(state: &AppState, args: &serde_json::Value) -> Resul
     let state_clone = state.clone();
     let plugins_cfg = s.plugins.clone();
     tokio::spawn(async move {
-        let git_token_secrets = settings::load_settings_from_db(&state_clone)
-            .await
-            .git_token_secrets;
-        let snap = settings::DeckwatchSettings {
-            plugins: plugins_cfg,
-            git_token_secrets,
-            ..Default::default()
-        };
+        let snap = settings::plugin_fetch_settings(&state_clone, plugins_cfg).await;
         let loaded = crate::plugins::fetch_plugins(&snap, &state_clone).await;
         tracing::info!(count = loaded.len(), "plugins reloaded after enable");
         *state_clone.plugins.write().await = loaded;
@@ -2282,14 +2275,7 @@ async fn tool_update_plugin_config(
         let state_clone = state.clone();
         let plugins_cfg = s.plugins.clone();
         tokio::spawn(async move {
-            let git_token_secrets = settings::load_settings_from_db(&state_clone)
-                .await
-                .git_token_secrets;
-            let snap = settings::DeckwatchSettings {
-                plugins: plugins_cfg,
-                git_token_secrets,
-                ..Default::default()
-            };
+            let snap = settings::plugin_fetch_settings(&state_clone, plugins_cfg).await;
             let loaded = crate::plugins::fetch_plugins(&snap, &state_clone).await;
             tracing::info!(count = loaded.len(), "plugins reloaded after config update");
             *state_clone.plugins.write().await = loaded;

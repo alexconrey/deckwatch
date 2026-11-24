@@ -10,6 +10,7 @@ mod m20260813_000001_plugin_resource_sidecars;
 mod m20260813_000002_plugin_resource_init_containers;
 mod m20260814_000001_agent_feedback;
 mod m20260814_000002_perf_indices;
+mod m20261124_000001_gitops_token_binding;
 
 use sea_orm_migration::prelude::*;
 
@@ -31,6 +32,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20260813_000002_plugin_resource_init_containers::Migration),
             Box::new(m20260814_000001_agent_feedback::Migration),
             Box::new(m20260814_000002_perf_indices::Migration),
+            Box::new(m20261124_000001_gitops_token_binding::Migration),
         ]
     }
 }

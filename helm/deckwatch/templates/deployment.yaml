@@ -4,6 +4,13 @@ metadata:
   name: {{ include "deckwatch.fullname" . }}
   labels:
     {{- include "deckwatch.labels" . | nindent 4 }}
+{{- $outbound := .Values.outbound | default dict }}
+{{- $extraCa := $outbound.extraCaBundle | default dict }}
+{{- $extraCaKey := $extraCa.key | default "ca.crt" }}
+{{- $needsExtraCa := or $extraCa.secretName $extraCa.configMapName }}
+{{- if and $extraCa.secretName $extraCa.configMapName }}
+{{- fail "outbound.extraCaBundle: set secretName or configMapName, not both" }}
+{{- end }}
 spec:
   {{- if and .Values.database.persistence.enabled (hasPrefix "sqlite" .Values.database.url) }}
   replicas: 1
@@ -67,6 +74,14 @@ spec:
                 secretKeyRef:
                   name: {{ .Values.encryptionKey.existingSecret | default (printf "%s-encryption-key" (include "deckwatch.fullname" .)) }}
                   key: encryption-key
+            {{- if $needsExtraCa }}
+            - name: DECKWATCH_EXTRA_CA_FILE
+              value: {{ printf "/etc/deckwatch/extra-ca/%s" $extraCaKey | quote }}
+            {{- end }}
+            {{- if $outbound.allowInsecureEndpoints }}
+            - name: DECKWATCH_ALLOW_INSECURE_ENDPOINTS
+              value: "true"
+            {{- end }}
             {{- if .Values.registry.enabled }}
             - name: DECKWATCH_REGISTRY_ENABLED
               value: "true"
@@ -116,7 +131,7 @@ spec:
             {{- toYaml .Values.resources | nindent 12 }}
           {{- $needsRegistryVol := and .Values.registry.enabled (or (eq (default "filesystem" .Values.registry.storage) "filesystem") (not .Values.registry.storage)) }}
           {{- $needsDbVol := and .Values.database.persistence.enabled (hasPrefix "sqlite" .Values.database.url) }}
-          {{- if or $needsRegistryVol $needsDbVol }}
+          {{- if or $needsRegistryVol $needsDbVol $needsExtraCa }}
           volumeMounts:
             {{- if $needsRegistryVol }}
             - name: registry-storage
@@ -126,8 +141,13 @@ spec:
             - name: db-storage
               mountPath: /data
             {{- end }}
+            {{- if $needsExtraCa }}
+            - name: extra-ca
+              mountPath: /etc/deckwatch/extra-ca
+              readOnly: true
+            {{- end }}
           {{- end }}
-      {{- if or $needsRegistryVol $needsDbVol }}
+      {{- if or $needsRegistryVol $needsDbVol $needsExtraCa }}
       volumes:
         {{- if $needsRegistryVol }}
         - name: registry-storage
@@ -138,6 +158,21 @@ spec:
         - name: db-storage
           persistentVolumeClaim:
             claimName: {{ include "deckwatch.fullname" . }}-db
+        {{- end }}
+        {{- if $needsExtraCa }}
+        # Only the bundle key is projected, so a missing key fails the pod
+        # instead of starting without the CA.
+        - name: extra-ca
+          {{- if $extraCa.secretName }}
+          secret:
+            secretName: {{ $extraCa.secretName | quote }}
+          {{- else }}
+          configMap:
+            name: {{ $extraCa.configMapName | quote }}
+          {{- end }}
+            items:
+              - key: {{ $extraCaKey | quote }}
+                path: {{ $extraCaKey | quote }}
         {{- end }}
       {{- end }}
       {{- with .Values.nodeSelector }}

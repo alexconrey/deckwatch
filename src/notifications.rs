@@ -187,10 +187,7 @@ pub struct NotificationClient {
 
 impl NotificationClient {
     pub fn new(state: AppState) -> Self {
-        let http = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(10))
-            .build()
-            .unwrap_or_else(|_| reqwest::Client::new());
+        let http = crate::outbound::global().client(crate::outbound::Purpose::Webhook);
         Self { state, http }
     }
 
@@ -234,20 +231,7 @@ impl NotificationClient {
             }
         }
 
-        let payload = build_payload(&event);
-        let resp = self
-            .http
-            .post(&settings.webhook_url)
-            .json(&payload)
-            .send()
-            .await?;
-
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let body = resp.text().await.unwrap_or_default();
-            anyhow::bail!("webhook returned {status}: {body}");
-        }
-        Ok(())
+        post_webhook(&self.http, &settings.webhook_url, &build_payload(&event)).await
     }
 
     async fn load_notifications(&self) -> anyhow::Result<Option<NotificationSettings>> {
@@ -295,11 +279,27 @@ fn namespace_enabled(settings: &NotificationSettings, ns: &str) -> bool {
     settings.namespaces.iter().any(|n| n == ns)
 }
 
+/// POST `payload` as JSON to the webhook `url`; non-2xx is an error carrying
+/// the status and response body.
+pub async fn post_webhook(
+    http: &reqwest::Client,
+    url: &str,
+    payload: &serde_json::Value,
+) -> anyhow::Result<()> {
+    let resp = http.post(url).json(payload).send().await?;
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        anyhow::bail!("webhook returned {status}: {body}");
+    }
+    Ok(())
+}
+
 /// Slack-compatible payload. Slack ignores unknown top-level fields, so the
 /// same JSON works for generic webhooks (which get `text`, `event_type`, and
 /// the structured `event` payload) and for Microsoft Teams' incoming webhook
 /// (which renders `text` as a MessageCard body).
-fn build_payload(event: &NotificationEvent) -> serde_json::Value {
+pub fn build_payload(event: &NotificationEvent) -> serde_json::Value {
     let text = event.text();
     let structured = serde_json::to_value(event).unwrap_or(serde_json::Value::Null);
     serde_json::json!({
