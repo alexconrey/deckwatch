@@ -29,12 +29,28 @@ export function activeMenu(page: Page): Locator {
   return page.locator(".v-overlay--active .v-list").last();
 }
 
-/** Open the select-family field labelled `label` and return its menu list. */
-export async function openMenu(scope: Scope, label: string | RegExp): Promise<Locator> {
-  await field(scope, label).click();
-  const menu = activeMenu(pageOf(scope));
+/**
+ * Open a select menu with the mouse and return its list. `control` is the
+ * select's combobox input.
+ *
+ * The control is focused before the click. When the menu finishes opening,
+ * Vuetify 4 moves focus into it only if the field is focused by then. With
+ * transitions off, that check races the click's own focus, so the menu would
+ * render in one of two states depending on load. With the field focused
+ * first, it always takes the path a user's click takes (Vuetify 3 renders the
+ * same either way).
+ */
+export async function openSelect(control: Locator): Promise<Locator> {
+  await control.focus();
+  await fieldOf(control).click();
+  const menu = activeMenu(control.page());
   await expect(menu).toBeVisible();
   return menu;
+}
+
+/** Open the select-family field labelled `label` and return its menu list. */
+export async function openMenu(scope: Scope, label: string | RegExp): Promise<Locator> {
+  return openSelect(scope.getByRole("combobox", { name: label, exact: typeof label === "string" }));
 }
 
 /** Pick `option` in the select-family field labelled `label`. */

@@ -1,5 +1,5 @@
 import { expect, test } from "./fixtures";
-import { field } from "./support/ui";
+import { openMenu } from "./support/ui";
 
 test.describe("Cluster overview", () => {
   test("shows node counts and expands a node to its conditions", async ({ app, page }) => {
@@ -43,7 +43,7 @@ test.describe("Audit log", () => {
     expect(first.query.get("limit")).toBe("200");
     expect(first.query.has("resource_type")).toBe(false);
 
-    await field(page.locator("main"), "Resource Type").click();
+    await openMenu(page.locator("main"), "Resource Type");
     await page.getByRole("option", { name: "cronjob" }).click();
 
     await expect
@@ -56,7 +56,7 @@ test.describe("Audit log", () => {
 
   test("items per page offers 10, 25, 50 and 100", async ({ app, page }) => {
     await app.goto("/audit");
-    await field(page.locator("main"), "Items per page:").click();
+    await openMenu(page.locator("main"), "Items per page:");
     await expect(page.getByRole("listbox").getByRole("option")).toHaveText(["10", "25", "50", "100"]);
   });
 });

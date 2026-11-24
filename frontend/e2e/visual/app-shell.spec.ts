@@ -1,7 +1,7 @@
 import { FIXED_NOW } from "../support/data";
 import { ok } from "../support/mock-api";
 import { eachTheme, expect, test } from "./visual-test";
-import { field } from "../support/ui";
+import { openMenu } from "../support/ui";
 
 /**
  * App shell: app bar namespace switcher, Create Namespace dialog, the global
@@ -42,6 +42,9 @@ eachTheme(() => {
     await app.namespaceSwitcher().click();
     await page.getByRole("option", { name: "Create Namespace…" }).click();
     const dialog = app.dialog("Create Namespace");
+    // Let the dialog finish opening: its autofocus would otherwise move the
+    // focus back to Name after Create is clicked (Vuetify 4 defers it).
+    await expect(dialog.getByLabel("Name")).toBeFocused();
     await dialog.getByLabel("Name").fill("Bad_Name");
     await dialog.getByRole("button", { name: "Create" }).click();
     await expect(dialog.getByText("Invalid namespace name")).toBeVisible();
@@ -53,7 +56,7 @@ eachTheme(() => {
     await page.getByRole("tab", { name: "Plugins" }).click();
     await page.getByRole("button", { name: "Add Plugin" }).click();
     const dialog = app.dialog("Add Plugin");
-    await field(dialog, "Plugin").click();
+    await openMenu(dialog, "Plugin");
     await page.getByRole("option", { name: "otel" }).click();
     await dialog.getByRole("button", { name: "Associate" }).click();
     await expect(page.getByText('Plugin "otel" associated')).toBeVisible();
