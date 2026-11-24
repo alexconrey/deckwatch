@@ -30,7 +30,9 @@ use std::sync::Arc;
 use bytes::Bytes;
 use object_store::aws::{AmazonS3, AmazonS3Builder};
 use object_store::path::Path as OPath;
-use object_store::{ObjectStore, PutPayload};
+// object_store 0.13 moved head/get/put/delete/copy to `ObjectStoreExt`;
+// `list_with_delimiter` is still on `ObjectStore`.
+use object_store::{ObjectStore, ObjectStoreExt, PutPayload};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -160,7 +162,7 @@ impl S3Backend {
             return Ok(None);
         };
         match self.store.head(&key).await {
-            Ok(meta) => Ok(Some(meta.size as u64)),
+            Ok(meta) => Ok(Some(meta.size)),
             Err(object_store::Error::NotFound { .. }) => Ok(None),
             Err(e) => Err(std::io::Error::other(e)),
         }
@@ -401,7 +403,7 @@ impl S3Backend {
     /// PATCH responses and by upload-status GET.
     pub async fn upload_length(&self, uuid: &str) -> std::io::Result<Option<u64>> {
         match self.store.head(&self.upload_key(uuid)).await {
-            Ok(meta) => Ok(Some(meta.size as u64)),
+            Ok(meta) => Ok(Some(meta.size)),
             Err(object_store::Error::NotFound { .. }) => Ok(None),
             Err(e) => Err(io_from_object_store(e)),
         }
@@ -555,7 +557,7 @@ impl S3Backend {
 fn digest_bytes(bytes: &[u8]) -> String {
     let mut h = Sha256::new();
     h.update(bytes);
-    format!("sha256:{:x}", h.finalize())
+    format!("sha256:{}", crate::crypto::hex_lower(&h.finalize()))
 }
 
 /// Map an object_store error into an io::Error so the axum handlers can
@@ -591,7 +593,7 @@ fn strip_prefix(child: &OPath, base: &OPath) -> Option<String> {
 // ============================================================
 //
 // [dependencies]
-// object_store = { version = "0.11", features = ["aws"] }
+// object_store = { version = "0.14", features = ["aws"] }
 // bytes = "1"
 // async-trait = "0.1"
 //

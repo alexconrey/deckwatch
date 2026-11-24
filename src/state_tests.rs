@@ -15,7 +15,7 @@ use super::*;
 
 fn allowed(ns: &str, allow: &[&str]) -> bool {
     // Mirrors AppState::is_namespace_allowed.
-    allow.is_empty() || allow.iter().any(|n| *n == ns)
+    allow.is_empty() || allow.contains(&ns)
 }
 
 #[test]

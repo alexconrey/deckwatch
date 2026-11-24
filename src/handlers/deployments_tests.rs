@@ -148,7 +148,7 @@ fn build_resources_only_limits() {
     .unwrap();
     let limits = r.limits.unwrap();
     assert_eq!(limits.get("cpu").unwrap().0, "500m");
-    assert!(limits.get("memory").is_none());
+    assert!(!limits.contains_key("memory"));
     assert!(r.requests.is_none());
 }
 

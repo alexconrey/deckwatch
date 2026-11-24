@@ -12,7 +12,9 @@ tower-http = { version = "0.7", features = ["fs", "compression-gzip", "trace"] }
 
 kube = { version = "4", features = ["ws"] }
 k8s-openapi = { version = "0.28", features = ["v1_32"] }
-mcp-k8s = { git = "https://github.com/alexconrey/mcp-k8s.git", branch = "main" }
+# default-features = false: deckwatch only uses the mcp_k8s library, not the
+# standalone server binary (and its utoipa-swagger-ui / zip build dependencies).
+mcp-k8s = { git = "https://github.com/alexconrey/mcp-k8s.git", branch = "main", default-features = false }
 rustls = { version = "0.23", features = ["ring"] }
 
 serde = { version = "1", features = ["derive"] }
@@ -41,20 +43,23 @@ anyhow = "1"
 metrics = "0.24"
 metrics-exporter-prometheus = { version = "0.18", default-features = false }
 jsonwebtoken = { version = "12", features = ["rust_crypto"] }
-sha2 = "0.10"
+sha2 = "0.11"
 uuid = { version = "1", features = ["v4"] }
 tokio-util = { version = "0.7", features = ["io"] }
-hmac = "0.12"
+hmac = "0.13"
 subtle = "2"
 async-trait = "0.1"
 
 # Cloud-agnostic object storage trait — S3 backend for the embedded OCI
 # registry. See docs/S3_REGISTRY.md for the rationale; the `aws` feature
-# pulls in the standard AWS credential chain (env, IMDS, IRSA).
-object_store = { version = "0.11", features = ["aws"] }
+# pulls in the standard AWS credential chain (env, IMDS, IRSA, EKS Pod
+# Identity), reqwest 0.13 over rustls (system trust store; TLS uses the ring
+# provider installed in main()) and aws-lc-rs for SigV4 signing (aws-lc-rs
+# is already compiled in via rustls' default features).
+object_store = { version = "0.14", features = ["aws"] }
 bytes = "1"
 ed25519-dalek = { version = "3", features = ["rand_core"] }
-rcgen = "0.13"
+rcgen = "0.14"
 time = "0.3"
 
 # Database layer — SeaORM supports SQLite / PostgreSQL / MySQL from a single
@@ -71,3 +76,6 @@ extism = "1.41"
 
 [dev-dependencies]
 tempfile = "3"
+# Parses the webhook CA/serving certs in webhook_tls tests. Already in the
+# lockfile via rcgen's optional x509-parser dependency.
+x509-parser = { version = "0.18", features = ["verify"] }

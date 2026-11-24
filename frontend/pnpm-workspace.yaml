@@ -1,2 +1,11 @@
 allowBuilds:
   esbuild: true
+
+# Dev-only security overrides for transitive dependencies:
+# - minimatch < 11.0.1: GHSA-g3hv-75wg-m249 (via @vue/test-utils > js-beautify
+#   and vue-tsc > @vue/language-core)
+# - glob <= 14.0.1: GHSA-3g3m-2fjr-6pw4 (via @vue/test-utils > js-beautify)
+# Drop these once those packages depend on fixed versions themselves.
+overrides:
+  "minimatch@<11.0.1": "^11.0.1"
+  "glob@>=9.0.0 <14.0.2": "^14.0.2"
