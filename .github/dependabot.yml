@@ -1,0 +1,104 @@
+# Dependabot version + security updates for deckwatch.
+#
+# Security updates (triggered by GitHub advisories) are opened as soon as an
+# advisory lands and ignore the schedule/cooldown below. The schedule only
+# governs routine version bumps, which are grouped to keep PR noise down.
+#
+# Release note: dependency PRs must NOT bump the app version. Version bumps
+# stay in dedicated release commits (see CLAUDE.md "Cutting a release").
+version: 2
+
+updates:
+  # ── Rust backend ──────────────────────────────────────────────────────────
+  # Also tracks the mcp-k8s git dependency (branch = main); Dependabot will
+  # propose Cargo.lock rev bumps for it like any other crate.
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+    # Wait a few days after a release before proposing it. This guards against
+    # yanked or compromised releases. Security updates bypass this.
+    cooldown:
+      default-days: 3
+      semver-major-days: 7
+    open-pull-requests-limit: 10
+    commit-message:
+      prefix: "chore(deps)"
+    groups:
+      cargo-minor-patch:
+        update-types: [minor, patch]
+      # Major bumps of these crates usually need code changes together, so
+      # land them as one PR rather than several broken ones.
+      kube-stack:
+        patterns: ["kube", "kube-*", "k8s-openapi"]
+        update-types: [major]
+      sea-orm:
+        patterns: ["sea-orm", "sea-orm-*"]
+        update-types: [major]
+      axum-stack:
+        patterns: ["axum", "axum-*", "tower", "tower-*", "hyper", "hyper-*"]
+        update-types: [major]
+
+  # ── Vue frontend (pnpm) ───────────────────────────────────────────────────
+  # The npm ecosystem detects pnpm from pnpm-lock.yaml.
+  - package-ecosystem: npm
+    directory: /frontend
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+    cooldown:
+      default-days: 3
+      semver-major-days: 7
+    open-pull-requests-limit: 10
+    # Only bump the version range when the new version falls outside it,
+    # rather than rewriting every caret range in package.json.
+    versioning-strategy: increase-if-necessary
+    commit-message:
+      prefix: "chore(deps)"
+      prefix-development: "chore(dev-deps)"
+    groups:
+      frontend-prod:
+        dependency-type: production
+        update-types: [minor, patch]
+      frontend-dev:
+        dependency-type: development
+        update-types: [minor, patch]
+      # Test toolchain packages must move in lockstep (vitest + coverage + vite).
+      vitest:
+        patterns: ["vitest", "@vitest/*", "vite"]
+      vue:
+        patterns: ["vue", "@vue/*", "vue-tsc", "@vitejs/plugin-vue"]
+
+  # ── Container base images (Dockerfile) ────────────────────────────────────
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+    commit-message:
+      prefix: "chore(docker)"
+    ignore:
+      # Stay on Node LTS lines (even majors); skip odd-numbered "current"
+      # releases. Move to the next LTS manually.
+      - dependency-name: node
+        update-types: ["version-update:semver-major"]
+    groups:
+      docker-base-images:
+        patterns: ["*"]
+
+  # ── GitHub Actions used by CI/publish workflows ───────────────────────────
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+    commit-message:
+      prefix: "chore(ci)"
+    groups:
+      github-actions:
+        patterns: ["*"]
