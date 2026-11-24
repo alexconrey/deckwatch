@@ -56,7 +56,7 @@ sea-orm = { version = "1", features = ["sqlx-sqlite", "sqlx-postgres", "sqlx-mys
 sea-orm-migration = { version = "1" }
 
 # AES-256-GCM for encrypting API keys stored in the database.
-aes-gcm = "0.10"
+aes-gcm = "0.11"
 rand = "0.8"
 
 # WASM plugin host — executes external plugins fetched from Git repos.
