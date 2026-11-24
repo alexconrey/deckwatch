@@ -1,6 +1,6 @@
 import type { Page } from "@playwright/test";
 import { eachTheme, expect, test } from "./visual-test";
-import { field } from "../support/ui";
+import { openMenu } from "../support/ui";
 
 /**
  * Cluster overview, audit log, docs, agent feedback, 404 and the auth
@@ -42,14 +42,14 @@ eachTheme(() => {
 
   test("audit log resource type filter", async ({ app, page }) => {
     await app.goto("/audit");
-    await field(page.locator("main"), "Resource Type").click();
+    await openMenu(page.locator("main"), "Resource Type");
     await expect(page.getByRole("option", { name: "deployment" })).toBeVisible();
     await app.snap("audit/resource-type-menu");
   });
 
   test("audit log items per page", async ({ app, page }) => {
     await app.goto("/audit");
-    await field(page.locator("main"), "Items per page:").click();
+    await openMenu(page.locator("main"), "Items per page:");
     await expect(page.getByRole("option", { name: "100" })).toBeVisible();
     await app.snap("audit/items-per-page-menu");
   });

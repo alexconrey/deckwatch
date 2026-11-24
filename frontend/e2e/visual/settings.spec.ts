@@ -1,6 +1,6 @@
 import type { Page } from "@playwright/test";
 import { apiError } from "../support/mock-api";
-import { activeMenu, fieldOf, openMenu, row } from "../support/ui";
+import { openMenu, openSelect, row } from "../support/ui";
 import { eachTheme, expect, test } from "./visual-test";
 
 /**
@@ -129,8 +129,8 @@ eachTheme(() => {
       await app.goto("/settings");
       await section(page, "Container Registries");
       // Second registry row (ecr-prod); every row has a "Type" select.
-      await fieldOf(page.getByRole("combobox", { name: "Type", exact: true }).nth(1)).click();
-      await expect(activeMenu(page).getByRole("option", { name: "Harbor" })).toBeVisible();
+      const menu = await openSelect(page.getByRole("combobox", { name: "Type", exact: true }).nth(1));
+      await expect(menu.getByRole("option", { name: "Harbor" })).toBeVisible();
       await app.snap("settings/registry-type-menu");
     });
 

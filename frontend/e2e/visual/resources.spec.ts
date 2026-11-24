@@ -84,6 +84,9 @@ eachTheme(() => {
       await app.goto("/deployments?tab=cronjobs");
       await page.getByRole("button", { name: "New CronJob" }).click();
       const dialog = app.dialog("New CronJob");
+      // Let the dialog finish opening: its autofocus would otherwise move the
+      // focus back to Name after the fields are filled (Vuetify 4 defers it).
+      await expect(dialog.getByLabel("Name")).toBeFocused();
       await dialog.getByLabel("Name").fill("Nightly_Backup");
       await dialog.getByLabel("Schedule").fill("0 3 * * *");
       await expect(dialog.getByText("Lowercase alphanumeric or '-', start/end alphanumeric")).toBeVisible();

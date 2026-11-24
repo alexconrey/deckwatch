@@ -1,6 +1,6 @@
 import type { Page } from "@playwright/test";
 import { eachTheme, expect, test } from "./visual-test";
-import { fieldOf } from "../support/ui";
+import { openSelect } from "../support/ui";
 
 /**
  * Template picker (/deployments/templates) and the create form
@@ -16,8 +16,6 @@ const probeCard = (page: Page, probe: string) =>
  * 1-character-wide element under the selection text, so it never receives
  * the click itself.
  */
-const openSelect = (combobox: ReturnType<Page["getByRole"]>) => fieldOf(combobox).click();
-
 async function openForm(app: { goto(path: string): Promise<void> }, page: Page): Promise<void> {
   await app.goto("/deployments/create");
   // Cluster defaults from the settings mock fill the resource fields.

@@ -1,5 +1,5 @@
 import { expect, test } from "./fixtures";
-import { field } from "./support/ui";
+import { openMenu } from "./support/ui";
 
 test.describe("Applications", () => {
   test("clicking a row opens the application", async ({ app, page }) => {
@@ -56,7 +56,7 @@ test.describe("Applications", () => {
       const next = page.getByRole("button", { name: "Next" });
 
       await page.getByLabel("App name").fill("batch-jobs");
-      await field(page.locator(".v-stepper"), "Namespace").click();
+      await openMenu(page.locator(".v-stepper"), "Namespace");
       await page.getByRole("option", { name: "staging" }).click();
       await next.click();
       await next.click(); // "I will deploy manually" is the default
@@ -181,7 +181,7 @@ test.describe("Applications", () => {
 
       const dialog = app.dialog("Add Plugin");
       await expect(dialog.getByRole("button", { name: "Associate" })).toBeDisabled();
-      await field(dialog, "Plugin").click();
+      await openMenu(dialog, "Plugin");
       await page.getByRole("option", { name: "otel" }).click();
       await dialog.getByRole("button", { name: "Associate" }).click();
 
@@ -197,7 +197,7 @@ test.describe("Applications", () => {
       await page.getByRole("button", { name: "Provision" }).click();
 
       const dialog = app.dialog("Add Redis cache");
-      await field(dialog, "Node type").click();
+      await openMenu(dialog, "Node type");
       await page.getByRole("option", { name: "cache.m6g.large" }).click();
       await dialog.getByRole("button", { name: "Provision" }).click();
 

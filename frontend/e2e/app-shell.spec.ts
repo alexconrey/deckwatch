@@ -1,7 +1,7 @@
 import { FIXED_NOW } from "./support/data";
 import { ok } from "./support/mock-api";
 import { expect, test } from "./fixtures";
-import { field } from "./support/ui";
+import { openMenu } from "./support/ui";
 
 test.describe("App shell", () => {
   test.describe("namespace switcher", () => {
@@ -125,7 +125,7 @@ test.describe("App shell", () => {
     await page.getByRole("tab", { name: "Plugins" }).click();
     await page.getByRole("button", { name: "Add Plugin" }).click();
     const dialog = app.dialog("Add Plugin");
-    await field(dialog, "Plugin").click();
+    await openMenu(dialog, "Plugin");
     await page.getByRole("option", { name: "otel" }).click();
     await dialog.getByRole("button", { name: "Associate" }).click();
 

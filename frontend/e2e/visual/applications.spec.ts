@@ -1,6 +1,6 @@
 import type { Page } from "@playwright/test";
 import { eachTheme, expect, test } from "./visual-test";
-import { field } from "../support/ui";
+import { openMenu } from "../support/ui";
 
 /**
  * Applications: list, create wizard, detail tabs and their dialogs.
@@ -38,7 +38,7 @@ eachTheme(() => {
 
   test("create wizard namespace menu", async ({ app, page }) => {
     await app.goto("/applications/create");
-    await field(wizard(page), "Namespace").click();
+    await openMenu(wizard(page), "Namespace");
     await expect(page.getByRole("option", { name: "staging" })).toBeVisible();
     await app.snap("applications/wizard-namespace-menu");
   });
@@ -82,7 +82,7 @@ eachTheme(() => {
     await app.goto("/applications/default/storefront");
     await page.getByRole("tab", { name: "Plugins" }).click();
     await page.getByRole("button", { name: "Add Plugin" }).click();
-    await field(app.dialog("Add Plugin"), "Plugin").click();
+    await openMenu(app.dialog("Add Plugin"), "Plugin");
     await expect(page.getByRole("option", { name: "aws-rds" })).toBeVisible();
     await app.snap("applications/add-plugin-select");
   });
@@ -100,7 +100,7 @@ eachTheme(() => {
     await page.getByRole("button", { name: "Provision" }).click();
     const dialog = app.dialog("Add Redis cache");
     await expect(dialog).toBeVisible();
-    await field(dialog, "Node type").click();
+    await openMenu(dialog, "Node type");
     await expect(page.getByRole("option", { name: "cache.m6g.large" })).toBeVisible();
     await app.snap("applications/provision-select");
   });
