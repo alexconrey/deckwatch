@@ -350,6 +350,33 @@ async fn test_update_deployment_service_account_only_attempts_patch() {
     }
 }
 
+/// Regression: a service_account-only update built its Deployment Api directly
+/// and skipped the namespace allowlist, so it could repoint workloads in any
+/// namespace (e.g. kube-system) at an arbitrary service account.
+#[tokio::test]
+async fn test_update_deployment_service_account_respects_namespace_allowlist() {
+    let mut state = build_test_state().await;
+    state.allowed_namespaces = vec!["team-a".to_string()];
+    let resp = handle_tool_call(
+        &state,
+        &tool_call_req(
+            53,
+            "update_deployment",
+            json!({
+                "namespace": "kube-system",
+                "name": "coredns",
+                "service_account": "attacker-sa"
+            }),
+        ),
+    )
+    .await;
+    let rendered = serde_json::to_string(&resp).expect("serialize response");
+    assert!(
+        rendered.contains("Namespace 'kube-system' is not in the allowed list"),
+        "service_account patch must be refused outside the allowlist: {rendered}"
+    );
+}
+
 #[tokio::test]
 async fn test_update_deployment_service_account_in_schema() {
     let state = build_test_state().await;
