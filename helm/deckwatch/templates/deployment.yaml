@@ -45,8 +45,10 @@ spec:
               value: {{ .Values.namespaces | quote }}
             - name: DECKWATCH_PORT
               value: "8080"
+            {{- with .Values.logFilter }}
             - name: RUST_LOG
-              value: "deckwatch=info,tower_http=info"
+              value: {{ . | quote }}
+            {{- end }}
             - name: POD_NAMESPACE
               valueFrom:
                 fieldRef:
