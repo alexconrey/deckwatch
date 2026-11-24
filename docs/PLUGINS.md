@@ -32,6 +32,7 @@ Deckwatch supports external plugins — compiled WASM binaries hosted in Git rep
 | Env var injection | Shipped | Static values, `secretKeyRef`, `configMapKeyRef` |
 | Sidecar injection | Shipped | |
 | Kubernetes resource creation | Shipped | CRDs, ExternalSecrets, CronJobs, etc. via server-side apply |
+| Kubernetes object deletion on deprovision | Shipped (SDK v0.10.0) | `deprovision()` returns `delete_kubernetes_resources`; deckwatch deletes ServiceAccounts and Jobs in the application's namespace. See [Deleting Kubernetes objects on deprovision](#deleting-kubernetes-objects-on-deprovision) |
 | ServiceAccount binding | Shipped (SDK v0.3.0) | Plugin declares `service_account_name`; deckwatch sets it on the pod template |
 | Plugin dependency resolution | Shipped (SDK v0.4.0) | `metadata()` export, `provides`/`depends_on`, topological sort, output threading |
 | Plugin networking (`allowed_hosts`) | Shipped | Controls which URLs the plugin can reach via extism HTTP host function |
@@ -120,6 +121,29 @@ Plugins are configured as part of `DeckwatchSettings`, stored in the deckwatch d
   ]
 }
 ```
+
+### Config field types
+
+A plugin declares its settings in `metadata().config_schema`, and the plugin
+settings page renders one control per field. Every value is stored as a string.
+
+| `field_type` | Control | Stored value |
+|---|---|---|
+| `string` | Text input | As entered |
+| `secret` | Masked input | Encrypted at rest |
+| `bool` | Switch | `"true"` or `"false"` |
+| `key_value` | Text input of the JSON value (a row-per-pair editor is planned) | JSON object of string keys to string values, e.g. `{"Team":"platform"}`; empty means no pairs |
+| `select` | Dropdown of `options` | The chosen option |
+| anything else | Text input | As entered |
+
+- **`key_value` values are validated on save**, both in the UI and in MCP
+  `update_plugin_config`. Anything but an object of strings is rejected with a
+  400 or an error, and nothing in that save is written. Over MCP you can pass the
+  object itself (`{"RESOURCE_TAGS": {"Team": "platform"}}`) or its JSON string.
+- **An unrecognised `field_type`**, from a plugin built against a newer SDK, is
+  treated as plain text instead of failing the whole `metadata()` parse. Before
+  this, one unknown type made deckwatch drop every config field and resource
+  the plugin declares.
 
 ### Source types
 
@@ -230,6 +254,34 @@ Deckwatch records what each plugin injected using deployment-level annotations. 
 | `deckwatch.plugin-sidecar/<plugin-name>` | `mesh-agent,log-shipper` | Comma-separated sidecar names injected by this plugin |
 
 These annotations are how deckwatch knows what to clean up if a plugin is disabled and the deployment is next updated.
+
+---
+
+## Deleting Kubernetes objects on deprovision
+
+A plugin can't delete Kubernetes objects itself. When a provisioned resource is removed, deckwatch calls the plugin's `deprovision()` export, and the plugin can list objects for deckwatch to delete in `delete_kubernetes_resources` (SDK v0.10.0):
+
+```json
+{
+  "errors": [],
+  "message": "Deleted IAM role team-shop-rds",
+  "delete_kubernetes_resources": [
+    { "api_version": "batch/v1", "kind": "Job", "name": "shop-db-bootstrap-1a2b3c4d" },
+    { "api_version": "v1", "kind": "ServiceAccount", "name": "shop-db-bootstrap" }
+  ]
+}
+```
+
+Deckwatch deletes them after `deprovision()` returns, whether the resource was removed through the API or the MCP `deprovision_resource` tool:
+
+- Only in the application's namespace. An entry has no namespace field; a `namespace` key is ignored.
+- Only `v1` `ServiceAccount` and `batch/v1` `Job`. Other kinds, and invalid object names, are refused.
+- Jobs first, with background propagation so their pods are deleted too; then ServiceAccounts.
+- A ServiceAccount that a Deployment, CronJob or Job in the namespace still uses is kept, because deleting it would stop new pods from being created. The namespace's `default` ServiceAccount is never deleted.
+- An object that's already gone counts as deleted.
+- Every object gets an audit entry (action `delete`, outcome in the detail). Refusals and failures are also logged as warnings and counted in `deckwatch_plugin_errors_total` (`k8s_delete_refused`, `k8s_delete_failed`). None of them stops the resource record from being removed.
+
+The MCP tool's response reports each object's outcome in `kubernetes_resource_deletions`.
 
 ---
 

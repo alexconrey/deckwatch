@@ -669,6 +669,7 @@ fn pod_summary_conditions_mapped() {
                 message: Some("all good".to_string()),
                 last_probe_time: None,
                 last_transition_time: None,
+                observed_generation: None,
             }]),
             ..Default::default()
         }),
@@ -1110,6 +1111,7 @@ fn pod_summary_multiple_conditions() {
                     message: None,
                     last_probe_time: None,
                     last_transition_time: None,
+                    observed_generation: None,
                 },
                 PodCondition {
                     type_: "Ready".to_string(),
@@ -1118,6 +1120,7 @@ fn pod_summary_multiple_conditions() {
                     message: Some("container app is not ready".to_string()),
                     last_probe_time: None,
                     last_transition_time: None,
+                    observed_generation: None,
                 },
                 PodCondition {
                     type_: "PodScheduled".to_string(),
@@ -1126,6 +1129,7 @@ fn pod_summary_multiple_conditions() {
                     message: None,
                     last_probe_time: None,
                     last_transition_time: None,
+                    observed_generation: None,
                 },
             ]),
             container_statuses: Some(vec![container_status(

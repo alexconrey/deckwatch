@@ -242,8 +242,57 @@ pub enum ConfigFieldType {
     Secret,
     /// Checkbox. Stored as `"true"` or `"false"`.
     Bool,
+    /// Key/value pairs, edited as one row per pair (e.g. resource tags). Stored
+    /// as a JSON object of string keys to string values, e.g.
+    /// `{"Team":"platform"}`; empty means no pairs. Validated on save by
+    /// [`validate_key_value_field`].
+    KeyValue,
     /// Dropdown. The field must have a non-empty `options` list.
     Select,
+    /// A field type this deckwatch doesn't know (from a newer plugin SDK).
+    ///
+    /// Without this fallback, one unrecognised `field_type` fails the whole
+    /// `metadata()` parse, and the plugin silently loses every config field and
+    /// resource it declares. Rendered as a plain text input. serde requires
+    /// `#[serde(other)]` on the last variant.
+    #[serde(other)]
+    Unknown,
+}
+
+/// Validate every `key_value` field among `updates` against `schema`. Returns
+/// the first error, prefixed with the field key. Keys not in the schema, or of
+/// other types, are not checked here.
+pub fn validate_key_value_updates<'a>(
+    schema: &[ConfigField],
+    updates: impl IntoIterator<Item = (&'a String, &'a String)>,
+) -> Result<(), String> {
+    for (key, value) in updates {
+        let is_key_value = schema
+            .iter()
+            .any(|f| f.key == *key && f.field_type == ConfigFieldType::KeyValue);
+        if is_key_value {
+            validate_key_value_field(value).map_err(|e| format!("{key}: {e}"))?;
+        }
+    }
+    Ok(())
+}
+
+/// Check the stored value of a [`ConfigFieldType::KeyValue`] field: a JSON
+/// object of string keys to string values, or empty for no pairs. Mirrors
+/// `deckwatch_plugin_sdk::parse_key_value_field`, which plugins use to read it.
+pub fn validate_key_value_field(raw: &str) -> Result<(), String> {
+    if raw.trim().is_empty() {
+        return Ok(());
+    }
+    let value: serde_json::Value =
+        serde_json::from_str(raw).map_err(|e| format!("not a JSON object: {e}"))?;
+    let object = value
+        .as_object()
+        .ok_or("expected a JSON object of string keys to string values")?;
+    match object.iter().find(|(_, v)| !v.is_string()) {
+        Some((k, v)) => Err(format!("value for {k:?} must be a string, got {v}")),
+        None => Ok(()),
+    }
 }
 
 /// A single field in a plugin's self-declared configuration schema.
@@ -431,6 +480,30 @@ pub struct ResourceDeprovisionResult {
     pub errors: Vec<String>,
     #[serde(default)]
     pub message: String,
+    /// Kubernetes objects the plugin wants deleted from the application's
+    /// namespace once `deprovision()` returns (SDK v0.10.0). Deckwatch only
+    /// deletes allowed kinds; see
+    /// `handlers::application_resources::delete_requested_objects`.
+    /// Old plugins deserialize to an empty vec.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub delete_kubernetes_resources: Vec<KubernetesObjectRef>,
+}
+
+/// A Kubernetes object named by a plugin. There is no namespace: deckwatch
+/// only ever acts in the application's namespace, and ignores a `namespace`
+/// key if a plugin sends one.
+///
+/// Mirrors `deckwatch_plugin_sdk::KubernetesObjectRef` (SDK v0.10.0) — kept in
+/// sync manually. Missing fields default to empty here, so one malformed entry
+/// is refused on its own instead of discarding the plugin's whole result.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KubernetesObjectRef {
+    #[serde(default)]
+    pub api_version: String,
+    #[serde(default)]
+    pub kind: String,
+    #[serde(default)]
+    pub name: String,
 }
 
 /// A fetched plugin ready to execute. Stores raw WASM bytes and instantiates
@@ -532,10 +605,7 @@ pub async fn fetch_and_validate(
     state: &AppState,
 ) -> ValidationResult {
     let settings = crate::handlers::settings::load_settings_from_db(state).await;
-    let http = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(30))
-        .build()
-        .unwrap_or_default();
+    let http = crate::outbound::global().client(crate::outbound::Purpose::PluginDownload);
 
     let start = std::time::Instant::now();
 
@@ -675,10 +745,7 @@ fn load_metadata_from_bytes(
 /// Fetch and load all enabled plugins from their configured sources.
 /// Per-plugin errors are logged and skipped; a broken plugin never blocks startup.
 pub async fn fetch_plugins(settings: &DeckwatchSettings, state: &AppState) -> Vec<LoadedPlugin> {
-    let http = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(30))
-        .build()
-        .unwrap_or_default();
+    let http = crate::outbound::global().client(crate::outbound::Purpose::PluginDownload);
 
     let mut loaded = Vec::new();
     for cfg in &settings.plugins {
@@ -757,16 +824,31 @@ async fn fetch_bytes(
             .map_err(|e| anyhow::anyhow!("failed to read uploaded plugin {filename}: {e}"));
     }
 
-    let url = resolve_url(&cfg.source);
+    let endpoints = settings.endpoints.clone().unwrap_or_default();
+    let policy = crate::outbound::global().policy();
+    let (url, github_endpoint) = resolve_url(&cfg.source, &endpoints, &policy)?;
     let mut builder = http.get(&url);
 
     if let Some(token_secret_name) = &cfg.token_secret {
-        if let Some(token) = resolve_git_token(token_secret_name, settings, state).await {
+        if let Some((token, source)) = resolve_git_token(token_secret_name, settings, state).await {
+            // GitHub downloads only carry the token to the GitHub host it
+            // was saved for. `url` sources are operator-chosen hosts and
+            // keep their existing behaviour.
+            if let Some(endpoint) = &github_endpoint {
+                crate::outbound::authorize(
+                    &format!("git token '{token_secret_name}'"),
+                    &source,
+                    endpoint,
+                )?;
+            }
             builder = builder.bearer_auth(token);
         }
     }
 
-    let resp = builder.send().await?;
+    let resp = builder
+        .send()
+        .await
+        .map_err(|e| anyhow::anyhow!("{}", crate::outbound::error_chain(&e)))?;
     let status = resp.status();
     if !status.is_success() {
         return Err(anyhow::anyhow!("HTTP {status} fetching plugin from {url}"));
@@ -801,7 +883,15 @@ async fn fetch_bytes(
     Ok(bytes)
 }
 
-fn resolve_url(source: &PluginSource) -> String {
+/// Download URL for a plugin source, plus the GitHub endpoint it points at
+/// (for token binding) when the source is a GitHub repository. GitHub
+/// sources use the configured GitHub web base (releases) or raw base.
+fn resolve_url(
+    source: &PluginSource,
+    endpoints: &crate::outbound::EndpointSettings,
+    policy: &crate::outbound::EndpointPolicy,
+) -> anyhow::Result<(String, Option<crate::outbound::Endpoint>)> {
+    use crate::outbound::EndpointId;
     match source {
         PluginSource::Github {
             repo,
@@ -809,27 +899,32 @@ fn resolve_url(source: &PluginSource) -> String {
             path,
             use_release,
         } => {
-            if *use_release {
-                format!("https://github.com/{repo}/releases/download/{git_ref}/{path}")
+            let (id, url_path) = if *use_release {
+                (
+                    EndpointId::GithubWeb,
+                    format!("/{repo}/releases/download/{git_ref}/{path}"),
+                )
             } else {
-                format!("https://raw.githubusercontent.com/{repo}/{git_ref}/{path}")
-            }
+                (EndpointId::GithubRaw, format!("/{repo}/{git_ref}/{path}"))
+            };
+            let endpoint = endpoints.resolve(id, policy)?;
+            Ok((endpoint.url(&url_path), Some(endpoint)))
         }
-        PluginSource::Url { url } => url.clone(),
+        PluginSource::Url { url } => Ok((url.clone(), None)),
         // Upload source has no URL — handled in fetch_bytes before this is called.
-        PluginSource::Upload { filename } => {
-            format!("file://{UPLOADS_DIR}/{filename}")
-        }
+        PluginSource::Upload { filename } => Ok((format!("file://{UPLOADS_DIR}/{filename}"), None)),
     }
 }
 
 /// Resolve a git token by display name: tries `encrypted_token` first, then
 /// falls back to reading the `token` key from the referenced k8s secret.
+/// The source says which GitHub hosts the token may be sent to
+/// (`crate::outbound::binding`).
 pub async fn resolve_git_token(
     secret_ref_name: &str,
     settings: &DeckwatchSettings,
     state: &AppState,
-) -> Option<String> {
+) -> Option<(String, crate::outbound::CredentialSource)> {
     let entry = settings
         .git_token_secrets
         .iter()
@@ -837,7 +932,11 @@ pub async fn resolve_git_token(
 
     if let Some(enc) = &entry.encrypted_token {
         if !state.encryption_key.is_empty() {
-            return crate::crypto::decrypt(&state.encryption_key, enc).ok();
+            let token = crate::crypto::decrypt(&state.encryption_key, enc).ok()?;
+            return Some((
+                token,
+                crate::outbound::CredentialSource::Stored(entry.binding.clone()),
+            ));
         }
     }
 
@@ -849,7 +948,11 @@ pub async fn resolve_git_token(
     let secrets_api = state.secrets_api(ns).ok()?;
     let secret = secrets_api.get(&entry.secret_name).await.ok()?;
     let raw = secret.data?.get("token")?.0.clone();
-    String::from_utf8(raw).ok()
+    let token = String::from_utf8(raw).ok()?;
+    Some((
+        token,
+        crate::outbound::CredentialSource::KubernetesSecret(entry.secret_name.clone()),
+    ))
 }
 
 // ── Dependency resolution ─────────────────────────────────────────────────────
@@ -1912,6 +2015,104 @@ mod tests {
             serde_json::to_string(&ConfigFieldType::Bool).unwrap(),
             "\"bool\""
         );
+    }
+
+    #[test]
+    fn key_value_and_unknown_field_types_round_trip() {
+        assert_eq!(
+            serde_json::to_string(&ConfigFieldType::KeyValue).unwrap(),
+            "\"key_value\""
+        );
+        let kv: ConfigFieldType = serde_json::from_str("\"key_value\"").unwrap();
+        assert_eq!(kv, ConfigFieldType::KeyValue);
+        let future: ConfigFieldType = serde_json::from_str("\"color_picker\"").unwrap();
+        assert_eq!(future, ConfigFieldType::Unknown);
+    }
+
+    // Regression guard: an unrecognised field_type used to fail the whole
+    // metadata() parse, so the plugin silently lost every config field and
+    // resource it declares.
+    #[test]
+    fn metadata_with_a_future_field_type_still_parses() {
+        let meta: PluginMetadata = serde_json::from_str(
+            r#"{"name":"aws","config_schema":[
+                {"key":"AWS_REGION","label":"Region","field_type":"string"},
+                {"key":"RESOURCE_TAGS","label":"Tags","field_type":"key_value"},
+                {"key":"FUTURE","label":"Future","field_type":"some_future_type"}
+            ]}"#,
+        )
+        .expect("metadata must parse despite an unknown field type");
+        let types: Vec<_> = meta
+            .config_schema
+            .iter()
+            .map(|f| f.field_type.clone())
+            .collect();
+        assert_eq!(
+            types,
+            vec![
+                ConfigFieldType::String,
+                ConfigFieldType::KeyValue,
+                ConfigFieldType::Unknown
+            ]
+        );
+    }
+
+    #[test]
+    fn validate_key_value_updates_checks_only_key_value_fields() {
+        let field = |key: &str, field_type| ConfigField {
+            key: key.to_string(),
+            label: key.to_string(),
+            description: String::new(),
+            field_type,
+            default: None,
+            required: false,
+            options: vec![],
+            env_source: None,
+        };
+        let schema = vec![
+            field("RESOURCE_TAGS", ConfigFieldType::KeyValue),
+            field("NOTE", ConfigFieldType::String),
+        ];
+        let good: std::collections::HashMap<String, String> = [
+            (
+                "RESOURCE_TAGS".to_string(),
+                r#"{"Team":"platform"}"#.to_string(),
+            ),
+            (
+                "NOTE".to_string(),
+                "Team=platform is fine in a string field".to_string(),
+            ),
+            ("UNDECLARED".to_string(), "{not json".to_string()),
+        ]
+        .into();
+        assert!(validate_key_value_updates(&schema, &good).is_ok());
+
+        let bad: std::collections::HashMap<String, String> =
+            [("RESOURCE_TAGS".to_string(), "Team=platform".to_string())].into();
+        let err = validate_key_value_updates(&schema, &bad).unwrap_err();
+        assert!(err.starts_with("RESOURCE_TAGS: "), "{err}");
+    }
+
+    #[test]
+    fn validate_key_value_field_accepts_objects_of_strings_and_empty() {
+        for ok in ["", "  ", "{}", r#"{"Team":"platform","CostCenter":"1234"}"#] {
+            assert!(
+                validate_key_value_field(ok).is_ok(),
+                "{ok:?} should be accepted"
+            );
+        }
+        for bad in [
+            "Team=platform",
+            r#"["Team"]"#,
+            r#"{"Count":3}"#,
+            r#"{"Nested":{"a":"b"}}"#,
+            "{oops",
+        ] {
+            assert!(
+                validate_key_value_field(bad).is_err(),
+                "{bad:?} should be rejected"
+            );
+        }
     }
 
     fn make_plugin(name: &str, provides: Vec<&str>, depends_on: Vec<&str>) -> LoadedPlugin {

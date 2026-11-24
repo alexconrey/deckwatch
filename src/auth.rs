@@ -238,7 +238,10 @@ async fn get_or_refresh_key(config: &AuthConfig, kid: &str) -> Result<Jwk, Strin
         }
     }
 
-    let jwks: Jwks = reqwest::get(config.jwks_url())
+    let jwks: Jwks = crate::outbound::global()
+        .client(crate::outbound::Purpose::Identity)
+        .get(config.jwks_url())
+        .send()
         .await
         .map_err(|e| format!("jwks fetch failed: {e}"))?
         .error_for_status()

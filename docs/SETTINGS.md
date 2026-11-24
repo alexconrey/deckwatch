@@ -66,10 +66,24 @@ JSON payload when unset.
 
 ## API surface
 
-| Method | Path            | Purpose                                                                  |
-|--------|-----------------|--------------------------------------------------------------------------|
-| `GET`  | `/api/settings` | Returns the parsed settings from the database. Returns defaults if empty |
-| `PUT`  | `/api/settings` | Writes the full settings body to the database                            |
+| Method | Path                         | Purpose                                                                  |
+|--------|------------------------------|--------------------------------------------------------------------------|
+| `GET`  | `/api/settings`              | Returns the parsed settings from the database. Returns defaults if empty |
+| `PUT`  | `/api/settings`              | Writes the full settings body to the database                            |
+| `POST` | `/api/settings/credentials`  | Encrypts and stores AI provider keys, bound to the current endpoints     |
+| `GET`  | `/api/settings/outbound`     | Endpoint defaults, credential bindings, extra CA and endpoint policy     |
+
+## Endpoints and outbound TLS
+
+The AI provider and GitHub endpoints (Anthropic API, Vertex AI token URL and
+API host, Bedrock, GitHub API / web / raw, for GitHub Enterprise) are
+settings under `endpoints`, with the public endpoints as defaults. Values are
+validated (`https://` only, no userinfo), every change is audit-logged, and a
+stored credential is only sent to the host it was saved for: after changing
+an endpoint, re-enter the credential. Extra trusted CAs come from
+`DECKWATCH_EXTRA_CA_FILE` (Helm: `outbound.extraCaBundle`). See
+[TLS.md](TLS.md) for the full rules, the trust behaviour and what changes
+with the move to rustls.
 
 ## Key behaviors
 

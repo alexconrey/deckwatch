@@ -28,9 +28,11 @@
 use std::sync::Arc;
 
 use bytes::Bytes;
-use object_store::aws::{AmazonS3, AmazonS3Builder};
+use object_store::aws::AmazonS3;
 use object_store::path::Path as OPath;
-use object_store::{ObjectStore, PutPayload};
+// object_store 0.13 moved head/get/put/delete/copy to `ObjectStoreExt`;
+// `list_with_delimiter` is still on `ObjectStore`.
+use object_store::{ObjectStore, ObjectStoreExt, PutPayload};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -82,9 +84,13 @@ impl S3Backend {
         // empty; `key_for` handles both cases.
         let prefix = cfg.prefix.trim_matches('/').to_string();
 
-        let mut builder = AmazonS3Builder::from_env()
-            .with_bucket_name(&cfg.bucket)
-            .with_region(&cfg.region);
+        // Same as AmazonS3Builder::from_env(), plus deckwatch's extra
+        // trusted CAs (DECKWATCH_EXTRA_CA_FILE) for on-prem S3 endpoints.
+        let mut builder = crate::outbound::amazon_s3_builder_from_env(
+            crate::outbound::global().object_store_client_options(),
+        )
+        .with_bucket_name(&cfg.bucket)
+        .with_region(&cfg.region);
 
         if !cfg.endpoint.is_empty() {
             builder = builder.with_endpoint(&cfg.endpoint);
@@ -160,7 +166,7 @@ impl S3Backend {
             return Ok(None);
         };
         match self.store.head(&key).await {
-            Ok(meta) => Ok(Some(meta.size as u64)),
+            Ok(meta) => Ok(Some(meta.size)),
             Err(object_store::Error::NotFound { .. }) => Ok(None),
             Err(e) => Err(std::io::Error::other(e)),
         }
@@ -401,7 +407,7 @@ impl S3Backend {
     /// PATCH responses and by upload-status GET.
     pub async fn upload_length(&self, uuid: &str) -> std::io::Result<Option<u64>> {
         match self.store.head(&self.upload_key(uuid)).await {
-            Ok(meta) => Ok(Some(meta.size as u64)),
+            Ok(meta) => Ok(Some(meta.size)),
             Err(object_store::Error::NotFound { .. }) => Ok(None),
             Err(e) => Err(io_from_object_store(e)),
         }
@@ -591,7 +597,7 @@ fn strip_prefix(child: &OPath, base: &OPath) -> Option<String> {
 // ============================================================
 //
 // [dependencies]
-// object_store = { version = "0.11", features = ["aws"] }
+// object_store = { version = "0.14", features = ["aws"] }
 // bytes = "1"
 // async-trait = "0.1"
 //

@@ -594,6 +594,9 @@ export interface NotificationSettings {
 export interface EncryptedCredentials {
   anthropic_api_key: string | null;
   gcp_sa_key: string | null;
+  /** Endpoint origins recorded when the key was saved (server-managed). */
+  anthropic_api_key_binding?: EndpointBinding | null;
+  gcp_sa_key_binding?: EndpointBinding | null;
 }
 
 export interface SetCredentialsRequest {
@@ -604,6 +607,80 @@ export interface SetCredentialsRequest {
 export interface SetCredentialsResponse {
   anthropic_api_key: string | null;
   gcp_sa_key: string | null;
+  anthropic_api_key_binding?: EndpointBinding;
+  gcp_sa_key_binding?: EndpointBinding;
+}
+
+// --- Outbound endpoints and credential bindings ---
+
+/** Upstream endpoints operators can override (src/outbound/endpoints.rs). */
+export type EndpointId =
+  | "anthropic_api"
+  | "vertex_token"
+  | "vertex_api"
+  | "bedrock"
+  | "github_api"
+  | "github_web"
+  | "github_raw";
+
+/**
+ * Endpoint overrides stored in settings. Empty string = the default
+ * (GET /api/settings/outbound lists the defaults). `{region}` may appear in
+ * the host of `vertex_api_base` and `bedrock_endpoint`.
+ */
+export interface EndpointSettings {
+  anthropic_api_base: string;
+  vertex_token_url: string;
+  vertex_api_base: string;
+  bedrock_endpoint: string;
+  github_api_base: string;
+  github_web_base: string;
+  github_raw_base: string;
+}
+
+/** Origins (`scheme://host[:port]`) a stored credential may be sent to. */
+export type EndpointBinding = Partial<Record<EndpointId, string>>;
+
+/** GET /api/settings/outbound */
+export interface OutboundStatus {
+  /** DECKWATCH_ALLOW_INSECURE_ENDPOINTS: http:// accepted for any host. */
+  allow_insecure_endpoints: boolean;
+  /** DECKWATCH_EXTRA_CA_FILE, when set. */
+  extra_ca: { file: string; certificates: number } | null;
+  endpoints: EndpointStatus[];
+  credentials: CredentialStatus[];
+}
+
+export interface EndpointStatus {
+  id: EndpointId;
+  /** Field name in EndpointSettings. */
+  setting: keyof EndpointSettings;
+  label: string;
+  default: string;
+  /** Configured override ("" = default). */
+  value: string;
+  /** Effective base URL ({region} left in place). */
+  effective: string;
+  /** host[:port] credentials are sent to (full origin when not https). */
+  host: string;
+  /** Set when the stored value is invalid under the current policy. */
+  error: string | null;
+}
+
+export interface CredentialStatus {
+  /** "anthropic_api_key", "gcp_sa_key" or "git_token:<name>". */
+  credential: string;
+  label: string;
+  bindings: BindingStatus[];
+  /** Every bound host matches the configured endpoint. */
+  usable: boolean;
+}
+
+export interface BindingStatus {
+  endpoint: EndpointId;
+  bound_host: string;
+  configured_host: string;
+  matches: boolean;
 }
 
 export type PluginSourceType = "github" | "url";
@@ -670,6 +747,8 @@ export interface DeckwatchSettings {
   plugins?: PluginConfig[];
   mcp_tuning?: McpTuning;
   marketplace_url?: string;
+  /** Always present on GET; omit on PUT to keep the stored endpoints. */
+  endpoints?: EndpointSettings;
 }
 
 // --- Agent Feedback types ---
@@ -808,6 +887,10 @@ export interface GitTokenSecret {
   name: string;
   secret_name: string;
   namespace: string;
+  /** "configured" when a token is stored (the value is never returned). */
+  encrypted_token?: string | null;
+  /** GitHub endpoint origins the stored token is bound to (server-managed). */
+  binding?: EndpointBinding | null;
 }
 
 export interface GitTokenSecretRequest {
@@ -998,7 +1081,9 @@ export interface TemplatesUpdateRequest {
 
 // --- Plugin schema types (Feature 1: self-describing plugin config) ---
 
-export type ConfigFieldType = 'string' | 'secret' | 'bool' | 'select';
+/** `key_value` has no dedicated editor yet (see TODO.md) and falls back to a
+ *  text input of its JSON value, as `unknown` (a newer plugin SDK type) does. */
+export type ConfigFieldType = 'string' | 'secret' | 'bool' | 'key_value' | 'select' | 'unknown';
 
 export interface ConfigField {
   key: string;

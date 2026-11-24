@@ -4,15 +4,29 @@ version = "0.6.7"
 edition = "2021"
 publish = false
 
+# The server is a library plus a thin binary (src/main.rs calls
+# deckwatch::run) so integration tests in tests/ can call real code paths.
+[lib]
+path = "src/lib.rs"
+# Doc comments are prose, not examples.
+doctest = false
+
 [dependencies]
 axum = { version = "0.8", features = ["ws"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "fs", "sync", "time"] }
 tower = "0.5"
 tower-http = { version = "0.7", features = ["fs", "compression-gzip", "trace"] }
 
-kube = { version = "4", features = ["ws"] }
-k8s-openapi = { version = "0.28", features = ["v1_32"] }
-mcp-k8s = { git = "https://github.com/alexconrey/mcp-k8s.git", branch = "main" }
+kube = { version = "5", features = ["ws"] }
+# deckwatch is the binary, so it picks the Kubernetes API version (k8s-openapi
+# allows exactly one `v1_*` feature per build; libraries such as mcp-k8s don't
+# set one). v1_33 is the oldest k8s-openapi 0.29 offers, so deckwatch supports
+# Kubernetes >= 1.33 (Zeus runs 1.35). Raising it raises that floor.
+k8s-openapi = { version = "0.29", features = ["v1_33"] }
+# default-features = false: deckwatch only uses the mcp_k8s library, not the
+# standalone server binary (and its utoipa-swagger-ui / zip build dependencies).
+# kube and k8s-openapi must match mcp-k8s's: deckwatch passes its kube::Client in.
+mcp-k8s = { git = "https://github.com/alexconrey/mcp-k8s.git", tag = "v0.5.0", default-features = false }
 rustls = { version = "0.23", features = ["ring"] }
 
 serde = { version = "1", features = ["derive"] }
@@ -43,11 +57,14 @@ async-trait = "0.1"
 
 # Cloud-agnostic object storage trait — S3 backend for the embedded OCI
 # registry. See docs/S3_REGISTRY.md for the rationale; the `aws` feature
-# pulls in the standard AWS credential chain (env, IMDS, IRSA).
-object_store = { version = "0.11", features = ["aws"] }
+# pulls in the standard AWS credential chain (env, IMDS, IRSA, EKS Pod
+# Identity), reqwest 0.13 over rustls (system trust store; TLS uses the ring
+# provider installed in main()) and aws-lc-rs for SigV4 signing (aws-lc-rs
+# is already compiled in via rustls' default features).
+object_store = { version = "0.14", features = ["aws"] }
 bytes = "1"
 ed25519-dalek = { version = "3", features = ["rand_core"] }
-rcgen = "0.13"
+rcgen = "0.14"
 time = "0.3"
 
 # Database layer — SeaORM supports SQLite / PostgreSQL / MySQL from a single
@@ -64,3 +81,13 @@ extism = "1.41"
 
 [dev-dependencies]
 tempfile = "3"
+# TLS mock upstreams in tests/outbound_tls.rs. Already in the lockfile via
+# kube and reqwest 0.13.
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
+# RSA key generation for the Vertex AI service-account test (ring cannot
+# generate RSA keys). Already compiled in through rustls' default features;
+# no default features so no new crates enter the lockfile.
+aws-lc-rs = { version = "1", default-features = false, features = ["aws-lc-sys", "alloc"] }
+# Parses the webhook CA/serving certs in webhook_tls tests. Already in the
+# lockfile via rcgen's optional x509-parser dependency.
+x509-parser = { version = "0.18", features = ["verify"] }

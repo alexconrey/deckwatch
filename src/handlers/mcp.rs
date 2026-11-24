@@ -702,8 +702,14 @@ fn deckwatch_tool_definitions() -> Vec<serde_json::Value> {
                     "name": { "type": "string", "description": "Plugin name as configured in settings" },
                     "config": {
                         "type": "object",
-                        "description": "Static key-value pairs injected into the plugin's extism config (credentials, endpoints, etc.). Merges with existing config — use null values to remove keys.",
-                        "additionalProperties": { "type": "string" }
+                        "description": "Static key-value pairs injected into the plugin's extism config (credentials, endpoints, etc.). Merges with existing config — use null values to remove keys. Values are strings; for key_value fields (see the plugin's config schema) pass either a JSON object of string values, e.g. {\"Team\": \"platform\"}, or that object as a JSON string.",
+                        "additionalProperties": {
+                            "anyOf": [
+                                { "type": "string" },
+                                { "type": "object", "additionalProperties": { "type": "string" } },
+                                { "type": "null" }
+                            ]
+                        }
                     },
                     "inherit_env_keys": {
                         "type": "array",
@@ -794,6 +800,7 @@ fn deckwatch_tool_definitions() -> Vec<serde_json::Value> {
             "name": "deprovision_resource",
             "description": "Deprovision (tear down) a plugin-managed infrastructure resource from an application. \
         WARNING: This calls the plugin's deprovision() function, which tears down the underlying cloud infrastructure (e.g. deletes an RDS instance or S3 bucket) and removes the injected env vars from all application deployments. \
+        Deckwatch also deletes the Kubernetes objects the plugin asks for (ServiceAccounts and Jobs in the application's namespace only; a ServiceAccount still used by a workload is kept) and reports each one in kubernetes_resource_deletions. \
         This action is destructive and may result in data loss — confirm with the user before proceeding.",
             "inputSchema": {
                 "type": "object",
@@ -1010,6 +1017,15 @@ async fn handle_tool_call(state: &AppState, request: &JsonRpcRequest) -> JsonRpc
             .unwrap_or_else(|| Err(format!("Unknown tool: {tool_name}")))
     };
 
+    // One event per tool call. Never log the arguments or the error text:
+    // they can carry Secret data, env values, manifests and exec commands.
+    tracing::info!(
+        tool = logged_tool_name(tool_name),
+        status = if result.is_ok() { "ok" } else { "error" },
+        duration_ms = u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX),
+        "mcp tool call"
+    );
+
     // Apply prompt-injection sanitization to pod log content before it is
     // embedded in the MCP response and potentially fed into an LLM context.
     // Pod stdout is untrusted input — anyone who can deploy a workload can
@@ -1026,6 +1042,15 @@ async fn handle_tool_call(state: &AppState, request: &JsonRpcRequest) -> JsonRpc
             serde_json::json!({ "content": [{ "type": "text", "text": text }] }),
         ),
         Err(e) => error_response(request, -32000, &e),
+    }
+}
+
+/// The tool name as logged. The client chooses it, so an unknown name is cut
+/// to 128 characters, the longest tool name the MCP spec recommends.
+fn logged_tool_name(name: &str) -> &str {
+    match name.char_indices().nth(128) {
+        Some((end, _)) => &name[..end],
+        None => name,
     }
 }
 
@@ -2096,14 +2121,7 @@ async fn tool_enable_plugin(state: &AppState, args: &serde_json::Value) -> Resul
     let state_clone = state.clone();
     let plugins_cfg = s.plugins.clone();
     tokio::spawn(async move {
-        let git_token_secrets = settings::load_settings_from_db(&state_clone)
-            .await
-            .git_token_secrets;
-        let snap = settings::DeckwatchSettings {
-            plugins: plugins_cfg,
-            git_token_secrets,
-            ..Default::default()
-        };
+        let snap = settings::plugin_fetch_settings(&state_clone, plugins_cfg).await;
         let loaded = crate::plugins::fetch_plugins(&snap, &state_clone).await;
         tracing::info!(count = loaded.len(), "plugins reloaded after enable");
         *state_clone.plugins.write().await = loaded;
@@ -2195,10 +2213,51 @@ async fn tool_update_plugin_config(
     let mut changed = false;
 
     if let Some(config_val) = args.get("config").filter(|v| !v.is_null()) {
-        let updates: std::collections::BTreeMap<String, String> =
-            serde_json::from_value(config_val.clone())
-                .map_err(|e| format!("invalid config: {e}"))?;
-        cfg.config.extend(updates);
+        let entries = config_val
+            .as_object()
+            .ok_or("invalid config: expected an object of key → value")?;
+        let schema: Vec<crate::plugins::ConfigField> = {
+            let loaded = state.plugins.read().await;
+            loaded
+                .iter()
+                .find(|p| p.name == name)
+                .map(|p| p.metadata.config_schema.clone())
+                .unwrap_or_default()
+        };
+        // Resolve every entry before applying any, so a bad value can't leave
+        // the config half-updated. None = remove the key.
+        let mut resolved: Vec<(String, Option<String>)> = Vec::with_capacity(entries.len());
+        for (key, value) in entries {
+            let is_key_value = schema.iter().any(|f| {
+                f.key == *key && f.field_type == crate::plugins::ConfigFieldType::KeyValue
+            });
+            let stored = match value {
+                serde_json::Value::Null => None,
+                serde_json::Value::String(s) => Some(s.clone()),
+                serde_json::Value::Object(_) if is_key_value => Some(value.to_string()),
+                _ if is_key_value => {
+                    return Err(format!(
+                        "invalid config: {key} takes a JSON object of string values"
+                    ))
+                }
+                _ => return Err(format!("invalid config: value for {key} must be a string")),
+            };
+            if let (true, Some(raw)) = (is_key_value, &stored) {
+                crate::plugins::validate_key_value_field(raw)
+                    .map_err(|e| format!("invalid config: {key}: {e}"))?;
+            }
+            resolved.push((key.clone(), stored));
+        }
+        for (key, stored) in resolved {
+            match stored {
+                Some(v) => {
+                    cfg.config.insert(key, v);
+                }
+                None => {
+                    cfg.config.remove(&key);
+                }
+            }
+        }
         changed = true;
     }
 
@@ -2235,14 +2294,7 @@ async fn tool_update_plugin_config(
         let state_clone = state.clone();
         let plugins_cfg = s.plugins.clone();
         tokio::spawn(async move {
-            let git_token_secrets = settings::load_settings_from_db(&state_clone)
-                .await
-                .git_token_secrets;
-            let snap = settings::DeckwatchSettings {
-                plugins: plugins_cfg,
-                git_token_secrets,
-                ..Default::default()
-            };
+            let snap = settings::plugin_fetch_settings(&state_clone, plugins_cfg).await;
             let loaded = crate::plugins::fetch_plugins(&snap, &state_clone).await;
             tracing::info!(count = loaded.len(), "plugins reloaded after config update");
             *state_clone.plugins.write().await = loaded;
@@ -2538,14 +2590,14 @@ async fn tool_deprovision_resource(
         .as_str()
         .ok_or("resource_id is required")?;
 
-    application_resources::deprovision(
-        State(state.clone()),
-        axum::extract::Path((
-            ns.to_string(),
-            app_name.to_string(),
-            plugin_name.to_string(),
-            resource_id.to_string(),
-        )),
+    let deletions = application_resources::deprovision_resource(
+        state,
+        &application_resources::DeprovisionTarget {
+            namespace: ns,
+            application: app_name,
+            plugin: plugin_name,
+            resource_id,
+        },
     )
     .await
     .map_err(|e| format!("{e}"))?;
@@ -2555,7 +2607,8 @@ async fn tool_deprovision_resource(
         "namespace": ns,
         "application_name": app_name,
         "plugin_name": plugin_name,
-        "resource_id": resource_id
+        "resource_id": resource_id,
+        "kubernetes_resource_deletions": deletions,
     })
     .to_string())
 }
