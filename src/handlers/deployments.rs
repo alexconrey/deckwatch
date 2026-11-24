@@ -1212,6 +1212,7 @@ pub async fn remove_container(
         .and_then(|s| s.template.metadata.as_mut())
         .and_then(|m| m.annotations.as_mut())
     {
+        // Drop the marker the removed addon system (#171) left on older Deployments.
         annotations.remove(&format!("deckwatch.addon/{container_name}"));
     }
     let t = K8sTimer::new("deployments", "replace");
