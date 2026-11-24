@@ -2992,6 +2992,7 @@ async fn tool_associate_plugin(
     // Bug 1: idempotency — check if the association already exists before
     // attempting an insert.  Use a case-insensitive comparison so that
     // "AWS" and "aws" are treated as the same plugin (Bug 2).
+    use sea_orm::sea_query::ExprTrait;
     let existing = application_plugins::Entity::find()
         .filter(application_plugins::Column::ApplicationId.eq(&app_id))
         .filter(
@@ -3066,7 +3067,7 @@ async fn tool_disassociate_plugin(
 
     // Bug 2: use case-insensitive comparison so that "AWS" and "aws" match the
     // same stored row regardless of how the name was originally cased.
-
+    use sea_orm::sea_query::ExprTrait;
     let deleted = application_plugins::Entity::delete_many()
         .filter(application_plugins::Column::ApplicationId.eq(&app_id))
         .filter(

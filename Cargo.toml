@@ -52,8 +52,8 @@ time = "0.3"
 
 # Database layer — SeaORM supports SQLite / PostgreSQL / MySQL from a single
 # codebase. runtime-tokio-rustls matches our existing tokio + rustls stack.
-sea-orm = { version = "1", features = ["sqlx-sqlite", "sqlx-postgres", "sqlx-mysql", "runtime-tokio-rustls"] }
-sea-orm-migration = { version = "1" }
+sea-orm = { version = "2", features = ["sqlx-sqlite", "sqlx-postgres", "sqlx-mysql", "runtime-tokio-rustls"] }
+sea-orm-migration = { version = "2" }
 
 # AES-256-GCM for encrypting API keys stored in the database.
 aes-gcm = "0.10"
