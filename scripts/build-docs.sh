@@ -27,7 +27,7 @@ fi
 
 if ! command -v mdbook >/dev/null 2>&1; then
   echo "error: mdbook not found on PATH" >&2
-  echo "install with: cargo install mdbook --version ^0.4" >&2
+  echo "install the mdBook release pinned in the Dockerfile (ARG MDBOOK_VERSION)" >&2
   exit 1
 fi
 
