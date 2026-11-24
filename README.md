@@ -87,12 +87,22 @@ Open [http://localhost:9090](http://localhost:9090).
 
 ### Pull from GHCR
 
+Each release is the image `ghcr.io/alexconrey/deckwatch:<version>` plus the
+chart in `helm/deckwatch` at the same version. From a checkout of the release
+tag (for example `v0.7.0`), the chart's image tag defaults to its
+`appVersion`, so the chart and the image match:
+
 ```bash
 helm install deckwatch helm/deckwatch \
   --namespace deckwatch --create-namespace \
-  --set image.repository=ghcr.io/alexconrey/deckwatch \
-  --set image.tag=0.2.1
+  --set image.repository=ghcr.io/alexconrey/deckwatch
 ```
+
+### Upgrading
+
+Read [CHANGELOG.md](CHANGELOG.md) before you upgrade. Each release lists what
+changed, and its **Upgrade notes** say what you may have to change first: the
+minimum Kubernetes version, Helm values, API behaviour.
 
 ## Configuration
 
