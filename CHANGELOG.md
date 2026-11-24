@@ -320,7 +320,7 @@ first.
 - **Releases:** this changelog. The release workflow refuses a tag that
   doesn't match the versions and a dated section here, before it builds
   anything, and then creates the GitHub Release from that section. CI's
-  Release Check job runs the same check on every PR.
+  Release Check job runs the same check on every PR. (#264)
 
 ## Before 0.7.0
 
