@@ -14,6 +14,8 @@ registry, AI diagnostics, and an MCP server for Claude Code integration.
 ## Architecture
 
 - **Backend**: Rust (Axum + kube-rs + SeaORM)
+- **Kubernetes**: 1.33 or newer (kube 5, k8s-openapi 0.29 with the `v1_33`
+  feature; the Helm chart declares `kubeVersion: ">=1.33.0-0"`)
 - **Frontend**: Vue 3 + Vuetify 3 + TypeScript + Vite + Pinia
 - **Database**: SeaORM with SQLite (default), PostgreSQL, or MySQL
 - **Deployment**: Docker (multi-stage, distroless runtime) + Helm chart
@@ -109,8 +111,13 @@ docs/internal/                    # Local-only docs (gitignored)
 ### Create the k3d cluster (one-time)
 
 ```bash
-k3d cluster create deckwatch --port 8080:80@loadbalancer
+k3d cluster create deckwatch --port 8080:80@loadbalancer \
+  --image rancher/k3s:v1.35.10-k3s1
 ```
+
+Pin the k3s image: deckwatch needs Kubernetes >= 1.33 and Zeus runs 1.35, but
+k3d's default image tracks whatever k3d release is installed (v5.8.3 defaults to
+1.33). Bump the tag when Zeus moves to a new minor version.
 
 After creation, configure the node to allow insecure pulls from the
 internal registry via NodePort:
@@ -222,6 +229,14 @@ builds the multi-arch image automatically.
 
 ### Rust Backend
 - Handlers in `src/handlers/` use: `State(state)`, `Path(...)`, `Json(...)` → `Result<..., AppError>`
+- deckwatch is the binary, so it chooses the k8s-openapi version feature
+  (`v1_33` in `Cargo.toml`); k8s-openapi allows only one per build, and
+  mcp-k8s deliberately sets none. `kube` and `k8s-openapi` must stay on the
+  same versions as mcp-k8s, because deckwatch passes its `kube::Client` into
+  `mcp_k8s::K8sClient::new`. Upgrade them together with an mcp-k8s release
+  (a Dependabot PR that bumps only `kube` can't compile). Raising the feature
+  raises the minimum Kubernetes version: update the chart's `kubeVersion`, the
+  README and the k3d image too.
 - Type extraction from K8s objects lives in `kube_ext.rs` (not handlers)
 - API factory methods on `AppState` — always check namespace allowlist
 - Friendly error mapping in `error.rs` (maps common K8s errors to human text)
@@ -254,6 +269,7 @@ builds the multi-arch image automatically.
 ## Infrastructure
 
 ### Zeus (production)
+- EKS, Kubernetes 1.35
 - ArgoCD Application on mgmt cluster targets Zeus cluster
 - Manifest: `~/git/k2/kore/keystone/src/aws/govcloud/shared-services/clusters/mgmt/apps/deckwatch.yaml`
 - Image: `ghcr.io/alexconrey/deckwatch:<tag>`
@@ -264,6 +280,7 @@ builds the multi-arch image automatically.
 
 ### k3d (local dev)
 - Cluster name: `deckwatch`
+- k3s image pinned to `rancher/k3s:v1.35.10-k3s1` (matches Zeus's 1.35)
 - Port 8080 mapped to loadbalancer
 - Registry: NodePort 30500 → ClusterIP 5000 (see "Registry architecture" above)
 - `registries.yaml` on node maps `localhost:30500` → `http://localhost:30500` (insecure)
