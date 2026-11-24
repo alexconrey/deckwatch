@@ -1,10 +1,10 @@
 #![allow(dead_code, unused_imports)]
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::hash::{Hash, Hasher};
 use std::time::Instant;
 
 use k8s_openapi::api::apps::v1::Deployment;
-use k8s_openapi::api::batch::v1::{Job, JobSpec};
+use k8s_openapi::api::batch::v1::{CronJob, Job, JobSpec};
 use k8s_openapi::api::core::v1::{
     Container, EnvVar, NodeAffinity, NodeSelector, NodeSelectorRequirement, NodeSelectorTerm,
     PodSpec, PodTemplateSpec, Secret,
@@ -62,6 +62,7 @@ pub async fn run_poller(state: AppState) {
     let mut pending_interval = tokio::time::interval(std::time::Duration::from_secs(30));
     let mut gauge_interval = tokio::time::interval(std::time::Duration::from_secs(60));
     let http_client = reqwest::Client::new();
+    let mut plugin_field_sweep = PluginFieldSweep::default();
 
     loop {
         tokio::select! {
@@ -76,7 +77,7 @@ pub async fn run_poller(state: AppState) {
                     tracing::error!(error = %e, "watcher build monitor failed");
                 }
 
-                reconcile_application_plugins(&state).await;
+                reconcile_application_plugins(&state, &mut plugin_field_sweep).await;
 
                 metrics::record_gitops_poll_duration(cycle_start.elapsed().as_secs_f64());
             }
@@ -1664,7 +1665,238 @@ fn volume_spec_to_json(v: &VolumeSpec) -> serde_json::Value {
     }
 }
 
-async fn reconcile_application_plugins(state: &AppState) {
+/// Server-side apply field manager for everything
+/// `reconcile_application_plugins` writes to an application's deployments
+/// and cronjobs: resource annotations and labels, env vars, sidecars, init
+/// containers and their volumes. Releasing those fields has to use the same
+/// manager.
+const PLUGIN_RESOURCES_FIELD_MANAGER: &str = "deckwatch-plugin-resources";
+
+/// Label that makes a deployment or cronjob a member of an application.
+const APP_LABEL: &str = "deckwatch.io/application";
+
+fn plugin_resources_patch_params() -> PatchParams {
+    PatchParams::apply(PLUGIN_RESOURCES_FIELD_MANAGER).force()
+}
+
+/// Key into `AppState::plugin_patch_fingerprints` for a deployment.
+fn deployment_fingerprint_key(ns: &str, name: &str) -> String {
+    format!("{ns}/{name}")
+}
+
+/// Key into `AppState::plugin_patch_fingerprints` for a cronjob.
+fn cronjob_fingerprint_key(ns: &str, name: &str) -> String {
+    format!("cj:{ns}/{name}")
+}
+
+/// The object to server-side apply to give up every field
+/// [`PLUGIN_RESOURCES_FIELD_MANAGER`] owns on a workload.
+///
+/// It carries nothing but identity fields, which the API server doesn't
+/// track as owned. Every field the manager owned is therefore missing from
+/// the new apply, so the API server removes the ones no other manager owns
+/// (a field another manager also owns stays) and drops the manager's
+/// `managedFields` entry.
+fn release_patch(api_version: &str, kind: &str, ns: &str, name: &str) -> serde_json::Value {
+    serde_json::json!({
+        "apiVersion": api_version,
+        "kind": kind,
+        "metadata": {
+            "name": name,
+            "namespace": ns,
+        },
+    })
+}
+
+/// Whether [`PLUGIN_RESOURCES_FIELD_MANAGER`] has applied fields to this
+/// object that it hasn't released.
+fn owns_plugin_resource_fields(meta: &ObjectMeta) -> bool {
+    meta.managed_fields.iter().flatten().any(|entry| {
+        entry.manager.as_deref() == Some(PLUGIN_RESOURCES_FIELD_MANAGER)
+            && entry.operation.as_deref() == Some("Apply")
+    })
+}
+
+/// The namespace and name of a workload whose plugin resource fields should
+/// be released: the field manager still owns fields on it, but the workload
+/// no longer belongs to an application with provisioned resources. Either
+/// the application's last resource was removed, or the workload lost its
+/// application label (removed from the application, or the application was
+/// deleted, which also deletes its resources).
+fn stale_plugin_workload<'a>(
+    meta: &'a ObjectMeta,
+    apps_with_resources: &BTreeSet<String>,
+) -> Option<(&'a str, &'a str)> {
+    let ns = meta.namespace.as_deref()?;
+    let name = meta.name.as_deref()?;
+    if !owns_plugin_resource_fields(meta) {
+        return None;
+    }
+    let app_has_resources = meta
+        .labels
+        .as_ref()
+        .and_then(|labels| labels.get(APP_LABEL))
+        .is_some_and(|app| apps_with_resources.contains(&format!("{ns}/{app}")));
+    (!app_has_resources).then_some((ns, name))
+}
+
+/// Cross-cycle state for releasing the fields `reconcile_application_plugins`
+/// applied to workloads whose application has no provisioned resources left.
+///
+/// The reconciler only patches workloads of applications that still have
+/// resources, so nothing re-applies once an application's last resource is
+/// gone: the fields have to be released explicitly. Finding those workloads
+/// takes a LIST of every deployment and cronjob, so the reconciler only
+/// sweeps when something could have gone stale (see [`Self::needed`]).
+#[derive(Debug, Default)]
+pub(crate) struct PluginFieldSweep {
+    /// Applications that had provisioned resources in the previous cycle;
+    /// `None` until the first cycle.
+    apps_with_resources: Option<BTreeSet<String>>,
+    /// The previous sweep hit an API error, so sweep again.
+    retry: bool,
+}
+
+impl PluginFieldSweep {
+    /// Sweep on the first cycle after startup (catches removals that
+    /// happened while deckwatch was down, and fields older versions left
+    /// behind), whenever an application has lost all of its resources since
+    /// the previous cycle, and after a sweep that failed part-way.
+    fn needed(&self, apps_with_resources: &BTreeSet<String>) -> bool {
+        self.retry
+            || self
+                .apps_with_resources
+                .as_ref()
+                .is_none_or(|previous| !previous.is_subset(apps_with_resources))
+    }
+}
+
+/// Release everything [`PLUGIN_RESOURCES_FIELD_MANAGER`] still owns on
+/// deployments and cronjobs that no longer belong to an application with
+/// provisioned resources (see [`stale_plugin_workload`]).
+///
+/// The decision is made from the API server's `managedFields`, never from
+/// the patch fingerprint cache: a cached "unchanged" fingerprint says
+/// nothing about whether the fields are still there. After a release the
+/// workload's fingerprint is dropped, so if the application provisions
+/// resources again the first patch is sent even if it is byte-for-byte the
+/// one sent before.
+///
+/// Returns `false` if any list or patch failed, so the caller sweeps again
+/// next cycle.
+async fn release_stale_plugin_fields(
+    state: &AppState,
+    apps_with_resources: &BTreeSet<String>,
+) -> bool {
+    let scopes: Vec<Option<&str>> = if state.allowed_namespaces.is_empty() {
+        vec![None]
+    } else {
+        state
+            .allowed_namespaces
+            .iter()
+            .map(|ns| Some(ns.as_str()))
+            .collect()
+    };
+
+    let mut released_all = true;
+    for scope in scopes {
+        released_all &= release_stale_workloads::<Deployment>(
+            state,
+            scope,
+            apps_with_resources,
+            deployment_fingerprint_key,
+        )
+        .await;
+        released_all &= release_stale_workloads::<CronJob>(
+            state,
+            scope,
+            apps_with_resources,
+            cronjob_fingerprint_key,
+        )
+        .await;
+    }
+    released_all
+}
+
+/// [`release_stale_plugin_fields`] for one workload kind in one namespace
+/// (or in every namespace, when `scope` is `None`).
+async fn release_stale_workloads<K>(
+    state: &AppState,
+    scope: Option<&str>,
+    apps_with_resources: &BTreeSet<String>,
+    fingerprint_key: fn(&str, &str) -> String,
+) -> bool
+where
+    K: kube::Resource<Scope = k8s_openapi::NamespaceResourceScope, DynamicType = ()>
+        + Clone
+        + serde::de::DeserializeOwned
+        + std::fmt::Debug,
+{
+    let kind = K::kind(&());
+    let api_version = K::api_version(&());
+
+    let list_api: Api<K> = match scope {
+        Some(ns) => Api::namespaced(state.kube_client.clone(), ns),
+        None => Api::all(state.kube_client.clone()),
+    };
+    let workloads = match list_api.list_metadata(&ListParams::default()).await {
+        Ok(list) => list.items,
+        Err(e) => {
+            tracing::warn!(
+                kind = %kind,
+                namespace = scope.unwrap_or("*"),
+                error = %e,
+                "reconcile_application_plugins: failed to list workloads to release plugin resource fields"
+            );
+            return false;
+        }
+    };
+
+    let mut released_all = true;
+    for workload in &workloads {
+        let Some((ns, name)) = stale_plugin_workload(&workload.metadata, apps_with_resources)
+        else {
+            continue;
+        };
+        let api: Api<K> = Api::namespaced(state.kube_client.clone(), ns);
+        let patch = release_patch(&api_version, &kind, ns, name);
+        match api
+            .patch(
+                name,
+                &plugin_resources_patch_params(),
+                &Patch::Apply(&patch),
+            )
+            .await
+        {
+            Ok(_) => {
+                state
+                    .plugin_patch_fingerprints
+                    .lock()
+                    .await
+                    .remove(&fingerprint_key(ns, name));
+                tracing::info!(
+                    kind = %kind,
+                    namespace = %ns,
+                    name = %name,
+                    "reconcile_application_plugins: released plugin resource fields (no provisioned resources left)"
+                );
+            }
+            Err(e) => {
+                tracing::warn!(
+                    kind = %kind,
+                    namespace = %ns,
+                    name = %name,
+                    error = %e,
+                    "reconcile_application_plugins: failed to release plugin resource fields"
+                );
+                released_all = false;
+            }
+        }
+    }
+    released_all
+}
+
+async fn reconcile_application_plugins(state: &AppState, sweep: &mut PluginFieldSweep) {
     // Snapshot the fingerprint cache once for this reconcile cycle.
     // Each key is `"namespace/name"` and the value is the hash of the last
     // patch JSON we sent to the API server for that workload.
@@ -1680,6 +1912,16 @@ async fn reconcile_application_plugins(state: &AppState) {
             return;
         }
     };
+
+    // The loop below only patches applications that still have resources,
+    // so it can drop the fields of a removed resource only while others
+    // remain. Release what's left on workloads whose application has none.
+    let apps_with_resources: BTreeSet<String> =
+        rows.iter().map(|row| row.application_id.clone()).collect();
+    if sweep.needed(&apps_with_resources) {
+        sweep.retry = !release_stale_plugin_fields(state, &apps_with_resources).await;
+    }
+    sweep.apps_with_resources = Some(apps_with_resources);
 
     if rows.is_empty() {
         return;
@@ -1793,8 +2035,8 @@ async fn reconcile_application_plugins(state: &AppState) {
                 .collect()
         };
 
-        let label_selector = format!("deckwatch.io/application={app_name}");
-        let pp = PatchParams::apply("deckwatch-plugin-resources").force();
+        let label_selector = format!("{APP_LABEL}={app_name}");
+        let pp = plugin_resources_patch_params();
 
         let dep_api: Api<Deployment> = Api::namespaced(state.kube_client.clone(), ns);
         let lp = ListParams::default().labels(&label_selector);
@@ -1916,7 +2158,7 @@ async fn reconcile_application_plugins(state: &AppState) {
                         }
                     });
 
-                    let fp_key = format!("{ns}/{dep_name}");
+                    let fp_key = deployment_fingerprint_key(ns, &dep_name);
                     let new_fp = fingerprint_patch(&patch);
                     let skip = {
                         let fps = fingerprints_arc.lock().await;
@@ -1957,7 +2199,6 @@ async fn reconcile_application_plugins(state: &AppState) {
 
         match cj_api.list(&lp).await {
             Ok(cjs) => {
-                use k8s_openapi::api::batch::v1::CronJob;
                 for cj in cjs.items {
                     let cj_name = match cj.metadata.name.as_deref() {
                         Some(n) => n.to_string(),
@@ -2019,7 +2260,7 @@ async fn reconcile_application_plugins(state: &AppState) {
                     });
 
                     let cj_typed_api: Api<CronJob> = Api::namespaced(state.kube_client.clone(), ns);
-                    let cj_fp_key = format!("cj:{ns}/{cj_name}");
+                    let cj_fp_key = cronjob_fingerprint_key(ns, &cj_name);
                     let cj_new_fp = fingerprint_patch(&patch);
                     let cj_skip = {
                         let fps = fingerprints_arc.lock().await;
