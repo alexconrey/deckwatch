@@ -30,6 +30,11 @@ spec:
       {{- end }}
       labels:
         {{- include "deckwatch.labels" . | nindent 8 }}
+        # The Services select on this too: the bundled tracing backend's pods
+        # carry deckwatch's selector labels (with component: tracing-backend),
+        # so name + instance alone also matched them. spec.selector stays
+        # unchanged because it is immutable.
+        app.kubernetes.io/component: server
         {{- with .Values.podLabels }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
