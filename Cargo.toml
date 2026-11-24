@@ -4,6 +4,13 @@ version = "0.6.7"
 edition = "2021"
 publish = false
 
+# The server is a library plus a thin binary (src/main.rs calls
+# deckwatch::run) so integration tests in tests/ can call real code paths.
+[lib]
+path = "src/lib.rs"
+# Doc comments are prose, not examples.
+doctest = false
+
 [dependencies]
 axum = { version = "0.8", features = ["ws"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "fs", "sync", "time"] }
