@@ -358,7 +358,7 @@ fn resolve_build_arches_falls_back_when_empty() {
 #[test]
 fn single_arch_build_uses_canonical_tag() {
     let short_sha = "abc1234";
-    let build_arches = vec![("linux/amd64".to_string(), "amd64".to_string())];
+    let build_arches = [("linux/amd64".to_string(), "amd64".to_string())];
     let single_arch = build_arches.len() == 1;
     let tag = if single_arch {
         short_sha.to_string()
