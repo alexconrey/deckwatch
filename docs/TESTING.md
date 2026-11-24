@@ -53,9 +53,6 @@ cargo test --lib -- --nocapture   # see println! output
 - **`handlers/deployments.rs`** — `build_probe` (httpGet default port 80,
   tcpSocket, exec, unknown-type), `build_resources`
   (requests-only / limits-only / both / neither).
-- **`handlers/addons.rs`** — `catalog()` invariants (unique ids,
-  non-empty fields), `build_resources_from_overrides` (per-request
-  overrides beat addon defaults, empty specs collapse to None).
 
 ### CI integration
 
@@ -126,7 +123,7 @@ pnpm test:coverage        # v8 coverage report → coverage/
 - **`api/deployments.ts`** — every method's URL/verb/body shape,
   including YAML text endpoints (`getYaml` / `updateYaml` set the right
   Accept/Content-Type headers).
-- **`api/{namespaces,pods,nodes,addons}.ts`** — URL and body shape.
+- **`api/{namespaces,pods,nodes,plugins}.ts`** — URL and body shape.
 - **`stores/namespace.ts`** — fetch success/failure, auto-select-first
   behavior, "preserve existing selection", empty-list handling.
 - **`stores/deployments.ts`** — no-op on empty namespace, populates list
