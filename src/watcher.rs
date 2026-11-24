@@ -2092,6 +2092,9 @@ async fn reconcile_application_plugins(state: &AppState, sweep: &mut PluginField
         }
 
         let reconcile_start = Instant::now();
+        // One status update per plugin for this application's `apply` row,
+        // covering every Deployment reconciled this cycle.
+        let mut apply_status = crate::plugin_status::ApplyAggregate::default();
 
         let mut env_vars: Vec<EnvVar> = env_map
             .iter()
@@ -2197,6 +2200,13 @@ async fn reconcile_application_plugins(state: &AppState, sweep: &mut PluginField
                                 final_annotations.extend(result.deployment_annotations.clone());
                                 final_labels.extend(result.deployment_labels.clone());
                             }
+                            apply_status.add(
+                                app_id,
+                                &outcome.plugin,
+                                outcome.health(),
+                                outcome.reports(),
+                                outcome.trace_id.clone(),
+                            );
                         }
                     }
 
@@ -2391,6 +2401,10 @@ async fn reconcile_application_plugins(state: &AppState, sweep: &mut PluginField
             }
         }
 
+        for update in apply_status.into_updates() {
+            state.plugin_telemetry.report(update);
+        }
+
         metrics::record_plugin_reconcile_duration(
             app_name,
             ns,
@@ -2535,6 +2549,14 @@ async fn reconcile_pending_resources(state: &AppState) {
         .application(&app_name)
         .resource(&resource_id);
         let (result, outcome) = crate::plugins::run_provision(plugin, &req, &call).take_result();
+        let status_key = crate::plugin_status::StatusKey::resource(
+            &format!("{ns}/{app_name}"),
+            &plugin_name,
+            &resource_id,
+        );
+        state
+            .plugin_telemetry
+            .report(outcome.status_update(status_key.clone()));
         let Some(result) = result else {
             tracing::warn!(
                 namespace = %ns,
@@ -2614,12 +2636,24 @@ async fn reconcile_pending_resources(state: &AppState) {
         // objects (IRSA ServiceAccounts, bootstrap Jobs) here. Apply them the
         // same way the provision/refresh handlers do.
         if !result.kubernetes_resources.is_empty() {
-            crate::plugins::apply_kubernetes_resources(
+            let failures = crate::plugins::apply_kubernetes_resources(
                 &outcome.k8s_resources(&result.kubernetes_resources),
                 &state.kube_client,
                 &state.plugin_telemetry,
             )
             .await;
+            if !failures.is_empty() {
+                state
+                    .plugin_telemetry
+                    .report(crate::plugin_status::StatusUpdate {
+                        key: status_key,
+                        export: "provision".to_string(),
+                        health: crate::plugin_events::Health::Failing,
+                        trace_id: outcome.trace_id.clone(),
+                        events: failures,
+                        merge: true,
+                    });
+            }
         }
 
         tracing::info!(

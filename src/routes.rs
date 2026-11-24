@@ -13,8 +13,9 @@ use crate::handlers::{
     admission, agent_feedback, ai_fix, application_resources, applications, autoscaling,
     configmaps_ui, cronjobs, deployments, deployments_ux, diagnostics, docs, events, exec, git,
     gitops, health, ingressclasses, ingresses, license, logs, mcp, monitoring, namespaces, nodes,
-    plugins, pods, portforward, prometheus_query, promote, registry, registry_ui, resource_metrics,
-    secrets, serviceaccounts, settings, storageclasses, templates, tracing_handler, webhooks,
+    plugin_status, plugins, pods, portforward, prometheus_query, promote, registry, registry_ui,
+    resource_metrics, secrets, serviceaccounts, settings, storageclasses, templates,
+    tracing_handler, webhooks,
 };
 use crate::metrics;
 use crate::state::AppState;
@@ -166,6 +167,8 @@ pub fn build_router(
         )
         .route("/api/settings", axum::routing::put(settings::put_settings))
         .route("/api/plugins", get(plugins::list_plugins))
+        .route("/api/plugin-status", get(plugin_status::list))
+        .route("/api/plugins/{name}/status", get(plugin_status::for_plugin))
         .route(
             "/api/plugins/{name}/schema",
             get(plugins::get_plugin_schema),
@@ -263,6 +266,10 @@ pub fn build_router(
         .route(
             "/api/namespaces/{ns}/applications/{name}/resources",
             get(application_resources::list),
+        )
+        .route(
+            "/api/namespaces/{ns}/applications/{name}/plugin-status",
+            get(plugin_status::for_application),
         )
         .route(
             "/api/namespaces/{ns}/applications/{name}/resources/{plugin}/{resource_id}",

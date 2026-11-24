@@ -1422,6 +1422,55 @@ async fn remove_resource(state: &AppState, id: &str) {
         .expect("delete resource row");
 }
 
+/// The reconcile loop records each plugin's `apply()` health for the
+/// application, once per cycle, and recovers it when the plugin is fixed.
+#[tokio::test]
+async fn reconcile_records_the_plugin_apply_status_of_the_application() {
+    use crate::entities::plugin_status;
+    use crate::plugin_fixture::{Behavior, FixturePlugin};
+
+    let cluster = FakeCluster::with_objects(vec![shop_deployment(deckwatch_update_entry())]);
+    let state = reconcile_test_state(&cluster).await;
+    crate::plugin_status::spawn_worker(&state);
+    *state.plugins.write().await = vec![FixturePlugin::new()
+        .export("apply", Behavior::Trap)
+        .loaded("vault")];
+    let mut sweep = PluginFieldSweep::default();
+    insert_queue_resource(&state, "team", "shop").await;
+
+    reconcile_application_plugins(&state, &mut sweep).await;
+    reconcile_application_plugins(&state, &mut sweep).await;
+    state.plugin_telemetry.flush().await;
+    let rows = plugin_status::Entity::find().all(&state.db).await.unwrap();
+    assert_eq!(rows.len(), 1, "{rows:#?}");
+    let row = &rows[0];
+    assert_eq!(
+        (
+            row.application_id.as_str(),
+            row.plugin_name.as_str(),
+            row.resource_id.as_str()
+        ),
+        ("team/shop", "vault", "")
+    );
+    assert_eq!(row.health, "failing");
+    assert_eq!(row.consecutive_failures, 2, "one per cycle");
+    assert!(row.last_events.contains("plugin.trap"));
+
+    *state.plugins.write().await = vec![FixturePlugin::new()
+        .export("apply", Behavior::output("{}"))
+        .loaded("vault")];
+    reconcile_application_plugins(&state, &mut sweep).await;
+    state.plugin_telemetry.flush().await;
+    let row = plugin_status::Entity::find()
+        .one(&state.db)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(row.health, "healthy");
+    assert_eq!(row.consecutive_failures, 0);
+    assert!(row.first_failure_at.is_none());
+}
+
 /// The release is reported as an `info` plugin event against the plugin
 /// whose resources the application had.
 #[tokio::test]

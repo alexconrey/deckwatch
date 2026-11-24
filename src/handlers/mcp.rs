@@ -2189,6 +2189,9 @@ async fn tool_disable_plugin(state: &AppState, args: &serde_json::Value) -> Resu
     {
         let mut loaded = state.plugins.write().await;
         loaded.retain(|p| p.name != name);
+        state
+            .plugin_telemetry
+            .keep_plugins(crate::plugins::enabled_plugin_names(&s));
     }
     // Clearing fingerprints forces a fresh reconcile on the next cycle so
     // resources injected by this plugin are no longer applied.

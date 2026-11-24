@@ -35,7 +35,8 @@ use crate::audit;
 use crate::entities::application_plugin_resources;
 use crate::error::AppError;
 use crate::metrics;
-use crate::plugin_events::PluginEventReport;
+use crate::plugin_events::{Health, PluginEventReport};
+use crate::plugin_status::StatusKey;
 use crate::plugins::{
     KubernetesObjectRef, PluginCall, ResourceProvisionRequest, SidecarSpec, Trigger,
 };
@@ -202,7 +203,11 @@ pub async fn provision(
         .application(&app_name)
         .resource(&resource_id);
     let (result, outcome) = crate::plugins::run_provision(plugin, &req, &call).take_result();
+    let status_key = StatusKey::resource(&app_id, &plugin_name, &resource_id);
     let Some(result) = result else {
+        state
+            .plugin_telemetry
+            .report(outcome.status_update(status_key));
         return Err(AppError::PluginFailed {
             summary: outcome.failure_summary(),
             events: outcome.reports(),
@@ -217,17 +222,21 @@ pub async fn provision(
     drop(plugins);
 
     // Apply any Kubernetes resources emitted by the plugin.
-    let mut plugin_events = outcome.reports();
+    let mut status = outcome.status_update(status_key);
     if !kubernetes_resources.is_empty() {
-        plugin_events.extend(
-            crate::plugins::apply_kubernetes_resources(
-                &kubernetes_resources,
-                &state.kube_client,
-                &state.plugin_telemetry,
-            )
-            .await,
-        );
+        let failures = crate::plugins::apply_kubernetes_resources(
+            &kubernetes_resources,
+            &state.kube_client,
+            &state.plugin_telemetry,
+        )
+        .await;
+        if !failures.is_empty() {
+            status.health = Health::Failing;
+        }
+        status.events.extend(failures);
     }
+    let plugin_events = status.events.clone();
+    state.plugin_telemetry.report(status);
 
     // Persist to DB.
     let now = now_utc();
@@ -310,7 +319,11 @@ pub async fn refresh(
         .application(&app_name)
         .resource(&resource_id);
     let (result, outcome) = crate::plugins::run_provision(plugin, &req, &call).take_result();
+    let status_key = StatusKey::resource(&app_id, &plugin_name, &resource_id);
     let Some(result) = result else {
+        state
+            .plugin_telemetry
+            .report(outcome.status_update(status_key));
         return Err(AppError::PluginFailed {
             summary: outcome.failure_summary(),
             events: outcome.reports(),
@@ -323,17 +336,21 @@ pub async fn refresh(
     let sidecars: Vec<SidecarSpec> = result.sidecars.clone();
     drop(plugins);
 
-    let mut plugin_events = outcome.reports();
+    let mut status = outcome.status_update(status_key);
     if !kubernetes_resources.is_empty() {
-        plugin_events.extend(
-            crate::plugins::apply_kubernetes_resources(
-                &kubernetes_resources,
-                &state.kube_client,
-                &state.plugin_telemetry,
-            )
-            .await,
-        );
+        let failures = crate::plugins::apply_kubernetes_resources(
+            &kubernetes_resources,
+            &state.kube_client,
+            &state.plugin_telemetry,
+        )
+        .await;
+        if !failures.is_empty() {
+            status.health = Health::Failing;
+        }
+        status.events.extend(failures);
     }
+    let plugin_events = status.events.clone();
+    state.plugin_telemetry.report(status);
 
     let now = now_utc();
     let state_json = serde_json::to_string(&state_map).unwrap_or_else(|_| "{}".to_string());
@@ -464,6 +481,10 @@ pub async fn deprovision_resource(
 
     let kubernetes_resource_deletions =
         finish_deprovision(state, resource, row, &requested).await?;
+    // The resource is gone, and so is its status.
+    state
+        .plugin_telemetry
+        .forget(StatusKey::resource(&app_id, plugin_name, resource_id));
     Ok(DeprovisionResponse {
         message,
         plugin_events,

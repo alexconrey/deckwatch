@@ -417,10 +417,10 @@ pub async fn create(
     // Apply plugins: inject env vars and sidecars before the kube API call;
     // collect kubernetes_resources and wanted service accounts to apply after
     // the deployment is committed.
+    let application = application_of(deployment.metadata.labels.as_ref());
     let plugin_report: crate::plugins::PluginApplyReport = {
         let plugins = state.plugins.read().await;
         if !plugins.is_empty() {
-            let application = application_of(deployment.metadata.labels.as_ref());
             let call = crate::plugins::PluginCall::new(
                 &state.plugin_telemetry,
                 crate::plugins::Trigger::DeploymentCreate,
@@ -470,6 +470,7 @@ pub async fn create(
         }
     };
     let plugin_events = plugin_report.reports();
+    report_apply_status(&state, &ns, &application, &plugin_report);
 
     let t = K8sTimer::new("deployments", "create");
     let created = api.create(&PostParams::default(), &deployment).await;
@@ -480,7 +481,7 @@ pub async fn create(
     // and wanted service accounts after the deployment is committed.
     // Best-effort: failures are logged and reported as plugin events, but do
     // not roll back the deployment.
-    spawn_plugin_followups(&state, &ns, plugin_report);
+    spawn_plugin_followups(&state, &ns, &application, plugin_report);
     let detail = deployment_detail(&created);
 
     if let Err(e) = audit::log_action(
@@ -510,22 +511,54 @@ pub async fn create(
     ))
 }
 
+/// Record each plugin's `apply()` outcome as the status of its `apply` row
+/// for the Deployment's application. A Deployment outside any application
+/// has no status row (its events still reach the response and the logs).
+fn report_apply_status(
+    state: &AppState,
+    ns: &str,
+    application: &str,
+    report: &crate::plugins::PluginApplyReport,
+) {
+    if application.is_empty() {
+        return;
+    }
+    let application_id = format!("{ns}/{application}");
+    for outcome in &report.outcomes {
+        state.plugin_telemetry.report(outcome.status_update(
+            crate::plugin_status::StatusKey::apply(&application_id, &outcome.plugin),
+        ));
+    }
+}
+
 /// Apply the Kubernetes objects and ServiceAccounts plugins asked for, after
-/// the Deployment is committed, without holding up the response.
-fn spawn_plugin_followups(state: &AppState, ns: &str, report: crate::plugins::PluginApplyReport) {
+/// the Deployment is committed, without holding up the response. A failed
+/// apply is added to the plugin's status for the application.
+fn spawn_plugin_followups(
+    state: &AppState,
+    ns: &str,
+    application: &str,
+    report: crate::plugins::PluginApplyReport,
+) {
     if report.kubernetes_resources.is_empty() && report.wanted_service_accounts.is_empty() {
         return;
     }
     let kube_client = state.kube_client.clone();
     let telemetry = state.plugin_telemetry.clone();
     let ns = ns.to_string();
+    let application_id = (!application.is_empty()).then(|| format!("{ns}/{application}"));
     tokio::spawn(async move {
-        crate::plugins::apply_kubernetes_resources(
+        let failures = crate::plugins::apply_kubernetes_resources(
             &report.kubernetes_resources,
             &kube_client,
             &telemetry,
         )
         .await;
+        if let Some(application_id) = application_id {
+            for update in crate::plugin_status::failures_by_plugin(&application_id, failures) {
+                telemetry.report(update);
+            }
+        }
         crate::plugins::apply_wanted_service_accounts(
             &report.wanted_service_accounts,
             &ns,
@@ -662,10 +695,10 @@ pub async fn update(
 
     // Apply plugins after user edits; collect kubernetes_resources and
     // wanted service accounts to apply after the deployment replace is committed.
+    let application = application_of(dep.metadata.labels.as_ref());
     let plugin_report: crate::plugins::PluginApplyReport = {
         let plugins = state.plugins.read().await;
         if !plugins.is_empty() {
-            let application = application_of(dep.metadata.labels.as_ref());
             let call = crate::plugins::PluginCall::new(
                 &state.plugin_telemetry,
                 crate::plugins::Trigger::DeploymentUpdate,
@@ -712,13 +745,14 @@ pub async fn update(
         }
     };
     let plugin_events = plugin_report.reports();
+    report_apply_status(&state, &ns, &application, &plugin_report);
 
     let t = K8sTimer::new("deployments", "replace");
     let updated = api.replace(&name, &PostParams::default(), &dep).await;
     t.finish(updated.is_ok());
     let updated = updated?;
 
-    spawn_plugin_followups(&state, &ns, plugin_report);
+    spawn_plugin_followups(&state, &ns, &application, plugin_report);
 
     let detail = deployment_detail(&updated);
     let pods = list_pods_for_deployment(&state, &ns, &updated).await?;

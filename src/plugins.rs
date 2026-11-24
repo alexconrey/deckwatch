@@ -832,6 +832,24 @@ impl PluginLoad {
         }
     }
 
+    /// The load as a status update for the plugin-wide row.
+    pub fn status_update(&self) -> crate::plugin_status::StatusUpdate {
+        let reports = self.reports();
+        let export = if reports.iter().any(|r| r.export == Export::Fetch.as_str()) {
+            Export::Fetch
+        } else {
+            Export::Metadata
+        };
+        crate::plugin_status::StatusUpdate {
+            key: crate::plugin_status::StatusKey::plugin_wide(&self.name),
+            export: export.as_str().to_string(),
+            health: self.health(),
+            events: reports,
+            trace_id: self.trace_id.clone(),
+            merge: false,
+        }
+    }
+
     pub fn reports(&self) -> Vec<PluginEventReport> {
         self.events
             .iter()
@@ -1019,12 +1037,24 @@ pub async fn fetch_plugins(settings: &DeckwatchSettings, state: &AppState) -> Ve
         state
             .plugin_telemetry
             .record_load(&load.name, load.reports());
+        state.plugin_telemetry.report(load.status_update());
         if let Some(plugin) = load.plugin {
             loaded.push(plugin);
         }
     }
     metrics::set_plugins_loaded(loaded.len() as f64);
     loaded
+}
+
+/// The configured names of the enabled plugins, for pruning the status
+/// rows of plugins that were disabled or removed.
+pub fn enabled_plugin_names(settings: &DeckwatchSettings) -> Vec<String> {
+    settings
+        .plugins
+        .iter()
+        .filter(|p| p.enabled)
+        .map(|p| p.name.clone())
+        .collect()
 }
 
 /// Directory where uploaded WASM binaries are stored.
@@ -1727,6 +1757,21 @@ impl<T> CallOutcome<T> {
                 trace_id: self.trace_id.clone(),
             })
             .collect()
+    }
+
+    /// This outcome as a status update for `key`.
+    pub fn status_update(
+        &self,
+        key: crate::plugin_status::StatusKey,
+    ) -> crate::plugin_status::StatusUpdate {
+        crate::plugin_status::StatusUpdate {
+            key,
+            export: self.export.as_str().to_string(),
+            health: self.health(),
+            events: self.reports(),
+            trace_id: self.trace_id.clone(),
+            merge: false,
+        }
     }
 
     /// `code: message` of the first error, for error replies.

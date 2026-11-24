@@ -683,6 +683,8 @@ struct TelemetryInner {
     /// The events of each plugin's most recent load, by configured name.
     /// Bounded by the number of configured plugins.
     last_loads: Mutex<HashMap<String, Vec<PluginEventReport>>>,
+    /// The status worker's queue, once `plugin_status::spawn_worker` ran.
+    sink: OnceLock<tokio::sync::mpsc::Sender<crate::plugin_status::SinkMsg>>,
 }
 
 impl std::fmt::Debug for PluginTelemetry {
@@ -709,6 +711,7 @@ impl PluginTelemetry {
                 encryption_key: encryption_key.into(),
                 call_timeout,
                 last_loads: Mutex::default(),
+                sink: OnceLock::new(),
             }),
         }
     }
@@ -732,6 +735,68 @@ impl PluginTelemetry {
     /// The events of `plugin`'s latest load, if it was loaded since startup.
     pub fn last_load(&self, plugin: &str) -> Option<Vec<PluginEventReport>> {
         self.inner.last_loads.lock().ok()?.get(plugin).cloned()
+    }
+
+    /// Attach the status worker's queue. Returns false if one was attached
+    /// already.
+    pub(crate) fn connect(
+        &self,
+        tx: tokio::sync::mpsc::Sender<crate::plugin_status::SinkMsg>,
+    ) -> bool {
+        self.inner.sink.set(tx).is_ok()
+    }
+
+    /// Queue a message for the status worker without waiting. Returns false
+    /// if there's no worker or its queue is full.
+    fn send(&self, msg: crate::plugin_status::SinkMsg) -> bool {
+        match self.inner.sink.get() {
+            Some(tx) => tx.try_send(msg).is_ok(),
+            None => false,
+        }
+    }
+
+    /// Record a call's outcome in the plugin status table. Never waits and
+    /// never fails: with the worker behind, the update is dropped and counted.
+    pub fn report(&self, update: crate::plugin_status::StatusUpdate) {
+        if self.inner.sink.get().is_none() {
+            return;
+        }
+        let plugin = update.key.plugin.clone();
+        if !self.send(crate::plugin_status::SinkMsg::Status(update)) {
+            crate::metrics::record_plugin_events_dropped(&plugin, "queue_full", 1);
+        }
+    }
+
+    /// Remove a target's status (its resource was deprovisioned).
+    pub fn forget(&self, key: crate::plugin_status::StatusKey) {
+        self.send(crate::plugin_status::SinkMsg::Forget(key));
+    }
+
+    /// Remove an application's status rows (it was deleted).
+    pub fn forget_application(&self, application_id: &str) {
+        self.send(crate::plugin_status::SinkMsg::ForgetApplication(
+            application_id.to_string(),
+        ));
+    }
+
+    /// Remove the status rows of every plugin not in `enabled`.
+    pub fn keep_plugins(&self, enabled: Vec<String>) {
+        self.send(crate::plugin_status::SinkMsg::KeepPlugins(enabled));
+    }
+
+    /// Wait until everything queued so far has been applied. For tests and
+    /// for callers that read the status table right after reporting.
+    pub async fn flush(&self) {
+        let (done, wait) = tokio::sync::oneshot::channel();
+        if let Some(tx) = self.inner.sink.get() {
+            if tx
+                .send(crate::plugin_status::SinkMsg::Flush(done))
+                .await
+                .is_ok()
+            {
+                let _ = wait.await;
+            }
+        }
     }
 
     /// Log `events` at their severity in the current span (the funnel calls
