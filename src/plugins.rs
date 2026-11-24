@@ -431,6 +431,30 @@ pub struct ResourceDeprovisionResult {
     pub errors: Vec<String>,
     #[serde(default)]
     pub message: String,
+    /// Kubernetes objects the plugin wants deleted from the application's
+    /// namespace once `deprovision()` returns (SDK v0.10.0). Deckwatch only
+    /// deletes allowed kinds; see
+    /// `handlers::application_resources::delete_requested_objects`.
+    /// Old plugins deserialize to an empty vec.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub delete_kubernetes_resources: Vec<KubernetesObjectRef>,
+}
+
+/// A Kubernetes object named by a plugin. There is no namespace: deckwatch
+/// only ever acts in the application's namespace, and ignores a `namespace`
+/// key if a plugin sends one.
+///
+/// Mirrors `deckwatch_plugin_sdk::KubernetesObjectRef` (SDK v0.10.0) — kept in
+/// sync manually. Missing fields default to empty here, so one malformed entry
+/// is refused on its own instead of discarding the plugin's whole result.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KubernetesObjectRef {
+    #[serde(default)]
+    pub api_version: String,
+    #[serde(default)]
+    pub kind: String,
+    #[serde(default)]
+    pub name: String,
 }
 
 /// A fetched plugin ready to execute. Stores raw WASM bytes and instantiates
