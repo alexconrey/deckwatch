@@ -38,6 +38,7 @@ function makeStatus(overrides: Partial<GitOpsStatus> = {}): GitOpsStatus {
       repo_url: "https://github.com/org/repo",
       branch: "main",
       token_secret: "git-token",
+      git_auth_user: "",
       dockerfile_path: "Dockerfile",
       docker_context: ".",
       ecr_repository: "123456.dkr.ecr.us-east-1.amazonaws.com/app",

@@ -163,7 +163,7 @@ describe("DeploymentForm", () => {
     expect(emitted).toBeTruthy();
     expect(emitted!.length).toBeGreaterThanOrEqual(1);
 
-    const payload = emitted![0][0] as Record<string, unknown>;
+    const payload = emitted![0][0];
     expect(payload).toMatchObject({
       name: "my-app",
       image: "nginx:latest",
