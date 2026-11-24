@@ -15,7 +15,9 @@
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",
     "test:e2e": "playwright test",
-    "test:e2e:ui": "playwright test --ui"
+    "test:e2e:ui": "playwright test --ui",
+    "test:e2e:docker": "scripts/e2e-docker.sh",
+    "test:e2e:update-baselines": "scripts/e2e-docker.sh --project=visual --update-snapshots"
   },
   "dependencies": {
     "@mdi/font": "^7.4.47",
