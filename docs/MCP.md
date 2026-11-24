@@ -306,6 +306,16 @@ The MCP server respects deckwatch's namespace allowlist. If a tool returns
 "namespace not allowed", check the `DECKWATCH_NAMESPACES` environment
 variable on the deckwatch deployment.
 
+### Which tools were called
+
+Deckwatch logs one line per `tools/call`, with the message `mcp tool call`,
+the `tool` name, `status` (`ok` or `error`) and `duration_ms`. Arguments and
+error text are never logged.
+
+```bash
+kubectl logs -n deckwatch deploy/deckwatch | grep '"mcp tool call"'
+```
+
 ---
 
 ## MCP Tuning — org-specific guidance

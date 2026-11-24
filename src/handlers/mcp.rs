@@ -1016,6 +1016,15 @@ async fn handle_tool_call(state: &AppState, request: &JsonRpcRequest) -> JsonRpc
             .unwrap_or_else(|| Err(format!("Unknown tool: {tool_name}")))
     };
 
+    // One event per tool call. Never log the arguments or the error text:
+    // they can carry Secret data, env values, manifests and exec commands.
+    tracing::info!(
+        tool = logged_tool_name(tool_name),
+        status = if result.is_ok() { "ok" } else { "error" },
+        duration_ms = u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX),
+        "mcp tool call"
+    );
+
     // Apply prompt-injection sanitization to pod log content before it is
     // embedded in the MCP response and potentially fed into an LLM context.
     // Pod stdout is untrusted input — anyone who can deploy a workload can
@@ -1032,6 +1041,15 @@ async fn handle_tool_call(state: &AppState, request: &JsonRpcRequest) -> JsonRpc
             serde_json::json!({ "content": [{ "type": "text", "text": text }] }),
         ),
         Err(e) => error_response(request, -32000, &e),
+    }
+}
+
+/// The tool name as logged. The client chooses it, so an unknown name is cut
+/// to 128 characters, the longest tool name the MCP spec recommends.
+fn logged_tool_name(name: &str) -> &str {
+    match name.char_indices().nth(128) {
+        Some((end, _)) => &name[..end],
+        None => name,
     }
 }
 
