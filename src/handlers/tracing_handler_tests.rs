@@ -91,8 +91,10 @@ fn list_traces_response_serializes_traces() {
 
 #[test]
 fn normalized_query_url_trims_and_strips_trailing_slash() {
-    let mut s = TracingSettings::default();
-    s.query_url = "  http://tempo:3200/  ".to_string();
+    let s = TracingSettings {
+        query_url: "  http://tempo:3200/  ".to_string(),
+        ..Default::default()
+    };
     assert_eq!(
         normalized_query_url(&s).as_deref(),
         Some("http://tempo:3200")
@@ -107,8 +109,10 @@ fn normalized_query_url_returns_none_for_empty() {
 
 #[test]
 fn normalized_query_url_returns_none_for_whitespace_only() {
-    let mut s = TracingSettings::default();
-    s.query_url = "   ".to_string();
+    let s = TracingSettings {
+        query_url: "   ".to_string(),
+        ..Default::default()
+    };
     assert!(normalized_query_url(&s).is_none());
 }
 

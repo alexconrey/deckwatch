@@ -13,9 +13,11 @@
     "forceConsistentCasingInFileNames": true,
     "useDefineForClassFields": true,
     "sourceMap": true,
-    "baseUrl": ".",
+    // No baseUrl: TypeScript 6 deprecates it and 7 removes it. Without it,
+    // paths resolve relative to this file and must start with "./". Keep the
+    // "@" alias in vite.config.ts and vitest.config.ts pointing at the same dir.
     "paths": {
-      "@/*": ["src/*"]
+      "@/*": ["./src/*"]
     },
     "lib": ["ESNext", "DOM", "DOM.Iterable"],
     "types": ["vite/client"]

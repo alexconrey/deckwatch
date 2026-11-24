@@ -28,6 +28,10 @@ pub struct PluginSummary {
     pub depends_on: Vec<String>,
     pub config_schema: Vec<ConfigField>,
     pub resources: Vec<crate::plugins::PluginResource>,
+    /// MCP tuning fields the plugin declares. Settings → MCP Tuning renders a
+    /// form section for every plugin with at least one; the values are saved in
+    /// `PluginConfig.mcp_tuning`.
+    pub mcp_tuning_fields: Vec<crate::plugins::McpTuningField>,
     pub wasm_size_bytes: usize,
     /// Lowercase hex SHA-256 of the WASM bytes currently loaded. Compare with
     /// `shasum -a 256 plugin.wasm` to confirm exactly which binary is running.
@@ -46,6 +50,7 @@ impl From<&crate::plugins::LoadedPlugin> for PluginSummary {
             depends_on: p.metadata.depends_on.clone(),
             config_schema: p.metadata.config_schema.clone(),
             resources: p.metadata.resources.clone(),
+            mcp_tuning_fields: p.metadata.mcp_tuning_fields.clone(),
             wasm_size_bytes: p.wasm_bytes.len(),
             sha256: p.sha256.clone(),
             loaded_at: p.loaded_at.clone(),
@@ -210,7 +215,9 @@ pub async fn upload_plugin_wasm(
         .await
         .map_err(|e| AppError::BadRequest(format!("failed to save settings: {e}")))?;
 
-    // Reload in background.
+    // Reload just this plugin in the background and swap it into the loaded
+    // set. Replacing the whole set with the single-plugin fetch result would
+    // unload every other plugin until the next full reload.
     let state_clone = state.clone();
     let name_clone = name.clone();
     let plugin_snapshot = settings.plugins.iter().find(|p| p.name == name).cloned();
@@ -220,9 +227,17 @@ pub async fn upload_plugin_wasm(
                 plugins: vec![cfg],
                 ..Default::default()
             };
-            let loaded = crate::plugins::fetch_plugins(&s, &state_clone).await;
-            tracing::info!(plugin = %name_clone, count = loaded.len(), "plugin reload after upload");
-            *state_clone.plugins.write().await = loaded;
+            let reloaded = crate::plugins::fetch_plugins(&s, &state_clone).await;
+            if reloaded.is_empty() {
+                tracing::warn!(plugin = %name_clone, "uploaded plugin failed to load; it is now unloaded");
+            }
+            let mut plugins = state_clone.plugins.write().await;
+            crate::plugins::merge_reloaded_plugin(&mut plugins, &name_clone, reloaded);
+            // fetch_plugins set the gauge from the single-plugin fetch; restore
+            // it to the real number of loaded plugins.
+            crate::metrics::set_plugins_loaded(plugins.len() as f64);
+            tracing::info!(plugin = %name_clone, loaded = plugins.len(), "plugin reload after upload");
+            drop(plugins);
             state_clone.plugin_patch_fingerprints.lock().await.clear();
         });
     }

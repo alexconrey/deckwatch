@@ -1,7 +1,6 @@
 // Unit tests for src/db.rs
 
 use super::*;
-use sea_orm::entity::prelude::*;
 
 #[test]
 fn test_backend_name_sqlite() {

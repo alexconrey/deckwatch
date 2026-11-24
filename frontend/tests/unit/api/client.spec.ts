@@ -24,15 +24,14 @@ describe("apiFetch", () => {
       status: 404,
       body: { error: "not_found", message: "deploy/foo missing" },
     });
-    await expect(apiFetch("/foo")).rejects.toBeInstanceOf(ApiError);
-    try {
-      await apiFetch("/foo");
-    } catch (e) {
-      const err = e as ApiError;
-      expect(err.status).toBe(404);
-      expect(err.body.error).toBe("not_found");
-      expect(err.message).toBe("deploy/foo missing");
-    }
+    // Call once and inspect that rejection. The mock hands back one Response
+    // whose body can only be read once, so a second apiFetch would fail with
+    // "Body has already been used" rather than an ApiError.
+    const err = (await apiFetch("/foo").catch((e: unknown) => e)) as ApiError;
+    expect(err).toBeInstanceOf(ApiError);
+    expect(err.status).toBe(404);
+    expect(err.body.error).toBe("not_found");
+    expect(err.message).toBe("deploy/foo missing");
   });
 
   it("throws ApiError on 5xx too", async () => {

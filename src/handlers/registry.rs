@@ -34,7 +34,7 @@
 //! cluster boundary; TLS + push auth is a deployment-layer concern.
 
 use std::io;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
 use axum::body::Body;
@@ -178,50 +178,104 @@ fn is_uuid(s: &str) -> bool {
     Uuid::parse_str(s).is_ok()
 }
 
-/// Distribution spec allows lowercase alnum + `._-/`, each path component
-/// non-empty. Rejecting anything else keeps traversal + shell-injection
-/// grade payloads out of the filesystem layer.
+/// Repository name per the OCI distribution spec: `/`-separated components,
+/// each matching `[a-z0-9]+((\.|_|__|-+)[a-z0-9]+)*`.
+///
+/// Components must start and end with an alphanumeric, so `.` and `..` are
+/// rejected. Without that rule a name like `../../x` (or `%2e%2e/%2e%2e/x`
+/// before axum percent-decodes the path) escapes `<root>/manifests/` and
+/// becomes an arbitrary file write/delete.
 fn validate_name(name: &str) -> bool {
     if name.is_empty() || name.len() > 255 {
         return false;
     }
-    for part in name.split('/') {
-        if part.is_empty() {
-            return false;
+    name.split('/').all(is_valid_name_component)
+}
+
+fn is_valid_name_component(part: &str) -> bool {
+    let is_alnum = |b: u8| b.is_ascii_lowercase() || b.is_ascii_digit();
+    let bytes = part.as_bytes();
+    match (bytes.first(), bytes.last()) {
+        (Some(&first), Some(&last)) if is_alnum(first) && is_alnum(last) => {}
+        _ => return false,
+    }
+    // Between alphanumeric runs only a single `.`, `_` or `__`, or a run of
+    // `-` is allowed; any other byte fails the separator check.
+    let mut i = 0;
+    while i < bytes.len() {
+        if is_alnum(bytes[i]) {
+            i += 1;
+            continue;
         }
-        if !part
-            .chars()
-            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '.' | '_' | '-'))
-        {
+        let start = i;
+        while i < bytes.len() && !is_alnum(bytes[i]) {
+            i += 1;
+        }
+        let sep = &part[start..i];
+        if !(sep == "." || sep == "_" || sep == "__" || sep.bytes().all(|b| b == b'-')) {
             return false;
         }
     }
     true
 }
 
-/// A tag or a `sha256:...` digest. Constrained the same way as [`validate_name`]
-/// with the addition of `:` for digest refs; we reject anything with `/` so a
-/// reference cannot escape the per-repo directory.
+/// A tag (`[A-Za-z0-9_][A-Za-z0-9._-]{0,127}`) or a digest
+/// (`<algorithm>:<encoded>`), per the OCI distribution spec. Neither form
+/// can contain `/` or be `.`/`..`, so a reference never escapes the
+/// per-repo directory.
 fn is_valid_reference(reference: &str) -> bool {
-    if reference.is_empty() || reference.len() > 255 || reference.contains('/') {
-        return false;
+    is_valid_tag(reference) || is_valid_digest_ref(reference)
+}
+
+fn is_valid_tag(tag: &str) -> bool {
+    let bytes = tag.as_bytes();
+    match bytes.first() {
+        Some(&first) if first.is_ascii_alphanumeric() || first == b'_' => {}
+        _ => return false,
     }
-    reference
-        .chars()
-        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-' | ':'))
+    bytes.len() <= 128
+        && bytes
+            .iter()
+            .all(|&b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
+}
+
+fn is_valid_digest_ref(reference: &str) -> bool {
+    let Some((algorithm, encoded)) = reference.split_once(':') else {
+        return false;
+    };
+    let alg = algorithm.as_bytes();
+    let alg_ok = matches!(
+        (alg.first(), alg.last()),
+        (Some(f), Some(l)) if f.is_ascii_alphanumeric() && l.is_ascii_alphanumeric()
+    ) && alg.iter().all(|&b| {
+        b.is_ascii_lowercase() || b.is_ascii_digit() || matches!(b, b'+' | b'.' | b'_' | b'-')
+    });
+    alg_ok
+        && !encoded.is_empty()
+        && reference.len() <= 255
+        && encoded
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'=' | b'_' | b'-'))
 }
 
 fn repo_dir(root: &Path, name: &str) -> Option<PathBuf> {
     if !validate_name(name) {
         return None;
     }
-    Some(root.join("manifests").join(name))
+    // Defence in depth: validate_name already rules out `.`/`..`, but never
+    // hand the filesystem a relative path with anything other than plain
+    // components.
+    let rel = Path::new(name);
+    if !rel.components().all(|c| matches!(c, Component::Normal(_))) {
+        return None;
+    }
+    Some(root.join("manifests").join(rel))
 }
 
 fn digest_bytes(bytes: &[u8]) -> String {
     let mut h = Sha256::new();
     h.update(bytes);
-    format!("sha256:{:x}", h.finalize())
+    format!("sha256:{}", crate::crypto::hex_lower(&h.finalize()))
 }
 
 // ------------------------------------------------------------------ errors
@@ -1266,6 +1320,118 @@ mod tests {
         assert_eq!(
             detect_manifest_media_type(body.to_string().as_bytes()),
             "application/vnd.oci.image.manifest.v1+json"
+        );
+    }
+
+    #[test]
+    fn validate_name_accepts_spec_compliant_names() {
+        for name in [
+            "app",
+            "library/app",
+            "team-a/my_app.web",
+            "a/b/c/d",
+            "x__y",
+            "a---b",
+            "0",
+            "deckwatch/deckwatch-1",
+        ] {
+            assert!(validate_name(name), "{name} should be valid");
+        }
+    }
+
+    #[test]
+    fn validate_name_rejects_traversal_and_malformed_components() {
+        for name in [
+            "",
+            "..",
+            ".",
+            "../x",
+            "x/..",
+            "a/../../b",
+            "./a",
+            "a/.",
+            "...",
+            ".hidden",
+            "trailing.",
+            "-lead",
+            "trail-",
+            "_lead",
+            "a..b",
+            "a._b",
+            "a___b",
+            "a/",
+            "/a",
+            "a//b",
+            "Upper",
+            "a b",
+            "a\\b",
+            "a%2e",
+        ] {
+            assert!(!validate_name(name), "{name:?} should be rejected");
+        }
+        assert!(!validate_name(&"a".repeat(256)));
+    }
+
+    #[test]
+    fn repo_dir_never_escapes_manifests_root() {
+        let root = Path::new("/data/registry");
+        assert_eq!(
+            repo_dir(root, "team/app"),
+            Some(PathBuf::from("/data/registry/manifests/team/app"))
+        );
+        assert_eq!(repo_dir(root, "../../deckwatch.db"), None);
+        assert_eq!(repo_dir(root, ".."), None);
+    }
+
+    #[test]
+    fn is_valid_reference_accepts_tags_and_digests() {
+        let digest = format!("sha256:{}", "a".repeat(64));
+        for r in [
+            "latest",
+            "v1.2.3",
+            "abc123-amd64",
+            "_underscore",
+            "V1",
+            digest.as_str(),
+            "sha512:abc",
+            "multihash+base58:QmRZxt2b1FVZPNqd8hsiykDL3TdBDeTSPX9Kv46HmX4Gx8",
+        ] {
+            assert!(is_valid_reference(r), "{r} should be valid");
+        }
+    }
+
+    #[test]
+    fn is_valid_reference_rejects_traversal_and_malformed_refs() {
+        for r in [
+            "",
+            ".",
+            "..",
+            ".hidden",
+            "-dash",
+            "a/b",
+            "../x",
+            ":abc",
+            "sha256:",
+            "sha256:../x",
+            "SHA256:abc",
+            "a:b:c",
+            "tag with space",
+        ] {
+            assert!(!is_valid_reference(r), "{r:?} should be rejected");
+        }
+        assert!(!is_valid_reference(&"a".repeat(129)));
+    }
+
+    /// Known-answer test: OCI digests must stay `sha256:` + lowercase hex.
+    #[test]
+    fn digest_bytes_known_answer() {
+        assert_eq!(
+            digest_bytes(b"abc"),
+            "sha256:ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+        assert_eq!(
+            digest_bytes(b""),
+            "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
         );
     }
 

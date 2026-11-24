@@ -59,6 +59,19 @@ updates:
     commit-message:
       prefix: "chore(deps)"
       prefix-development: "chore(dev-deps)"
+    ignore:
+      # TypeScript 7 is the native compiler and no longer exports ./lib/tsc,
+      # so vue-tsc cannot load it (ERR_PACKAGE_PATH_NOT_EXPORTED, see #194).
+      # Hold back 7+ only; 6.x is still the JS compiler and should be offered.
+      # Bump manually once vue-tsc supports the native compiler.
+      - dependency-name: typescript
+        versions: [">=7"]
+      # vue-tsc <= 3.3.14 misreads "//" inside component prop values
+      # (vuejs/language-tools#6322, fixed by #6371 but unreleased), which breaks
+      # our templates (see #189). Ignore only that range, so Dependabot offers
+      # the first fixed release on its own. Drop this once we're on it.
+      - dependency-name: vue-tsc
+        versions: [">=3.0.0 <3.3.15"]
     groups:
       frontend-prod:
         dependency-type: production
@@ -82,8 +95,8 @@ updates:
     commit-message:
       prefix: "chore(docker)"
     ignore:
-      # Stay on Node LTS lines (even majors); skip odd-numbered "current"
-      # releases. Move to the next LTS manually.
+      # Bump Node majors manually, together with frontend/.nvmrc (which CI
+      # reads), so CI and the release image stay on the same Node line.
       - dependency-name: node
         update-types: ["version-update:semver-major"]
     groups:
