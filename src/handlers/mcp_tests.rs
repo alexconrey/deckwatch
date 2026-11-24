@@ -176,6 +176,47 @@ async fn test_unknown_tool_returns_error() {
 }
 
 #[tokio::test]
+async fn test_tool_call_logs_one_event_without_arguments() {
+    let state = build_test_state().await;
+    let canary = "canary-7f3a9c";
+    let long_name = "x".repeat(300);
+    let events = tool_call_events(
+        &state,
+        vec![
+            tool_call_req(1, "list_ingress_templates", json!({ "note": canary })),
+            tool_call_req(2, "list_deployments", json!({ "label_selector": canary })),
+            tool_call_req(3, "nonexistent", json!({ "namespace": canary })),
+            tool_call_req(4, &long_name, json!({})),
+        ],
+    )
+    .await;
+
+    let summary: Vec<(&str, &str)> = events
+        .iter()
+        .map(|e| (e["tool"].as_str(), e["status"].as_str()))
+        .collect();
+    let truncated = "x".repeat(128);
+    assert_eq!(
+        summary,
+        [
+            ("list_ingress_templates", "ok"),
+            ("list_deployments", "error"),
+            ("nonexistent", "error"),
+            (truncated.as_str(), "error"),
+        ]
+    );
+    for event in &events {
+        let fields: Vec<&str> = event.keys().map(String::as_str).collect();
+        assert_eq!(fields, ["duration_ms", "message", "status", "tool"]);
+        assert!(event["duration_ms"].parse::<u64>().is_ok(), "{event:?}");
+        assert!(
+            !event.values().any(|v| v.contains(canary)),
+            "argument value logged: {event:?}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn test_tool_call_missing_namespace() {
     let state = build_test_state().await;
     let req = JsonRpcRequest {
@@ -727,6 +768,71 @@ fn tool_call_req(id: u64, tool: &str, arguments: serde_json::Value) -> JsonRpcRe
         method: "tools/call".to_string(),
         params: json!({ "name": tool, "arguments": arguments }),
     }
+}
+
+type EventFields = std::collections::BTreeMap<String, String>;
+
+thread_local! {
+    /// The "mcp tool call" events emitted on this thread.
+    static TOOL_CALL_EVENTS: std::cell::RefCell<Vec<EventFields>> =
+        std::cell::RefCell::default();
+}
+
+/// Records each "mcp tool call" event in the emitting thread's
+/// `TOOL_CALL_EVENTS`.
+struct ToolCallEvents;
+
+impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for ToolCallEvents {
+    fn on_event(
+        &self,
+        event: &tracing::Event<'_>,
+        _ctx: tracing_subscriber::layer::Context<'_, S>,
+    ) {
+        struct Fields(EventFields);
+        impl tracing::field::Visit for Fields {
+            fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+                self.0.insert(field.name().to_string(), value.to_string());
+            }
+            fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+                self.0
+                    .insert(field.name().to_string(), format!("{value:?}"));
+            }
+        }
+        let mut fields = Fields(EventFields::new());
+        event.record(&mut fields);
+        if fields.0.get("message").map(String::as_str) == Some("mcp tool call") {
+            TOOL_CALL_EVENTS.with(|events| events.borrow_mut().push(fields.0));
+        }
+    }
+}
+
+/// Runs `calls` and returns the "mcp tool call" events they emitted.
+///
+/// The capture layer is the process-wide subscriber, installed once, rather
+/// than a scoped one: tracing caches callsite interest per process, and while
+/// a single scoped subscriber exists, another test thread reaching the event
+/// first can cache it as disabled for everyone. The cache is rebuilt after
+/// the install for the same reason. Events are kept per thread, and
+/// `#[tokio::test]` runs the calls on the test's own thread.
+async fn tool_call_events(state: &AppState, calls: Vec<JsonRpcRequest>) -> Vec<EventFields> {
+    use tracing_subscriber::layer::SubscriberExt as _;
+    use tracing_subscriber::Layer as _;
+
+    static INSTALL: std::sync::Once = std::sync::Once::new();
+    INSTALL.call_once(|| {
+        let layer = ToolCallEvents.with_filter(tracing_subscriber::filter::filter_fn(|meta| {
+            meta.target() == "deckwatch::handlers::mcp"
+        }));
+        tracing::subscriber::set_global_default(tracing_subscriber::registry().with(layer))
+            .expect("no other test installs a global subscriber");
+    });
+    tracing::callsite::rebuild_interest_cache();
+
+    TOOL_CALL_EVENTS.with(|events| events.borrow_mut().clear());
+    for call in &calls {
+        handle_tool_call(state, call).await;
+    }
+    TOOL_CALL_EVENTS.with(|events| events.take())
 }
 
 async fn build_test_state() -> crate::state::AppState {

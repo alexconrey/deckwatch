@@ -44,7 +44,10 @@ auto-deploys on push.
 
 ### Prerequisites
 
-- A Kubernetes cluster (k3d, kind, minikube, EKS, etc.)
+- A Kubernetes cluster running **1.33 or newer** (k3d, kind, minikube, EKS,
+  etc.). Deckwatch is built against the Kubernetes 1.33 API (k8s-openapi
+  `v1_33`), and the Helm chart requires `>=1.33`. Production (Zeus, EKS) runs
+  1.35.
 - `helm` 3.x
 - `docker` (for building the image locally)
 
@@ -63,7 +66,9 @@ Open [http://localhost:3000](http://localhost:3000).
 ### Deploy to Kubernetes
 
 ```bash
-# Build and load into a local cluster (k3d example)
+# Build and load into a local cluster (k3d example; k3d's default k3s image
+# may be older than 1.33, so pin one)
+k3d cluster create my-cluster --image rancher/k3s:v1.35.10-k3s1
 docker build -t deckwatch:dev .
 k3d image import deckwatch:dev -c my-cluster
 
@@ -97,7 +102,7 @@ helm install deckwatch helm/deckwatch \
 | `DECKWATCH_PORT` | `--port` | `8080` | Listen port |
 | `DECKWATCH_FRONTEND_DIR` | `--frontend-dir` | `frontend/dist` | Path to built SPA |
 | `DECKWATCH_DATABASE_URL` | `--database-url` | `sqlite://deckwatch.db` | Database connection string (SQLite, Postgres, or MySQL) |
-| `RUST_LOG` | — | `deckwatch=info,tower_http=info` | Log filter |
+| `RUST_LOG` | — | `deckwatch=info,tower_http=info,mcp_k8s=info,extism::pdk=info` | Log filter (Helm: `logFilter`). `mcp_k8s` is the embedded library behind most MCP tools; `extism::pdk` carries plugin log lines |
 
 ## Architecture
 

@@ -10,6 +10,9 @@ pub struct Model {
     pub branch: String,
     pub token_secret: String,
     pub encrypted_token: Option<String>,
+    /// JSON `EndpointBinding`: the GitHub API origin `encrypted_token` may be
+    /// sent to, recorded when the token was saved.
+    pub token_binding: Option<String>,
     pub git_auth_user: String,
     pub dockerfile_path: String,
     pub docker_context: String,

@@ -323,23 +323,26 @@ impl GitProvider for GitHub {
         }
         let (owner, name) = split_github_repo(repo)
             .ok_or_else(|| anyhow::anyhow!("not a github repo url: {repo}"))?;
-        let url = format!("https://api.github.com/repos/{owner}/{name}/branches/{branch}");
-        let resp: serde_json::Value = http
-            .get(&url)
-            .header("Authorization", format!("Bearer {token}"))
-            .header("User-Agent", "deckwatch")
-            .header("Accept", "application/vnd.github+json")
-            .send()
-            .await?
-            .error_for_status()?
-            .json()
-            .await?;
-        let sha = resp
-            .get("commit")
-            .and_then(|c| c.get("sha"))
-            .and_then(|s| s.as_str())
-            .ok_or_else(|| anyhow::anyhow!("branch '{branch}' not found"))?;
-        Ok(sha.to_string())
+        // Not wired into production (the GitOps poller uses smart-HTTP plus
+        // `watcher::github_changed_files`, which honour the configured GitHub
+        // endpoints). The trait carries no settings, so this path uses the
+        // default API endpoint and only sends tokens bound to it.
+        let source = crate::outbound::CredentialSource::Stored(None);
+        let token = crate::outbound::github::GitHubToken {
+            token,
+            label: "git token",
+            source: &source,
+        };
+        let sha = crate::outbound::github::branch_head(
+            http,
+            &crate::outbound::Endpoint::default_for(crate::outbound::EndpointId::GithubApi),
+            &owner,
+            &name,
+            branch,
+            Some(token),
+        )
+        .await?;
+        Ok(sha)
     }
 
     async fn list_branches(
