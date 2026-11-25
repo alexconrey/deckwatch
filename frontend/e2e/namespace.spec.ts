@@ -2,54 +2,22 @@ import { expect, test } from "./fixtures";
 
 test.describe("Namespace selection", () => {
   test("namespace list is fetched on landing", async ({ page, mockApi }) => {
-    let namespacesFetched = false;
-    await mockApi.override("**/api/namespaces", async (route) => {
-      if (route.request().method() === "GET") {
-        namespacesFetched = true;
-      }
-      return route.fallback();
-    });
-
     await page.goto("/deployments");
-    await expect.poll(() => namespacesFetched).toBe(true);
+    await mockApi.waitForRequest("GET", "/namespaces");
+    await expect(page.getByTestId("namespace-switcher")).toContainText("default");
   });
 
-  test("switching namespaces triggers a re-fetch of deployments", async ({ page, mockApi }) => {
-    const seenNamespaces: string[] = [];
-    await mockApi.override(
-      /\/api\/namespaces\/[^/]+\/deployments$/,
-      async (route) => {
-        const parts = new URL(route.request().url()).pathname.split("/");
-        seenNamespaces.push(parts[3]);
-        return route.fallback();
-      },
-    );
-
+  test("switching namespaces re-fetches deployments and remembers the choice", async ({ app, page, mockApi }) => {
     await page.goto("/deployments");
-    await expect.poll(() => seenNamespaces.length).toBeGreaterThan(0);
+    await mockApi.waitForRequest("GET", "/namespaces/default/deployments");
 
-    // The namespace switcher exposes `role="combobox"` +
-    // `aria-label="Select namespace"` (see frontend/src/layouts/AppLayout.vue).
-    // The role selector is the primary path; the data-testid is a stable
-    // fallback in case Vuetify wraps the v-select DOM differently in a
-    // future upgrade.
-    const nsSwitcher = page
-      .getByRole("combobox", { name: /select namespace/i })
-      .or(page.getByTestId("namespace-switcher"))
-      .first();
+    // The switcher is the v-autocomplete with data-testid="namespace-switcher"
+    // (layouts/AppLayout.vue); its menu entries are role="option".
+    await app.namespaceSwitcher().click();
+    await page.getByRole("option", { name: "team-a" }).click();
 
-    await expect(nsSwitcher).toBeVisible();
-
-    const before = seenNamespaces.length;
-    await nsSwitcher.click();
-
-    // Menu items are exposed with `role="option"` and each carries the
-    // namespace name as its aria-label so `getByRole("option", { name })`
-    // works regardless of Vuetify's internal DOM structure.
-    const teamA = page.getByRole("option", { name: "team-a" }).first();
-    await teamA.click();
-
-    await expect.poll(() => seenNamespaces.length).toBeGreaterThan(before);
-    expect(seenNamespaces).toContain("team-a");
+    await mockApi.waitForRequest("GET", "/namespaces/team-a/deployments");
+    await expect(page.getByText("No deployments in this namespace")).toBeVisible();
+    expect(await page.evaluate(() => localStorage.getItem("deckwatch-namespace"))).toBe("team-a");
   });
 });

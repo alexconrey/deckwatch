@@ -1034,7 +1034,7 @@ const handleDeleteIngress = async () => {
             <v-row
               v-for="(row, i) in editingLabels"
               :key="i"
-              dense
+              density="compact"
               class="mb-1"
             >
               <v-col cols="5">
@@ -1058,7 +1058,7 @@ const handleDeleteIngress = async () => {
             <v-row
               v-for="(row, i) in editingAnnotations"
               :key="i"
-              dense
+              density="compact"
               class="mb-1"
             >
               <v-col cols="5">
@@ -1351,7 +1351,7 @@ const handleDeleteIngress = async () => {
               class="mb-3"
             />
             <template v-if="hpaForm.enabled">
-              <v-row dense>
+              <v-row density="compact">
                 <v-col cols="6">
                   <v-text-field
                     v-model.number="hpaForm.minReplicas"
@@ -1507,7 +1507,7 @@ const handleDeleteIngress = async () => {
             placeholder="myapp.example.com"
             class="mb-2"
           />
-          <v-row dense>
+          <v-row density="compact">
             <v-col cols="5">
               <v-text-field
                 v-model="ingressForm.path"
@@ -1554,8 +1554,8 @@ const handleDeleteIngress = async () => {
           <v-row
             v-for="(row, idx) in ingressAnnotations"
             :key="`ing-ann-${idx}`"
-            dense
-            align="center"
+            density="compact"
+            class="align-center"
           >
             <v-col cols="5">
               <v-text-field

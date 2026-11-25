@@ -1,11 +1,20 @@
-html,
-body {
-  margin: 0;
-  padding: 0;
-  height: 100%;
-  overflow: auto;
-}
+/*
+ * Vuetify 4 puts all of its styles in cascade layers, and unlayered rules
+ * always beat layered ones. Keeping these base rules in Vuetify's reset layer
+ * lets Vuetify's state classes override them again — notably
+ * .v-overlay-scroll-blocked, which sets overflow-y: hidden on <body> to stop
+ * the page scrolling behind an open dialog.
+ */
+@layer vuetify-core.reset {
+  html,
+  body {
+    margin: 0;
+    padding: 0;
+    height: 100%;
+    overflow: auto;
+  }
 
-#app {
-  height: 100%;
+  #app {
+    height: 100%;
+  }
 }

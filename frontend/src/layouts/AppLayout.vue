@@ -37,7 +37,7 @@ const failingPlugins = computed(
 );
 const toggleTheme = () => {
   const next = isDark.value ? "deckwatchLight" : "deckwatchDark";
-  theme.global.name.value = next;
+  theme.change(next);
   localStorage.setItem("deckwatch-theme", next);
 };
 
@@ -104,7 +104,7 @@ const onNsCreated = (name: string) => {
           />
           <span
             class="text-h5 font-weight-bold mr-4"
-            style="letter-spacing: 0.5px; font-family: 'Roboto', sans-serif;"
+            style="font-family: 'Roboto', sans-serif;"
           >
             Deckwatch
           </span>
@@ -125,7 +125,7 @@ const onNsCreated = (name: string) => {
           @update:model-value="onNsSelected"
         >
           <template #item="{ props: itemProps, item }">
-            <v-divider v-if="(item.raw as any).divider" />
+            <v-divider v-if="'divider' in item && item.divider" />
             <v-list-item v-else v-bind="itemProps" />
           </template>
         </v-autocomplete>
@@ -225,7 +225,7 @@ const onNsCreated = (name: string) => {
     </v-container>
   </v-main>
 
-  <v-footer class="text-caption text-secondary d-flex align-center justify-center ga-2" style="min-height: 20px; max-height: 20px; padding: 0 8px; font-size: 11px;">
+  <v-footer class="text-caption text-secondary d-flex align-center justify-center ga-2" style="min-height: 20px; max-height: 20px; padding: 0 8px;">
     <span>Deckwatch v{{ appVersion }}</span>
     <span>·</span>
     <a href="/docs/book/" target="_blank" class="text-secondary" style="text-decoration: none;">Help</a>

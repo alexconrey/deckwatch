@@ -283,6 +283,16 @@ function onRegistryPicked(imageRef: string) {
   selectedRegistryName.value = CUSTOM_SENTINEL;
 }
 
+/** Look up branches once the user starts typing in the Branch field.
+ *  Vuetify 4 also emits update:search when it copies the selected branch
+ *  into the search text (when the dialog fills in an existing config), so
+ *  skip that: it ran before the token selection was restored and showed
+ *  "Select a Git token…" on a config that has one. */
+function onBranchSearch(search: string | null) {
+  if (search === form.value.branch) return;
+  if (!branchOptions.value.length && !branchLoading.value) fetchBranches();
+}
+
 /** Fires the branch listing API when the user opens/types in the branch
  *  autocomplete. Requires a resolved repo URL + selected managed token. */
 async function fetchBranches() {
@@ -430,7 +440,7 @@ onMounted(() => {
           class="mb-1"
         >
           <template #item="{ props: itemProps, item }">
-            <v-list-item v-bind="itemProps" :title="item.raw.title" :subtitle="item.raw.subtitle" />
+            <v-list-item v-bind="itemProps" :title="item.title" :subtitle="item.subtitle" />
           </template>
         </v-select>
         <v-text-field
@@ -445,7 +455,7 @@ onMounted(() => {
           class="mb-2"
         />
 
-        <v-row dense>
+        <v-row density="compact">
           <v-col cols="6">
             <v-autocomplete
               v-model="form.branch"
@@ -461,9 +471,7 @@ onMounted(() => {
               auto-select-first
               required
               @focus="fetchBranches"
-              @update:search="() => {
-                if (!branchOptions.length && !branchLoading) fetchBranches();
-              }"
+              @update:search="onBranchSearch"
             />
           </v-col>
           <v-col cols="6">
@@ -480,7 +488,7 @@ onMounted(() => {
               persistent-hint
             >
               <template #item="{ props: itemProps, item }">
-                <v-list-item v-bind="itemProps" :title="item.raw.title" :subtitle="item.raw.subtitle" />
+                <v-list-item v-bind="itemProps" :title="item.title" :subtitle="item.subtitle" />
               </template>
             </v-select>
           </v-col>
@@ -503,10 +511,10 @@ onMounted(() => {
           class="mb-1"
         >
           <template #item="{ props: itemProps, item }">
-            <v-list-item v-bind="itemProps" :title="item.raw.title" :subtitle="item.raw.subtitle" />
+            <v-list-item v-bind="itemProps" :title="item.title" :subtitle="item.subtitle" />
           </template>
         </v-select>
-        <v-row v-if="useCustomRegistry" dense align="center" class="mb-2">
+        <v-row v-if="useCustomRegistry" density="compact" class="mb-2 align-center">
           <v-col :cols="canBrowseRegistry ? 10 : 12">
             <v-text-field
               v-model="form.ociRepository"
@@ -535,7 +543,7 @@ onMounted(() => {
           </v-col>
         </v-row>
 
-        <v-row dense>
+        <v-row density="compact">
           <v-col cols="6">
             <v-text-field
               v-model="form.dockerfilePath"
@@ -574,7 +582,7 @@ onMounted(() => {
         <v-divider class="my-3" />
         <div class="text-subtitle-2 mb-2">Polling</div>
 
-        <v-row dense>
+        <v-row density="compact">
           <v-col cols="6">
             <v-text-field
               v-model.number="form.pollInterval"

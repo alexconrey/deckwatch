@@ -51,7 +51,10 @@ const colors = computed(() => {
     grid: dark ? "#2c2c2a" : "#e1e0d9",
     axis: dark ? "#383835" : "#c3c2b7",
     muted: "#898781",
-    surface: theme.current.value.colors.background,
+    // Vuetify 4 types theme colors as any color format (string, number,
+    // RGB or HSV object). Ours are hex strings (src/plugins/vuetify.ts),
+    // and Chart.js draws with them as they are.
+    surface: theme.current.value.colors.background as string,
   };
 });
 

@@ -142,7 +142,7 @@ const handleRemove = async () => {
       <v-card>
         <v-card-title>Add Sidecar Container</v-card-title>
         <v-card-text>
-          <v-row dense>
+          <v-row density="compact">
             <v-col cols="6">
               <v-text-field v-model="form.name" label="Name" placeholder="my-sidecar" density="compact" />
             </v-col>
@@ -156,7 +156,7 @@ const handleRemove = async () => {
           <v-text-field v-model="form.env" label="Env (KEY=val, comma-separated)" placeholder="LOG_LEVEL=info,MODE=proxy" density="compact" />
           <v-divider class="my-3" />
           <div class="text-subtitle-2 mb-2">Resources (optional)</div>
-          <v-row dense>
+          <v-row density="compact">
             <v-col cols="6"><v-text-field v-model="form.cpuRequest" label="CPU Request" placeholder="100m" density="compact" /></v-col>
             <v-col cols="6"><v-text-field v-model="form.memRequest" label="Memory Request" placeholder="128Mi" density="compact" /></v-col>
             <v-col cols="6"><v-text-field v-model="form.cpuLimit" label="CPU Limit" placeholder="500m" density="compact" /></v-col>

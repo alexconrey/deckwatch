@@ -1,0 +1,674 @@
+/*
+ * Vuetify 3 -> 4 compatibility styles.
+ *
+ * Vuetify 4 removed or restyled several global styles that our templates
+ * still rely on. This file restores the Vuetify 3 look so the upgrade does
+ * not restyle the whole UI in one go, following the "multi-step migration"
+ * advice in the upgrade guide:
+ * https://vuetifyjs.com/en/getting-started/upgrade-guide/#multi-step-migration
+ *
+ * The rules sit inside Vuetify's own cascade layers, so utility classes
+ * (mb-2, font-weight-bold, text-none, ...) and our unlayered component
+ * styles keep overriding them exactly as they did in Vuetify 3. The one
+ * exception is the elevation-N classes in section 4, which are !important,
+ * as they were in Vuetify 3. The breakpoints are restored in vite.config.ts
+ * and src/plugins/vuetify.ts.
+ *
+ * The sections are independent: delete a section once the templates it
+ * covers have been migrated to the Vuetify 4 / MD3 equivalents.
+ * e2e/visual compares every page with the Vuetify 3 screenshots; run it
+ * after changing anything here (docs/TESTING.md).
+ */
+
+/*
+ * 1. CSS reset (vuetify#20960).
+ * Vuetify 3 zeroed margin/padding on every element; Vuetify 4 does not, so
+ * headings, paragraphs, lists and <pre> picked up browser default margins.
+ * Vuetify 3 also used the "monospace, monospace" trick, which stops browsers
+ * shrinking bare <code>/<pre> text to the 13px default monospace size.
+ * Mirrors the snippet in the upgrade guide's "CSS reset" section.
+ */
+@layer vuetify-core.reset {
+  ul, ol, figure, details, summary {
+    padding: 0;
+    margin: 0;
+  }
+
+  h1, h2, h3, h4, h5, h6, p, pre {
+    margin: 0;
+  }
+
+  code, kbd, pre, samp {
+    font-family: monospace, monospace;
+  }
+
+  pre {
+    font-size: 1em;
+  }
+}
+
+/*
+ * 2. MD2 typography classes (text-h1 ... text-overline).
+ * Vuetify 4 removed them in favour of the MD3 names (text-headline-small,
+ * text-body-medium, ...), so ~460 call sites silently lost their styling.
+ * Values are copied from Vuetify 3.13.8. In Vuetify 3, font-size,
+ * letter-spacing and text-transform were !important (they beat component
+ * styles) while font-weight, line-height and font-family were not (component
+ * styles such as .v-card-title won). The two layers reproduce that split.
+ * Migration map: https://vuetifyjs.com/en/getting-started/typography-migration/
+ */
+@layer vuetify-utilities.typography {
+  .text-h1 { font-size: 6rem; letter-spacing: -0.015625em; text-transform: none; }
+  .text-h2 { font-size: 3.75rem; letter-spacing: -0.0083333333em; text-transform: none; }
+  .text-h3 { font-size: 3rem; letter-spacing: normal; text-transform: none; }
+  .text-h4 { font-size: 2.125rem; letter-spacing: 0.0073529412em; text-transform: none; }
+  .text-h5 { font-size: 1.5rem; letter-spacing: normal; text-transform: none; }
+  .text-h6 { font-size: 1.25rem; letter-spacing: 0.0125em; text-transform: none; }
+  .text-subtitle-1 { font-size: 1rem; letter-spacing: 0.009375em; text-transform: none; }
+  .text-subtitle-2 { font-size: 0.875rem; letter-spacing: 0.0071428571em; text-transform: none; }
+  .text-body-1 { font-size: 1rem; letter-spacing: 0.03125em; text-transform: none; }
+  .text-body-2 { font-size: 0.875rem; letter-spacing: 0.0178571429em; text-transform: none; }
+  .text-button { font-size: 0.875rem; letter-spacing: 0.0892857143em; text-transform: uppercase; }
+  .text-caption { font-size: 0.75rem; letter-spacing: 0.0333333333em; text-transform: none; }
+  .text-overline { font-size: 0.75rem; letter-spacing: 0.1666666667em; text-transform: uppercase; }
+}
+
+@layer vuetify-core.base {
+  .text-h1, .text-h2, .text-h3, .text-h4, .text-h5, .text-h6 {
+    font-family: var(--v-font-heading, var(--v-font-body, "Roboto", sans-serif));
+  }
+  .text-subtitle-1, .text-subtitle-2, .text-body-1, .text-body-2,
+  .text-button, .text-caption, .text-overline {
+    font-family: var(--v-font-body, "Roboto", sans-serif);
+  }
+
+  .text-h1 { font-weight: 300; line-height: 1; }
+  .text-h2 { font-weight: 300; line-height: 1; }
+  .text-h3 { font-weight: 400; line-height: 1.05; }
+  .text-h4 { font-weight: 400; line-height: 1.175; }
+  .text-h5 { font-weight: 400; line-height: 1.333; }
+  .text-h6 { font-weight: 500; line-height: 1.6; }
+  .text-subtitle-1 { font-weight: normal; line-height: 1.75; }
+  .text-subtitle-2 { font-weight: 500; line-height: 1.6; }
+  .text-body-1 { font-weight: 400; line-height: 1.5; }
+  .text-body-2 { font-weight: 400; line-height: 1.425; }
+  .text-button { font-weight: 500; line-height: 2.6; }
+  .text-caption { font-weight: 400; line-height: 1.667; }
+  .text-overline { font-weight: 500; line-height: 2.667; }
+}
+
+/*
+ * 3. Component typography that Vuetify 4 moved to MD3 sizes.
+ * Card titles went from 20px/500 to 22px/400, buttons lost their uppercase
+ * label style (vuetify#21079), card text went from a 1.425 to a 20px line
+ * height (every card grew a little), list item titles from 0.15px to
+ * 0.5px letter-spacing (menus got wider) and the slider thumb label from
+ * 12px to 11px. Values are copied from 3.13.8.
+ */
+@layer vuetify-overrides {
+  .v-card-title {
+    font-size: 1.25rem;
+    font-weight: 500;
+    letter-spacing: 0.0125em;
+  }
+  .v-card .v-card-title { line-height: 1.6; }
+  .v-card--density-comfortable .v-card-title { line-height: 1.75rem; }
+  .v-card--density-compact .v-card-title { line-height: 1.55rem; }
+  /* Ported with the rules that outrank it in Vuetify 3 (density, dialogs). */
+  .v-card .v-card-text { line-height: 1.425; }
+  .v-card--density-comfortable .v-card-text { line-height: 1.2rem; }
+  .v-card--density-compact .v-card-text { line-height: 1.15rem; }
+  .v-dialog > .v-overlay__content > .v-card > .v-card-text,
+  .v-dialog > .v-overlay__content > form > .v-card > .v-card-text { line-height: inherit; }
+
+  .v-list-item-title { letter-spacing: 0.009375em; }
+  .v-list-item--nav .v-list-item-title { letter-spacing: normal; }
+
+  .v-empty-state__title {
+    font-size: 1.25rem;
+    font-weight: 500;
+    line-height: 1.6;
+  }
+
+  .v-btn {
+    letter-spacing: 0.0892857143em;
+    text-indent: 0.0892857143em;
+    text-transform: uppercase;
+  }
+
+  /*
+   * Vuetify 4 lays buttons out with flex instead of grid, and clips them
+   * (overflow: hidden) instead of rounding the layers inside them.
+   * - Both layouts centre the label, but when it is taller than the button
+   *   (x-small, compact buttons) the grid let it hang from the top, uncut,
+   *   while flex centres the overflow and the clip cuts it. `safe center`
+   *   falls back to start alignment exactly when the content overflows.
+   * - The rounded clip also changes how Chromium antialiases the label on
+   *   filled buttons. The geometry is identical, but the glyph pixels differ.
+   * So buttons are unclipped again, and the hover/focus overlay, the tonal
+   * underlay and the ripple get back their own rounded corners, as in v3.
+   */
+  .v-btn {
+    align-items: safe center;
+    overflow: visible;
+  }
+  .v-btn__overlay,
+  .v-btn--variant-tonal > .v-btn__underlay,
+  .v-btn > .v-ripple__container {
+    border-radius: inherit;
+  }
+
+  .v-slider-thumb__label { font-size: 0.75rem; }
+}
+
+/*
+ * 4. Elevation (MD2 shadows).
+ * Vuetify 4 moved every shadow to the 6-level Material Design 3 scale, so
+ * dialogs, menus, snackbars, the temporary drawer, elevated buttons, cards
+ * and chips all got lighter, two-layer shadows.
+ *
+ * Components draw their default shadow in their own stylesheet. These are
+ * the Vuetify 3.13.8 rules for the components deckwatch uses, ported rule for
+ * rule (including the flat/border/disabled exceptions) so their relative
+ * precedence is unchanged.
+ */
+@layer vuetify-overrides {
+  .v-alert--variant-elevated {
+    box-shadow:
+      0px 2px 1px -1px var(--v-shadow-key-umbra-opacity, rgba(0, 0, 0, 0.2)),
+      0px 1px 1px 0px var(--v-shadow-key-penumbra-opacity, rgba(0, 0, 0, 0.14)),
+      0px 1px 3px 0px var(--v-shadow-key-ambient-opacity, rgba(0, 0, 0, 0.12));
+  }
+  .v-alert--variant-flat {
+    box-shadow: none;
+  }
+  .v-alert__border--border {
+    box-shadow: none;
+  }
+  .v-autocomplete__content {
+    box-shadow:
+      0px 2px 4px -1px var(--v-shadow-key-umbra-opacity, rgba(0, 0, 0, 0.2)),
+      0px 4px 5px 0px var(--v-shadow-key-penumbra-opacity, rgba(0, 0, 0, 0.14)),
+      0px 1px 10px 0px var(--v-shadow-key-ambient-opacity, rgba(0, 0, 0, 0.12));
+  }
+  .v-btn--border {
+    box-shadow: none;
+  }
+  .v-btn--variant-elevated {
+    box-shadow:
+      0px 3px 1px -2px var(--v-shadow-key-umbra-opacity, rgba(0, 0, 0, 0.2)),
+      0px 2px 2px 0px var(--v-shadow-key-penumbra-opacity, rgba(0, 0, 0, 0.14)),
+      0px 1px 5px 0px var(--v-shadow-key-ambient-opacity, rgba(0, 0, 0, 0.12));
+  }
+  .v-btn--variant-flat {
+    box-shadow: none;
+  }
+  .v-btn--elevated:hover,
+  .v-btn--elevated:focus {
+    box-shadow:
+      0px 2px 4px -1px var(--v-shadow-key-umbra-opacity, rgba(0, 0, 0, 0.2)),
+      0px 4px 5px 0px var(--v-shadow-key-penumbra-opacity, rgba(0, 0, 0, 0.14)),
+      0px 1px 10px 0px var(--v-shadow-key-ambient-opacity, rgba(0, 0, 0, 0.12));
+  }
+  .v-btn--elevated:active {
+    box-shadow:
+      0px 5px 5px -3px var(--v-shadow-key-umbra-opacity, rgba(0, 0, 0, 0.2)),
+      0px 8px 10px 1px var(--v-shadow-key-penumbra-opacity, rgba(0, 0, 0, 0.14)),
+      0px 3px 14px 2px var(--v-shadow-key-ambient-opacity, rgba(0, 0, 0, 0.12));
+  }
+  .v-btn--flat {
+    box-shadow: none;
+  }
+  .v-btn--disabled.v-btn--variant-elevated,
+  .v-btn--disabled.v-btn--variant-flat {
+    box-shadow: none;
+  }
+  .v-card--border {
+    box-shadow: none;
+  }
+  .v-card--variant-elevated {
+    box-shadow:
+      0px 2px 1px -1px var(--v-shadow-key-umbra-opacity, rgba(0, 0, 0, 0.2)),
+      0px 1px 1px 0px var(--v-shadow-key-penumbra-opacity, rgba(0, 0, 0, 0.14)),
+      0px 1px 3px 0px var(--v-shadow-key-ambient-opacity, rgba(0, 0, 0, 0.12));
+  }
+  .v-card--variant-flat {
+    box-shadow: none;
+  }
+  .v-card--flat {
+    box-shadow: none;
+  }
+  .v-card--hover::before {
+    box-shadow:
+      0px 2px 1px -1px var(--v-shadow-key-umbra-opacity, rgba(0, 0, 0, 0.2)),
+      0px 1px 1px 0px var(--v-shadow-key-penumbra-opacity, rgba(0, 0, 0, 0.14)),
+      0px 1px 3px 0px var(--v-shadow-key-ambient-opacity, rgba(0, 0, 0, 0.12));
+  }
+  .v-card--hover::after {
+    box-shadow:
+      0px 5px 5px -3px var(--v-shadow-key-umbra-opacity, rgba(0, 0, 0, 0.2)),
+      0px 8px 10px 1px var(--v-shadow-key-penumbra-opacity, rgba(0, 0, 0, 0.14)),
+      0px 3px 14px 2px var(--v-shadow-key-ambient-opacity, rgba(0, 0, 0, 0.12));
+  }
+  .v-card--hover:hover {
+    box-shadow:
+      0px 5px 5px -3px var(--v-shadow-key-umbra-opacity, rgba(0, 0, 0, 0.2)),
+      0px 8px 10px 1px var(--v-shadow-key-penumbra-opacity, rgba(0, 0, 0, 0.14)),
+      0px 3px 14px 2px var(--v-shadow-key-ambient-opacity, rgba(0, 0, 0, 0.12));
+  }
+  .v-chip--variant-elevated {
+    box-shadow:
+      0px 2px 1px -1px var(--v-shadow-key-umbra-opacity, rgba(0, 0, 0, 0.2)),
+      0px 1px 1px 0px var(--v-shadow-key-penumbra-opacity, rgba(0, 0, 0, 0.14)),
+      0px 1px 3px 0px var(--v-shadow-key-ambient-opacity, rgba(0, 0, 0, 0.12));
+  }
+  .v-chip--variant-flat {
+    box-shadow: none;
+  }
+  .v-combobox__content {
+    box-shadow:
+      0px 2px 4px -1px var(--v-shadow-key-umbra-opacity, rgba(0, 0, 0, 0.2)),
+      0px 4px 5px 0px var(--v-shadow-key-penumbra-opacity, rgba(0, 0, 0, 0.14)),
+      0px 1px 10px 0px var(--v-shadow-key-ambient-opacity, rgba(0, 0, 0, 0.12));
+  }
+  .v-dialog > .v-overlay__content > .v-card,
+  .v-dialog > .v-overlay__content > .v-sheet,
+  .v-dialog > .v-overlay__content > form > .v-card,
+  .v-dialog > .v-overlay__content > form > .v-sheet {
+    box-shadow:
+      0px 11px 15px -7px var(--v-shadow-key-umbra-opacity, rgba(0, 0, 0, 0.2)),
+      0px 24px 38px 3px var(--v-shadow-key-penumbra-opacity, rgba(0, 0, 0, 0.14)),
+      0px 9px 46px 8px var(--v-shadow-key-ambient-opacity, rgba(0, 0, 0, 0.12));
+  }
+  .v-expansion-panel__shadow {
+    box-shadow:
+      0px 3px 1px -2px var(--v-shadow-key-umbra-opacity, rgba(0, 0, 0, 0.2)),
+      0px 2px 2px 0px var(--v-shadow-key-penumbra-opacity, rgba(0, 0, 0, 0.14)),
+      0px 1px 5px 0px var(--v-shadow-key-ambient-opacity, rgba(0, 0, 0, 0.12));
+  }
+  .v-list-item--variant-elevated {
+    box-shadow:
+      0px 2px 1px -1px var(--v-shadow-key-umbra-opacity, rgba(0, 0, 0, 0.2)),
+      0px 1px 1px 0px var(--v-shadow-key-penumbra-opacity, rgba(0, 0, 0, 0.14)),
+      0px 1px 3px 0px var(--v-shadow-key-ambient-opacity, rgba(0, 0, 0, 0.12));
+  }
+  .v-list-item--variant-flat {
+    box-shadow: none;
+  }
+  .v-menu > .v-overlay__content > .v-card,
+  .v-menu > .v-overlay__content > .v-sheet,
+  .v-menu > .v-overlay__content > .v-list {
+    box-shadow:
+      0px 5px 5px -3px var(--v-shadow-key-umbra-opacity, rgba(0, 0, 0, 0.2)),
+      0px 8px 10px 1px var(--v-shadow-key-penumbra-opacity, rgba(0, 0, 0, 0.14)),
+      0px 3px 14px 2px var(--v-shadow-key-ambient-opacity, rgba(0, 0, 0, 0.12));
+  }
+  .v-navigation-drawer--border {
+    box-shadow: none;
+  }
+  .v-navigation-drawer--temporary.v-navigation-drawer--active {
+    box-shadow:
+      0px 8px 10px -5px var(--v-shadow-key-umbra-opacity, rgba(0, 0, 0, 0.2)),
+      0px 16px 24px 2px var(--v-shadow-key-penumbra-opacity, rgba(0, 0, 0, 0.14)),
+      0px 6px 30px 5px var(--v-shadow-key-ambient-opacity, rgba(0, 0, 0, 0.12));
+  }
+  .v-select__content {
+    box-shadow:
+      0px 2px 4px -1px var(--v-shadow-key-umbra-opacity, rgba(0, 0, 0, 0.2)),
+      0px 4px 5px 0px var(--v-shadow-key-penumbra-opacity, rgba(0, 0, 0, 0.14)),
+      0px 1px 10px 0px var(--v-shadow-key-ambient-opacity, rgba(0, 0, 0, 0.12));
+  }
+  .v-snackbar--variant-elevated {
+    box-shadow:
+      0px 3px 5px -1px var(--v-shadow-key-umbra-opacity, rgba(0, 0, 0, 0.2)),
+      0px 6px 10px 0px var(--v-shadow-key-penumbra-opacity, rgba(0, 0, 0, 0.14)),
+      0px 1px 18px 0px var(--v-shadow-key-ambient-opacity, rgba(0, 0, 0, 0.12));
+  }
+  .v-snackbar--variant-flat {
+    box-shadow: none;
+  }
+  .v-stepper.v-sheet {
+    box-shadow:
+      0px 3px 1px -2px var(--v-shadow-key-umbra-opacity, rgba(0, 0, 0, 0.2)),
+      0px 2px 2px 0px var(--v-shadow-key-penumbra-opacity, rgba(0, 0, 0, 0.14)),
+      0px 1px 5px 0px var(--v-shadow-key-ambient-opacity, rgba(0, 0, 0, 0.12));
+  }
+  .v-stepper.v-sheet.v-stepper--flat {
+    box-shadow: none;
+  }
+  .v-stepper-header {
+    box-shadow:
+      0px 3px 1px -2px var(--v-shadow-key-umbra-opacity, rgba(0, 0, 0, 0.2)),
+      0px 2px 2px 0px var(--v-shadow-key-penumbra-opacity, rgba(0, 0, 0, 0.14)),
+      0px 1px 5px 0px var(--v-shadow-key-ambient-opacity, rgba(0, 0, 0, 0.12));
+  }
+  .v-switch:not(.v-switch--inset) .v-switch__thumb {
+    box-shadow:
+      0px 2px 4px -1px var(--v-shadow-key-umbra-opacity, rgba(0, 0, 0, 0.2)),
+      0px 4px 5px 0px var(--v-shadow-key-penumbra-opacity, rgba(0, 0, 0, 0.14)),
+      0px 1px 10px 0px var(--v-shadow-key-ambient-opacity, rgba(0, 0, 0, 0.12));
+  }
+  .v-switch.v-switch--flat:not(.v-switch--inset) .v-switch__thumb {
+    box-shadow: none;
+  }
+  .v-switch.v-switch--indeterminate .v-switch__thumb {
+    box-shadow: none;
+  }
+}
+
+/*
+ * Components that take an `elevation` prop (the slider thumb by default) use
+ * the elevation-N utility classes instead. This is the upgrade guide's
+ * "Reverting to legacy MD2 Shadows" stylesheet, verbatim:
+ * https://vuetifyjs.com/en/getting-started/elevation-migration/
+ */
+.elevation-0 {
+  box-shadow:
+    0px 0px 0px 0px rgba(0, 0, 0, 0.2),
+    0px 0px 0px 0px rgba(0, 0, 0, 0.14),
+    0px 0px 0px 0px rgba(0, 0, 0, 0.12) !important;
+}
+.elevation-1 {
+  box-shadow:
+    0px 2px 1px -1px rgba(0, 0, 0, 0.2),
+    0px 1px 1px 0px rgba(0, 0, 0, 0.14),
+    0px 1px 3px 0px rgba(0, 0, 0, 0.12) !important;
+}
+.elevation-2 {
+  box-shadow:
+    0px 3px 1px -2px rgba(0, 0, 0, 0.2),
+    0px 2px 2px 0px rgba(0, 0, 0, 0.14),
+    0px 1px 5px 0px rgba(0, 0, 0, 0.12) !important;
+}
+.elevation-3 {
+  box-shadow:
+    0px 3px 3px -2px rgba(0, 0, 0, 0.2),
+    0px 3px 4px 0px rgba(0, 0, 0, 0.14),
+    0px 1px 8px 0px rgba(0, 0, 0, 0.12) !important;
+}
+.elevation-4 {
+  box-shadow:
+    0px 2px 4px -1px rgba(0, 0, 0, 0.2),
+    0px 4px 5px 0px rgba(0, 0, 0, 0.14),
+    0px 1px 10px 0px rgba(0, 0, 0, 0.12) !important;
+}
+.elevation-5 {
+  box-shadow:
+    0px 3px 5px -1px rgba(0, 0, 0, 0.2),
+    0px 5px 8px 0px rgba(0, 0, 0, 0.14),
+    0px 1px 14px 0px rgba(0, 0, 0, 0.12) !important;
+}
+.elevation-6 {
+  box-shadow:
+    0px 3px 5px -1px rgba(0, 0, 0, 0.2),
+    0px 6px 10px 0px rgba(0, 0, 0, 0.14),
+    0px 1px 18px 0px rgba(0, 0, 0, 0.12) !important;
+}
+.elevation-7 {
+  box-shadow:
+    0px 4px 5px -2px rgba(0, 0, 0, 0.2),
+    0px 7px 10px 1px rgba(0, 0, 0, 0.14),
+    0px 2px 16px 1px rgba(0, 0, 0, 0.12) !important;
+}
+.elevation-8 {
+  box-shadow:
+    0px 5px 5px -3px rgba(0, 0, 0, 0.2),
+    0px 8px 10px 1px rgba(0, 0, 0, 0.14),
+    0px 3px 14px 2px rgba(0, 0, 0, 0.12) !important;
+}
+.elevation-9 {
+  box-shadow:
+    0px 5px 6px -3px rgba(0, 0, 0, 0.2),
+    0px 9px 12px 1px rgba(0, 0, 0, 0.14),
+    0px 3px 16px 2px rgba(0, 0, 0, 0.12) !important;
+}
+.elevation-10 {
+  box-shadow:
+    0px 6px 6px -3px rgba(0, 0, 0, 0.2),
+    0px 10px 14px 1px rgba(0, 0, 0, 0.14),
+    0px 4px 18px 3px rgba(0, 0, 0, 0.12) !important;
+}
+.elevation-11 {
+  box-shadow:
+    0px 6px 7px -4px rgba(0, 0, 0, 0.2),
+    0px 11px 15px 1px rgba(0, 0, 0, 0.14),
+    0px 4px 20px 3px rgba(0, 0, 0, 0.12) !important;
+}
+.elevation-12 {
+  box-shadow:
+    0px 7px 8px -4px rgba(0, 0, 0, 0.2),
+    0px 12px 17px 2px rgba(0, 0, 0, 0.14),
+    0px 5px 22px 4px rgba(0, 0, 0, 0.12) !important;
+}
+.elevation-13 {
+  box-shadow:
+    0px 7px 8px -4px rgba(0, 0, 0, 0.2),
+    0px 13px 19px 2px rgba(0, 0, 0, 0.14),
+    0px 5px 24px 4px rgba(0, 0, 0, 0.12) !important;
+}
+.elevation-14 {
+  box-shadow:
+    0px 7px 9px -4px rgba(0, 0, 0, 0.2),
+    0px 14px 21px 2px rgba(0, 0, 0, 0.14),
+    0px 5px 26px 4px rgba(0, 0, 0, 0.12) !important;
+}
+.elevation-15 {
+  box-shadow:
+    0px 8px 9px -5px rgba(0, 0, 0, 0.2),
+    0px 15px 22px 2px rgba(0, 0, 0, 0.14),
+    0px 6px 28px 5px rgba(0, 0, 0, 0.12) !important;
+}
+.elevation-16 {
+  box-shadow:
+    0px 8px 10px -5px rgba(0, 0, 0, 0.2),
+    0px 16px 24px 2px rgba(0, 0, 0, 0.14),
+    0px 6px 30px 5px rgba(0, 0, 0, 0.12) !important;
+}
+.elevation-17 {
+  box-shadow:
+    0px 8px 11px -5px rgba(0, 0, 0, 0.2),
+    0px 17px 26px 2px rgba(0, 0, 0, 0.14),
+    0px 6px 32px 5px rgba(0, 0, 0, 0.12) !important;
+}
+.elevation-18 {
+  box-shadow:
+    0px 9px 11px -5px rgba(0, 0, 0, 0.2),
+    0px 18px 28px 2px rgba(0, 0, 0, 0.14),
+    0px 7px 34px 6px rgba(0, 0, 0, 0.12) !important;
+}
+.elevation-19 {
+  box-shadow:
+    0px 9px 12px -6px rgba(0, 0, 0, 0.2),
+    0px 19px 29px 2px rgba(0, 0, 0, 0.14),
+    0px 7px 36px 6px rgba(0, 0, 0, 0.12) !important;
+}
+.elevation-20 {
+  box-shadow:
+    0px 10px 13px -6px rgba(0, 0, 0, 0.2),
+    0px 20px 31px 3px rgba(0, 0, 0, 0.14),
+    0px 8px 38px 7px rgba(0, 0, 0, 0.12) !important;
+}
+.elevation-21 {
+  box-shadow:
+    0px 10px 13px -6px rgba(0, 0, 0, 0.2),
+    0px 21px 33px 3px rgba(0, 0, 0, 0.14),
+    0px 8px 40px 7px rgba(0, 0, 0, 0.12) !important;
+}
+.elevation-22 {
+  box-shadow:
+    0px 10px 14px -6px rgba(0, 0, 0, 0.2),
+    0px 22px 35px 3px rgba(0, 0, 0, 0.14),
+    0px 8px 42px 7px rgba(0, 0, 0, 0.12) !important;
+}
+.elevation-23 {
+  box-shadow:
+    0px 11px 14px -7px rgba(0, 0, 0, 0.2),
+    0px 23px 36px 3px rgba(0, 0, 0, 0.14),
+    0px 9px 44px 8px rgba(0, 0, 0, 0.12) !important;
+}
+.elevation-24 {
+  box-shadow:
+    0px 11px 15px -7px rgba(0, 0, 0, 0.2),
+    0px 24px 38px 3px rgba(0, 0, 0, 0.14),
+    0px 9px 46px 8px rgba(0, 0, 0, 0.12) !important;
+}
+
+/*
+ * 5. Grid (negative margins and column padding).
+ * Vuetify 4 spaces columns with CSS gap. The column widths and gutters are
+ * the same, but a row with a margin utility (mb-4, mt-2, ...) no longer has
+ * the column padding on that side, so it sits closer to its neighbour. This
+ * is the upgrade guide's "Grid legacy mode" override, verbatim:
+ * https://vuetifyjs.com/en/getting-started/grid-legacy-mode/
+ */
+@layer vuetify-overrides {
+  .v-row {
+    gap: unset;
+    margin: calc(var(--v-col-gap-y) * -.5) calc(var(--v-col-gap-x) * -.5);
+  }
+  .v-row + .v-row {
+    margin-top: calc(var(--v-col-gap-y) * .5);
+  }
+  .v-col {
+    padding: calc(var(--v-col-gap-y) * .5) calc(var(--v-col-gap-x) * .5);
+    flex-basis: var(--v-col-is-size, calc(100% * var(--v-col-size) / var(--v-col-size-columns))) var(--v-col-is-auto, auto) var(--v-col-is-grow, 0);
+  }
+  .v-col:where([class*='v-col--offset-']) {
+    margin-inline-start: calc(100% * var(--v-col-offset) / var(--v-col-size-columns))
+  }
+}
+
+/*
+ * 6. Container widths.
+ * vite.config.ts moves Vuetify 4's breakpoints back to the Vuetify 3 values,
+ * but Vuetify 4 also narrowed the container max-widths (700/1000/1400/2000px
+ * instead of 900/1200/1800/2400px). Only non-fluid containers (the auth
+ * callback page) are affected.
+ */
+@layer vuetify-overrides {
+  @media (min-width: 960px) {
+    .v-container { max-width: 900px; }
+  }
+  @media (min-width: 1280px) {
+    .v-container { max-width: 1200px; }
+  }
+  @media (min-width: 1920px) {
+    .v-container { max-width: 1800px; }
+  }
+  @media (min-width: 2560px) {
+    .v-container { max-width: 2400px; }
+  }
+  .v-container--fluid {
+    max-width: 100%;
+  }
+}
+
+/*
+ * 7. Column widths, as Vuetify 3 declared them.
+ * Vuetify 3 declares each column size as a percentage
+ * (.v-col-md-4 { flex: 0 0 33.3333333333%; max-width: 33.3333333333% }),
+ * which the production build's CSS minifier shortens to six digits
+ * (33.3333%). Vuetify 4 computes the width at runtime as
+ * calc(100% * 4 / 12), a hair wider. Chromium lays out in 1/64px steps, so
+ * in some rows a column starts one step further right and its text renders
+ * differently (the plugin marketplace cards). These are Vuetify 3's column
+ * rules (grow, auto and 1-12 at each breakpoint, in its order), on Vuetify
+ * 4's class names (.v-col--md, .v-col--cols-md-4), for the grid legacy mode
+ * in section 5; delete them together.
+ */
+@layer vuetify-overrides {
+  .v-col { flex-basis: 0; flex-grow: 1; max-width: 100%; }
+  .v-col--cols-auto { flex: 0 0 auto; width: auto; max-width: 100%; }
+  .v-col--cols-1 { flex: 0 0 8.3333333333%; max-width: 8.3333333333%; }
+  .v-col--cols-2 { flex: 0 0 16.6666666667%; max-width: 16.6666666667%; }
+  .v-col--cols-3 { flex: 0 0 25%; max-width: 25%; }
+  .v-col--cols-4 { flex: 0 0 33.3333333333%; max-width: 33.3333333333%; }
+  .v-col--cols-5 { flex: 0 0 41.6666666667%; max-width: 41.6666666667%; }
+  .v-col--cols-6 { flex: 0 0 50%; max-width: 50%; }
+  .v-col--cols-7 { flex: 0 0 58.3333333333%; max-width: 58.3333333333%; }
+  .v-col--cols-8 { flex: 0 0 66.6666666667%; max-width: 66.6666666667%; }
+  .v-col--cols-9 { flex: 0 0 75%; max-width: 75%; }
+  .v-col--cols-10 { flex: 0 0 83.3333333333%; max-width: 83.3333333333%; }
+  .v-col--cols-11 { flex: 0 0 91.6666666667%; max-width: 91.6666666667%; }
+  .v-col--cols-12 { flex: 0 0 100%; max-width: 100%; }
+  @media (min-width: 600px) {
+    .v-col--sm { flex-basis: 0; flex-grow: 1; max-width: 100%; }
+    .v-col--cols-sm-auto { flex: 0 0 auto; width: auto; max-width: 100%; }
+    .v-col--cols-sm-1 { flex: 0 0 8.3333333333%; max-width: 8.3333333333%; }
+    .v-col--cols-sm-2 { flex: 0 0 16.6666666667%; max-width: 16.6666666667%; }
+    .v-col--cols-sm-3 { flex: 0 0 25%; max-width: 25%; }
+    .v-col--cols-sm-4 { flex: 0 0 33.3333333333%; max-width: 33.3333333333%; }
+    .v-col--cols-sm-5 { flex: 0 0 41.6666666667%; max-width: 41.6666666667%; }
+    .v-col--cols-sm-6 { flex: 0 0 50%; max-width: 50%; }
+    .v-col--cols-sm-7 { flex: 0 0 58.3333333333%; max-width: 58.3333333333%; }
+    .v-col--cols-sm-8 { flex: 0 0 66.6666666667%; max-width: 66.6666666667%; }
+    .v-col--cols-sm-9 { flex: 0 0 75%; max-width: 75%; }
+    .v-col--cols-sm-10 { flex: 0 0 83.3333333333%; max-width: 83.3333333333%; }
+    .v-col--cols-sm-11 { flex: 0 0 91.6666666667%; max-width: 91.6666666667%; }
+    .v-col--cols-sm-12 { flex: 0 0 100%; max-width: 100%; }
+  }
+  @media (min-width: 960px) {
+    .v-col--md { flex-basis: 0; flex-grow: 1; max-width: 100%; }
+    .v-col--cols-md-auto { flex: 0 0 auto; width: auto; max-width: 100%; }
+    .v-col--cols-md-1 { flex: 0 0 8.3333333333%; max-width: 8.3333333333%; }
+    .v-col--cols-md-2 { flex: 0 0 16.6666666667%; max-width: 16.6666666667%; }
+    .v-col--cols-md-3 { flex: 0 0 25%; max-width: 25%; }
+    .v-col--cols-md-4 { flex: 0 0 33.3333333333%; max-width: 33.3333333333%; }
+    .v-col--cols-md-5 { flex: 0 0 41.6666666667%; max-width: 41.6666666667%; }
+    .v-col--cols-md-6 { flex: 0 0 50%; max-width: 50%; }
+    .v-col--cols-md-7 { flex: 0 0 58.3333333333%; max-width: 58.3333333333%; }
+    .v-col--cols-md-8 { flex: 0 0 66.6666666667%; max-width: 66.6666666667%; }
+    .v-col--cols-md-9 { flex: 0 0 75%; max-width: 75%; }
+    .v-col--cols-md-10 { flex: 0 0 83.3333333333%; max-width: 83.3333333333%; }
+    .v-col--cols-md-11 { flex: 0 0 91.6666666667%; max-width: 91.6666666667%; }
+    .v-col--cols-md-12 { flex: 0 0 100%; max-width: 100%; }
+  }
+  @media (min-width: 1280px) {
+    .v-col--lg { flex-basis: 0; flex-grow: 1; max-width: 100%; }
+    .v-col--cols-lg-auto { flex: 0 0 auto; width: auto; max-width: 100%; }
+    .v-col--cols-lg-1 { flex: 0 0 8.3333333333%; max-width: 8.3333333333%; }
+    .v-col--cols-lg-2 { flex: 0 0 16.6666666667%; max-width: 16.6666666667%; }
+    .v-col--cols-lg-3 { flex: 0 0 25%; max-width: 25%; }
+    .v-col--cols-lg-4 { flex: 0 0 33.3333333333%; max-width: 33.3333333333%; }
+    .v-col--cols-lg-5 { flex: 0 0 41.6666666667%; max-width: 41.6666666667%; }
+    .v-col--cols-lg-6 { flex: 0 0 50%; max-width: 50%; }
+    .v-col--cols-lg-7 { flex: 0 0 58.3333333333%; max-width: 58.3333333333%; }
+    .v-col--cols-lg-8 { flex: 0 0 66.6666666667%; max-width: 66.6666666667%; }
+    .v-col--cols-lg-9 { flex: 0 0 75%; max-width: 75%; }
+    .v-col--cols-lg-10 { flex: 0 0 83.3333333333%; max-width: 83.3333333333%; }
+    .v-col--cols-lg-11 { flex: 0 0 91.6666666667%; max-width: 91.6666666667%; }
+    .v-col--cols-lg-12 { flex: 0 0 100%; max-width: 100%; }
+  }
+  @media (min-width: 1920px) {
+    .v-col--xl { flex-basis: 0; flex-grow: 1; max-width: 100%; }
+    .v-col--cols-xl-auto { flex: 0 0 auto; width: auto; max-width: 100%; }
+    .v-col--cols-xl-1 { flex: 0 0 8.3333333333%; max-width: 8.3333333333%; }
+    .v-col--cols-xl-2 { flex: 0 0 16.6666666667%; max-width: 16.6666666667%; }
+    .v-col--cols-xl-3 { flex: 0 0 25%; max-width: 25%; }
+    .v-col--cols-xl-4 { flex: 0 0 33.3333333333%; max-width: 33.3333333333%; }
+    .v-col--cols-xl-5 { flex: 0 0 41.6666666667%; max-width: 41.6666666667%; }
+    .v-col--cols-xl-6 { flex: 0 0 50%; max-width: 50%; }
+    .v-col--cols-xl-7 { flex: 0 0 58.3333333333%; max-width: 58.3333333333%; }
+    .v-col--cols-xl-8 { flex: 0 0 66.6666666667%; max-width: 66.6666666667%; }
+    .v-col--cols-xl-9 { flex: 0 0 75%; max-width: 75%; }
+    .v-col--cols-xl-10 { flex: 0 0 83.3333333333%; max-width: 83.3333333333%; }
+    .v-col--cols-xl-11 { flex: 0 0 91.6666666667%; max-width: 91.6666666667%; }
+    .v-col--cols-xl-12 { flex: 0 0 100%; max-width: 100%; }
+  }
+  @media (min-width: 2560px) {
+    .v-col--xxl { flex-basis: 0; flex-grow: 1; max-width: 100%; }
+    .v-col--cols-xxl-auto { flex: 0 0 auto; width: auto; max-width: 100%; }
+    .v-col--cols-xxl-1 { flex: 0 0 8.3333333333%; max-width: 8.3333333333%; }
+    .v-col--cols-xxl-2 { flex: 0 0 16.6666666667%; max-width: 16.6666666667%; }
+    .v-col--cols-xxl-3 { flex: 0 0 25%; max-width: 25%; }
+    .v-col--cols-xxl-4 { flex: 0 0 33.3333333333%; max-width: 33.3333333333%; }
+    .v-col--cols-xxl-5 { flex: 0 0 41.6666666667%; max-width: 41.6666666667%; }
+    .v-col--cols-xxl-6 { flex: 0 0 50%; max-width: 50%; }
+    .v-col--cols-xxl-7 { flex: 0 0 58.3333333333%; max-width: 58.3333333333%; }
+    .v-col--cols-xxl-8 { flex: 0 0 66.6666666667%; max-width: 66.6666666667%; }
+    .v-col--cols-xxl-9 { flex: 0 0 75%; max-width: 75%; }
+    .v-col--cols-xxl-10 { flex: 0 0 83.3333333333%; max-width: 83.3333333333%; }
+    .v-col--cols-xxl-11 { flex: 0 0 91.6666666667%; max-width: 91.6666666667%; }
+    .v-col--cols-xxl-12 { flex: 0 0 100%; max-width: 100%; }
+  }
+}

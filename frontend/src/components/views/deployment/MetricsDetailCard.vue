@@ -99,7 +99,7 @@ const hasAnyData = computed(() => props.series.size > 0);
     </v-card-text>
 
     <v-container v-else fluid class="pa-2">
-      <v-row dense>
+      <v-row density="compact">
         <v-col cols="12" md="6">
           <v-card variant="tonal" class="pa-3">
             <MetricPanel

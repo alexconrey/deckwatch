@@ -1352,7 +1352,7 @@ onMounted(load);
               Uncheck to mute a class of event. If nothing is checked, deckwatch
               treats it as "everything" to match the pre-filter behavior.
             </p>
-            <v-row dense>
+            <v-row density="compact">
               <v-col
                 v-for="evt in NOTIFICATION_EVENTS"
                 :key="evt.value"
@@ -1576,8 +1576,8 @@ onMounted(load);
                 <v-row
                   v-for="(row, idx) in scParamRows"
                   :key="`sc-param-${idx}`"
-                  dense
-                  align="center"
+                  density="compact"
+                  class="align-center"
                 >
                   <v-col cols="5">
                     <v-text-field
@@ -2266,7 +2266,7 @@ onMounted(load);
                 </div>
               </v-expansion-panel-title>
               <v-expansion-panel-text>
-                <v-row dense>
+                <v-row density="compact">
                   <v-col cols="12" md="4">
                     <v-text-field
                       v-model="tpl.id"
@@ -2320,7 +2320,7 @@ onMounted(load);
                   Fields pre-filled into the "Create Deployment" form. Leave
                   <code>image</code> blank to force the operator to pick one.
                 </p>
-                <v-row dense>
+                <v-row density="compact">
                   <v-col cols="12" md="6">
                     <v-text-field
                       :model-value="payloadField(idx, 'image')"
@@ -2457,7 +2457,7 @@ onMounted(load);
                 </div>
               </v-expansion-panel-title>
               <v-expansion-panel-text>
-                <v-row dense>
+                <v-row density="compact">
                   <v-col cols="12" md="5">
                     <v-text-field
                       v-model="tpl.name"
@@ -2512,8 +2512,8 @@ onMounted(load);
                 <v-row
                   v-for="(value, key) in tpl.annotations"
                   :key="`itpl-${idx}-ann-${key}`"
-                  dense
-                  align="center"
+                  density="compact"
+                  class="align-center"
                 >
                   <v-col cols="5">
                     <v-text-field
@@ -2595,7 +2595,7 @@ onMounted(load);
             variant="outlined"
             class="mb-3 pa-3"
           >
-            <v-row dense align="center">
+            <v-row density="compact" class="align-center">
               <v-col cols="12" md="3">
                 <v-text-field
                   v-model="repo.name"
@@ -2666,7 +2666,7 @@ onMounted(load);
             variant="outlined"
             class="mb-3 pa-3"
           >
-            <v-row dense align="center">
+            <v-row density="compact" class="align-center">
               <v-col cols="12" md="4">
                 <div class="text-subtitle-2">{{ t.name }}</div>
                 <div class="text-caption text-secondary">{{ t.secret_name }}</div>
@@ -2797,7 +2797,7 @@ onMounted(load);
             variant="outlined"
             class="mb-3 pa-3"
           >
-            <v-row dense align="center">
+            <v-row density="compact" class="align-center">
               <v-col cols="12" md="3">
                 <v-text-field
                   v-model="reg.name"
@@ -2994,7 +2994,7 @@ onMounted(load);
               </div>
             </div>
 
-            <v-row dense>
+            <v-row density="compact">
               <v-col cols="12" sm="6">
                 <v-text-field
                   v-model="plugin.name"
@@ -3022,7 +3022,7 @@ onMounted(load);
 
             <!-- GitHub source -->
             <template v-if="plugin.source.type === 'github'">
-              <v-row dense class="mt-1">
+              <v-row density="compact" class="mt-1">
                 <v-col cols="12" sm="6">
                   <v-text-field
                     v-model="(plugin.source as any).repo"
@@ -3051,7 +3051,7 @@ onMounted(load);
                   />
                 </v-col>
               </v-row>
-              <v-row dense>
+              <v-row density="compact">
                 <v-col cols="12" sm="6">
                   <v-switch
                     v-model="(plugin.source as any).use_release"
@@ -3077,7 +3077,7 @@ onMounted(load);
 
             <!-- URL source -->
             <template v-else>
-              <v-row dense class="mt-1">
+              <v-row density="compact" class="mt-1">
                 <v-col cols="12">
                   <v-text-field
                     v-model="(plugin.source as any).url"
@@ -3088,7 +3088,7 @@ onMounted(load);
                   />
                 </v-col>
               </v-row>
-              <v-row dense>
+              <v-row density="compact">
                 <v-col cols="12" sm="6">
                   <v-text-field
                     v-model="plugin.token_secret"
@@ -3149,7 +3149,7 @@ onMounted(load);
             <v-row
               v-for="(envVar, configKey) in plugin.inherit_env_file_keys"
               :key="configKey"
-              dense
+              density="compact"
               class="mb-1"
             >
               <v-col cols="5">
@@ -3201,7 +3201,7 @@ onMounted(load);
             <v-row
               v-for="(_, key) in plugin.config"
               :key="key"
-              dense
+              density="compact"
               class="mb-1"
             >
               <v-col cols="5">
@@ -3281,7 +3281,7 @@ onMounted(load);
             </v-card-text>
           </v-card>
 
-          <v-row dense>
+          <v-row density="compact">
             <v-col
               v-for="group in mcpTuningGroups"
               :key="group.key"
@@ -3330,7 +3330,7 @@ onMounted(load);
               <div class="text-caption text-medium-emphasis mb-3">
                 Plugin-declared naming conventions injected into MCP sessions when enabled.
               </div>
-              <v-row dense>
+              <v-row density="compact">
                 <v-col
                   v-for="field in (lp.mcp_tuning_fields as McpTuningField[])"
                   :key="field.key"

@@ -139,7 +139,7 @@ const handleSave = () => {
         />
       </div>
       <div v-if="forms[row.key].enabled" class="pl-6">
-        <v-row dense>
+        <v-row density="compact">
           <v-col cols="4">
             <v-select
               v-model="forms[row.key].probe_type"
@@ -180,7 +180,7 @@ const handleSave = () => {
             />
           </v-col>
         </v-row>
-        <v-row dense class="mt-2">
+        <v-row density="compact" class="mt-2">
           <v-col cols="6" md="3">
             <v-text-field
               v-model.number="forms[row.key].initial_delay_seconds"

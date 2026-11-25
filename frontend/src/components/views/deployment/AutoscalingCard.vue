@@ -187,7 +187,7 @@ const conditionColor = (status: string) => {
       <v-card>
         <v-card-title>{{ enabled ? "Edit Autoscaling" : "Enable Autoscaling" }}</v-card-title>
         <v-card-text>
-          <v-row dense>
+          <v-row density="compact">
             <v-col cols="6">
               <v-text-field v-model.number="form.minReplicas" label="Min Replicas" type="number" min="1" />
             </v-col>
