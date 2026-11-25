@@ -927,17 +927,25 @@ pub async fn put_settings(
         }
     }
 
+    // A removed or disabled plugin stops running now, even the last one.
+    crate::plugins::unload_disabled(&state, &settings).await;
+
     // Re-fetch plugins in the background so the response isn't delayed by
-    // network I/O. The new plugin set is live for subsequent deploys.
+    // network I/O. The new plugin set is live for subsequent deploys, unless
+    // the plugin settings changed again meanwhile.
     if !settings.plugins.is_empty() {
         let state_clone = state.clone();
         let plugins_snapshot = settings.plugins.clone();
         tokio::spawn(async move {
-            let s = plugin_fetch_settings(&state_clone, plugins_snapshot).await;
+            let s = plugin_fetch_settings(&state_clone, plugins_snapshot.clone()).await;
             let loaded = crate::plugins::fetch_plugins(&s, &state_clone).await;
             tracing::info!(count = loaded.len(), "plugin refresh complete");
-            *state_clone.plugins.write().await = loaded;
-            state_clone.plugin_patch_fingerprints.lock().await.clear();
+            crate::plugins::install_reload(
+                &state_clone,
+                crate::plugins::ReloadedFrom::All(&plugins_snapshot),
+                loaded,
+            )
+            .await;
         });
     }
 
