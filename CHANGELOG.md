@@ -24,7 +24,8 @@ Kubernetes 1.33 or newer; makes outbound HTTPS configurable (extra trusted
 CAs, and endpoint overrides that stored credentials can't follow); shows
 plugin problems where they happen (in API and MCP responses, a Problems view,
 Kubernetes Events and notifications); can export deckwatch's own traces and
-logs over OTLP;
+logs over OTLP; audits every MCP call that changes something or is refused,
+with an MCP activity page;
 and fixes several plugin lifecycle bugs. Some changes need action before or
 after the upgrade: read the upgrade notes first.
 
@@ -45,10 +46,20 @@ first.
   [docs/MCP.md](docs/MCP.md). (#252)
 - **Back up the database before upgrading.** 0.7.0 migrates it on startup:
   `m20261124_000001_gitops_token_binding` adds `gitops_configs.token_binding`
-  (#253), and `m20261124_000002_plugin_status` adds the `plugin_status` table
-  (#263). deckwatch 0.6.x refuses to start on a migrated database (sea-orm
-  reports those migrations as missing), so rolling back means restoring the
-  backup.
+  (#253), `m20261124_000002_plugin_status` adds the `plugin_status` table
+  (#263), and `m20261124_000003_audit_log_mcp` adds the `source`, `tool`,
+  `outcome` and `client_name` columns and two indexes to `audit_log` (#293).
+  deckwatch 0.6.x refuses to start on a migrated database (sea-orm reports
+  those migrations as missing), so rolling back means restoring the backup.
+- **The audit log is pruned.** It had no retention; now rows older than 365
+  days, and all but the newest 100,000 rows, are deleted at startup and then
+  hourly. Set `DECKWATCH_AUDIT_RETENTION_DAYS` and `DECKWATCH_AUDIT_MAX_ROWS`
+  (Helm `audit.retentionDays` and `audit.maxRows`; `0` turns a limit off)
+  before upgrading if you need to keep more. (#293)
+- **`GET /api/audit` returns rows newest first** (`order=asc` for oldest
+  first), and `next_cursor` is now an opaque timestamp-and-id position. Before,
+  rows came in random order (sorted by a random UUID) and the cursor was a row
+  id, which now returns `400`. (#295)
 - **Cross-site browser requests are rejected.** The permissive CORS layer is
   gone, so pages on other origins can't read API responses. `POST`, `PUT`,
   `PATCH`, `DELETE` and WebSocket upgrades (pod exec, port-forward) get `403`
@@ -178,6 +189,27 @@ first.
   `get_events` output inside the untrusted-data fence, because event notes
   can come from plugins and from any workload allowed to write Events.
   (#261, #265)
+- **MCP tool calls are audited (SEC-22).** Only 12 MCP tools wrote audit
+  rows; everything that fell through to mcp-k8s (`apply_manifest`,
+  `exec_pod`, RBAC, every `delete_*` but deployments, `drain_node`, …) and
+  guardrail denials left none. Now every MCP call that writes, deletes or
+  execs, and every call a guardrail refuses, writes exactly one `audit_log`
+  row (`source` `mcp`) from the MCP dispatch choke point: the tool, the
+  action class, the target (kind, namespace, name), the outcome (`ok`,
+  `error`, `denied`, or `cancelled` when the client went away mid-call), the
+  argument keys and only the values mcp-k8s's allowlist permits, and the
+  client's self-reported name and version. Reads that go through aren't
+  audited, and argument values such as Secret data, env values, commands,
+  manifests and plugin config are never stored. Audit writes never delay or
+  fail a call. `user_identity` stays empty until MCP clients authenticate.
+  (#293)
+- **MCP calls outside the namespace allowlist are refused up front.** A call
+  whose target namespace (its `namespace` argument, or an `apply_manifest`
+  manifest's) is outside `DECKWATCH_NAMESPACES` is refused before it runs and
+  audited as denied (`denied_rule` `namespace_allowlist`), reads included.
+  Every tool already refused these; this records them and covers any tool
+  that missed the check. mcp-k8s's permission settings are checked the same
+  way. (#293)
 - **Stored credentials can't be redirected:** they are only sent to the
   endpoint they were saved for (see Added), and a crafted Vertex AI or
   Bedrock region can no longer redirect the access token or a signed request.
@@ -241,6 +273,29 @@ first.
   that send it back are labelled with the client's self-reported name and
   version, on spans only and never on metrics. A missing, unknown or
   expired id is never refused. (#266)
+- **MCP activity page** (MCP in the top bar, `/mcp-activity`) for the last
+  hour, 24 hours or 7 days: every MCP change and denial from the audit log,
+  filterable by action, outcome and client (shown as what the client says
+  about itself, never as an identity), with a link to the trace when the row
+  has a trace ID and a tracing UI is set in Settings; and, from Prometheus,
+  tool calls per minute, the share that failed or were denied, the p95
+  duration and `apply_manifest` calls over time, and calls, errors, denials
+  and p95 per tool. Without Prometheus the page says so and shows the audit
+  rows only. (#295)
+- **Audit log retention:** `DECKWATCH_AUDIT_RETENTION_DAYS` (default 365) and
+  `DECKWATCH_AUDIT_MAX_ROWS` (default 100,000), Helm `audit.retentionDays` and
+  `audit.maxRows`; `0` turns a limit off. Deployment configuration rather
+  than a setting, so the unauthenticated settings API can't shorten the audit
+  trail. See Upgrade notes. (#293)
+- **`GET /api/audit` filters and fields.** Entries carry `source` (`api` or
+  `mcp`), `tool`, `outcome` and `client_name` (#293), and the endpoint filters
+  by `source`, `action`, `tool`, `client`, `outcome` and `since` (#295). MCP
+  rows' `detail` is JSON; the OpenAPI spec documents it. (#293, #295)
+- **`GET /api/prometheus/mcp_activity?window=1h|24h|7d`** serves the MCP
+  activity page's metrics through fixed queries over deckwatch's MCP counters
+  and duration histograms, from the Prometheus at `PROMETHEUS_URL`. Like the
+  bundled Grafana dashboard, it sums every deckwatch instance that
+  Prometheus scrapes. (#295)
 - **MCP `get_resource_json`** (from mcp-k8s v0.4.0) returns any resource as
   JSON. `get_resource_yaml`, which always returned JSON too, remains as a
   deprecated alias. (#252)
@@ -330,12 +385,27 @@ first.
 
 - **MCP metrics count each call once.** `deckwatch_mcp_tool_calls_total` no
   longer counts intercepted tools that deckwatch hands on to mcp-k8s
-  (`create_deployment`, `delete_deployment`, `scale_deployment`,
-  `restart_deployment`, `apply_manifest`, and `create_pod`/`update_deployment`
-  when they delegate). `mcp_k8s_tool_calls_total` counts those, so
-  dashboards that add the two no longer count them twice.
-  `deckwatch_mcp_requests_total` labels methods outside the MCP spec
-  `_OTHER` instead of using the raw, client-chosen method. (#266)
+  (`apply_manifest`, and `create_pod`/`update_deployment` when they
+  delegate), and `create_deployment`, `delete_deployment`,
+  `scale_deployment` and `restart_deployment` aren't intercepted at all any
+  more (see below). `mcp_k8s_tool_calls_total` counts those, so dashboards
+  that add the two no longer count them twice. Calls a guardrail refuses
+  before they reach mcp-k8s are counted in `deckwatch_mcp_tool_calls_total`
+  with `status="denied"`. `deckwatch_mcp_requests_total` labels methods
+  outside the MCP spec `_OTHER` instead of using the raw, client-chosen
+  method. (#266, #293)
+- **MCP `create_deployment`, `delete_deployment`, `scale_deployment` and
+  `restart_deployment` go straight to mcp-k8s.** deckwatch intercepted them
+  only to write audit rows, which the MCP choke point now writes for every
+  call. Their audit rows use the action classes `write` and `delete` (they
+  were `create`, `delete`, `scale` and `restart`), and are written for
+  failed calls too. (#293)
+- **One audit row per MCP call.** A tool that reuses a REST handler
+  (`set_gitops`, `trigger_build`, `create_ingress`, `update_ingress`,
+  `deprovision_resource`, …) wrote the handler's row too, or only that one;
+  now the MCP row is the only one. The row for MCP `update_deployment`
+  records that `service_account` was set, not its value, which isn't on
+  mcp-k8s's allowlist. (#293)
 - **mcp-k8s and plugin log lines are kept.** The default log filter is now
   `deckwatch=info,tower_http=info,mcp_k8s=info,extism::pdk=info,opentelemetry=warn`;
   a valid `RUST_LOG` still replaces it. `opentelemetry=warn` shows failed
@@ -394,6 +464,9 @@ first.
   (#243)
 - Settings → MCP Tuning shows each plugin's tuning fields: `GET /api/plugins`
   now returns `mcp_tuning_fields`. (#226)
+- Settings → Audit Log showed no rows: the page read a field the API doesn't
+  return. It now lists the rows newest first, with their source (UI/API, or
+  MCP and the tool). (#295)
 - MCP `list_ipaddresses`, `get_ipaddress`, `list_servicecidrs` and
   `get_servicecidr` use GA `networking.k8s.io/v1`, which every supported
   cluster serves (they used `v1beta1`). (#252)

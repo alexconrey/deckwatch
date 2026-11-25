@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, ref } from "vue";
 import { usePolling } from "@/composables/usePolling";
-import { auditApi, type AuditEntry } from "@/api/audit";
+import { auditApi, type AuditEntry, type AuditQuery } from "@/api/audit";
 import { formatTimestamp } from "@/utils/format";
 
 const entries = ref<AuditEntry[]>([]);
@@ -25,13 +25,11 @@ const refresh = async () => {
   loading.value = true;
   error.value = null;
   try {
-    const opts: { resource_type?: string; namespace?: string; limit?: number } = {
-      limit: 200,
-    };
+    const opts: AuditQuery = { limit: 200 };
     if (filterResourceType.value) opts.resource_type = filterResourceType.value;
     if (filterNamespace.value) opts.namespace = filterNamespace.value;
     const response = await auditApi.list(opts);
-    entries.value = response.entries;
+    entries.value = response.items;
   } catch (e) {
     error.value = e instanceof Error ? e.message : "Failed to fetch audit log";
   } finally {
@@ -49,6 +47,10 @@ const actionColor = (action: string): string => {
       return "info";
     case "delete":
       return "error";
+    case "write":
+      return "info";
+    case "exec":
+      return "warning";
     case "scale":
     case "restart":
       return "warning";
@@ -59,6 +61,7 @@ const actionColor = (action: string): string => {
 
 const headers = [
   { title: "Timestamp", key: "timestamp", sortable: true },
+  { title: "Source", key: "source", sortable: true },
   { title: "Action", key: "action", sortable: true },
   { title: "Type", key: "resource_type", sortable: true },
   { title: "Name", key: "resource_name", sortable: true },
@@ -72,6 +75,10 @@ const headers = [
     <div class="d-flex align-center mb-4">
       <v-icon icon="mdi-clipboard-text-clock" class="mr-2" />
       <span class="text-h5 font-weight-bold">Audit Log</span>
+      <v-spacer />
+      <v-btn variant="text" size="small" :to="{ name: 'McpActivity' }" append-icon="mdi-arrow-right">
+        MCP activity
+      </v-btn>
     </div>
 
     <v-alert v-if="error" type="error" class="mb-4" closable>
@@ -127,6 +134,13 @@ const headers = [
             >
               {{ value }}
             </v-chip>
+          </template>
+
+          <template #item.source="{ item }">
+            <span v-if="item.source === 'mcp'">
+              MCP <span class="text-caption text-medium-emphasis">{{ item.tool }}</span>
+            </span>
+            <span v-else>UI/API</span>
           </template>
 
           <template #item.detail="{ value }">

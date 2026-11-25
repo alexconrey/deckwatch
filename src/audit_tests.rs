@@ -211,3 +211,179 @@ async fn the_migration_adds_the_columns_and_marks_old_mcp_rows() {
         ]
     );
 }
+
+// ---------------------------------------------------------------------------
+// GET /api/audit
+// ---------------------------------------------------------------------------
+
+/// Rows for the query tests: two UI rows and four MCP rows, a minute apart.
+async fn query_state() -> (AppState, tempfile::TempDir) {
+    let dir = tempfile::tempdir().unwrap();
+    let state = crate::plugin_fixture::test_state(dir.path(), vec![], None).await;
+    let rows = [
+        ("a", SOURCE_API, "create", "", "", ""),
+        (
+            "b",
+            SOURCE_MCP,
+            "write",
+            "apply_manifest",
+            "ok",
+            "claude-code",
+        ),
+        (
+            "c",
+            SOURCE_MCP,
+            "delete",
+            "delete_pod",
+            "denied",
+            "claude-code",
+        ),
+        ("d", SOURCE_API, "update", "", "", ""),
+        ("e", SOURCE_MCP, "exec", "exec_pod", "error", "cursor"),
+        ("f", SOURCE_MCP, "read", "list_secrets", "denied", "cursor"),
+    ];
+    for (i, (id, source, action, tool, outcome, client)) in rows.into_iter().enumerate() {
+        audit_entity::ActiveModel {
+            id: Set(id.to_string()),
+            timestamp: Set(at(NOW + 60 * i as i64)),
+            action: Set(action.to_string()),
+            resource_type: Set("deployment".to_string()),
+            resource_name: Set(id.to_string()),
+            namespace: Set("prod".to_string()),
+            detail: Set(String::new()),
+            user_identity: Set(String::new()),
+            source: Set(source.to_string()),
+            tool: Set(tool.to_string()),
+            outcome: Set(outcome.to_string()),
+            client_name: Set(client.to_string()),
+        }
+        .insert(&state.db)
+        .await
+        .unwrap();
+    }
+    (state, dir)
+}
+
+async fn list(state: &AppState, q: AuditQuery) -> Result<AuditResponse, AppError> {
+    list_audit_logs(State(state.clone()), Query(q))
+        .await
+        .map(|Json(r)| r)
+}
+
+fn names(r: &AuditResponse) -> Vec<&str> {
+    r.items.iter().map(|e| e.resource_name.as_str()).collect()
+}
+
+#[tokio::test]
+async fn audit_rows_are_newest_first_by_default() {
+    let (state, _dir) = query_state().await;
+    let r = list(&state, AuditQuery::default()).await.unwrap();
+    assert_eq!(names(&r), ["f", "e", "d", "c", "b", "a"]);
+    assert_eq!(r.next_cursor, None);
+    let r = list(
+        &state,
+        AuditQuery {
+            order: Some("asc".into()),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(names(&r), ["a", "b", "c", "d", "e", "f"]);
+}
+
+#[tokio::test]
+async fn audit_rows_filter_by_source_action_client_outcome_and_tool() {
+    let (state, _dir) = query_state().await;
+    let q = |f: fn(&mut AuditQuery)| {
+        let mut q = AuditQuery::default();
+        f(&mut q);
+        q
+    };
+    let cases: Vec<(AuditQuery, Vec<&str>)> = vec![
+        (
+            q(|q| q.source = Some("mcp".into())),
+            vec!["f", "e", "c", "b"],
+        ),
+        (q(|q| q.source = Some("api".into())), vec!["d", "a"]),
+        (q(|q| q.outcome = Some("denied".into())), vec!["f", "c"]),
+        (q(|q| q.client = Some("cursor".into())), vec!["f", "e"]),
+        (q(|q| q.action = Some("exec".into())), vec!["e"]),
+        (q(|q| q.tool = Some("apply_manifest".into())), vec!["b"]),
+        (
+            q(|q| {
+                q.source = Some("mcp".into());
+                q.outcome = Some("denied".into());
+                q.client = Some("claude-code".into());
+            }),
+            vec!["c"],
+        ),
+    ];
+    for (query, expected) in cases {
+        let label = format!("{query:?}");
+        let r = list(&state, query).await.unwrap();
+        assert_eq!(names(&r), expected, "{label}");
+    }
+}
+
+#[tokio::test]
+async fn audit_rows_page_with_a_cursor_and_start_at_since() {
+    let (state, _dir) = query_state().await;
+    let mut seen = Vec::new();
+    let mut cursor = None;
+    loop {
+        let r = list(
+            &state,
+            AuditQuery {
+                limit: Some(4),
+                cursor: cursor.clone(),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        seen.extend(names(&r).into_iter().map(str::to_string));
+        match r.next_cursor {
+            Some(next) => cursor = Some(next),
+            None => break,
+        }
+    }
+    assert_eq!(seen, ["f", "e", "d", "c", "b", "a"]);
+
+    let since = at(NOW + 180).to_rfc3339();
+    let r = list(
+        &state,
+        AuditQuery {
+            since: Some(since),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(names(&r), ["f", "e", "d"]);
+}
+
+#[tokio::test]
+async fn bad_audit_queries_are_rejected() {
+    let (state, _dir) = query_state().await;
+    for q in [
+        AuditQuery {
+            order: Some("sideways".into()),
+            ..Default::default()
+        },
+        AuditQuery {
+            cursor: Some("not-a-cursor".into()),
+            ..Default::default()
+        },
+        AuditQuery {
+            since: Some("yesterday".into()),
+            ..Default::default()
+        },
+    ] {
+        let label = format!("{q:?}");
+        assert!(
+            matches!(list(&state, q).await, Err(AppError::BadRequest(_))),
+            "{label}"
+        );
+    }
+}
