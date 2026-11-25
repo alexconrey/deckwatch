@@ -241,11 +241,11 @@ check that the diffs are only rendering noise.
 Lightning CSS, which shortens numbers to six significant digits
 (`33.3333333333%` becomes `33.3333%`, `.0892857143em` becomes
 `.0892857em`). Those values move some columns and labels by a fraction of
-a pixel. Built with Vite 6.4.6 instead of 8.3.8, 190 of the suite's 328
-screenshots differ, each by glyphs shifted less than a pixel (at most 409
-changed pixels). The baselines come from the Vite 8 build, so treat a
-build-tool upgrade like a Playwright bump: regenerate the baselines in
-that PR and check that each diff is only rendering.
+a pixel. When the suite had 328 screenshots, building with Vite 6.4.6
+instead of 8.3.8 changed 190 of them, each by glyphs shifted less than a
+pixel (at most 409 changed pixels). The baselines come from the Vite 8
+build, so treat a build-tool upgrade like a Playwright bump: regenerate
+the baselines in that PR and check that each diff is only rendering.
 
 ### Why a Docker image
 
