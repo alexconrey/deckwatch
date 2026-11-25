@@ -512,3 +512,5 @@ For developers working on deckwatch itself:
 - **`src/handlers/deployments.rs`** — `apply_plugins()` called in both `create` and `update` handlers
 
 Plugins are instantiated fresh per deployment operation (not pooled). This avoids thread-safety concerns with extism `Plugin` instances and keeps memory bounded since WASM binaries for a single-function plugin are typically 50–200 KB.
+
+A plugin call blocks its thread: extism runs the export synchronously, and the plugin's HTTP requests wait on that thread. So calls never run on Tokio's async workers, where they would stall every other task, health checks included. The entry points in `src/plugins.rs` (`run_plugin`, `run_provision`, `run_deprovision`, `apply_plugins`, `fetch_plugins` and `fetch_and_validate`) are async and run each call on Tokio's blocking pool, at most 4 at a time, inside the caller's span; the blocking functions are private to the module. A caller waits for a call up to the call timeout plus 5 seconds, or 2 minutes when no timeout is set, then reports `plugin.timeout`; the abandoned call may still be running.

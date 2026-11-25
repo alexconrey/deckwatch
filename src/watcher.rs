@@ -2406,7 +2406,7 @@ pub(crate) async fn reconcile_application_plugins(state: &AppState, sweep: &mut 
                         for plugin in crate::plugins::sort_by_dependencies(&plugins) {
                             // The funnel logs failures and warnings in the
                             // plugin's span.
-                            let outcome = crate::plugins::run_plugin(plugin, &ctx, &call);
+                            let outcome = crate::plugins::run_plugin(plugin, &ctx, &call).await;
                             if let Some(result) = &outcome.result {
                                 final_annotations.extend(result.deployment_annotations.clone());
                                 final_labels.extend(result.deployment_labels.clone());
@@ -2761,7 +2761,9 @@ async fn reconcile_pending_resources(state: &AppState) {
         .namespace(&ns)
         .application(&app_name)
         .resource(&resource_id);
-        let (result, outcome) = crate::plugins::run_provision(plugin, &req, &call).take_result();
+        let (result, outcome) = crate::plugins::run_provision(plugin, &req, &call)
+            .await
+            .take_result();
         let status_key = crate::plugin_status::StatusKey::resource(
             &format!("{ns}/{app_name}"),
             &plugin_name,
