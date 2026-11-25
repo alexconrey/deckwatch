@@ -222,7 +222,7 @@ first.
   fragment masked (`***`): a token in a plugin source URL's query string is
   masked too, not only `user:password@`. Notification webhook errors no
   longer include the webhook URL. If an earlier version logged a database
-  URL that holds a password, rotate that password.
+  URL that holds a password, rotate that password. (#299)
 - **Dependency advisories.** extism 1.41 with wasmtime 49 fixes
   GHSA-mghf-wjfp-p5xm / RUSTSEC-2026-0379 (critical: an aarch64 Cranelift
   miscompile), RUSTSEC-2026-0269 (filesystem sandbox escape),
