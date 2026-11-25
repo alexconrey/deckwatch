@@ -201,9 +201,9 @@ jobs:
       - name: helm lint
         run: helm lint helm/deckwatch --set image.repository=test --set image.tag=test
 
-  # publish.yml runs .github/scripts/release-notes.sh on every v* tag and
-  # publishes nothing unless it passes. Test each of its refusals here, and
-  # check that main could be tagged as it is: the version in Cargo.toml,
+  # publish.yml runs .github/scripts/release-notes.sh and release-on-main.sh
+  # on every v* tag and publishes nothing unless both pass. Test each of their
+  # refusals here, and check that main could be tagged as it is: the version in Cargo.toml,
   # Chart.yaml (version and appVersion) and frontend/package.json agree, and
   # CHANGELOG.md has a dated, non-empty section for it. A release PR that
   # misses one of these fails here instead of at tag time.
@@ -213,7 +213,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - name: Test release-notes.sh
+      - name: Test release-notes.sh and release-on-main.sh
         run: bash .github/scripts/release-notes-test.sh
 
       - name: The current version could be released

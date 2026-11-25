@@ -26,19 +26,27 @@ env:
 jobs:
   # Every other job needs this one, so nothing is built or pushed for a tag
   # that doesn't match Cargo.toml, Chart.yaml (version and appVersion) and
-  # frontend/package.json, or whose CHANGELOG.md section is missing, undated
-  # ("Unreleased") or empty.
+  # frontend/package.json, whose CHANGELOG.md section is missing, undated
+  # ("Unreleased") or empty, or whose commit isn't on main.
   verify:
     name: Verify tag
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v7
+        with:
+          # Full history, so the tagged commit can be checked against main.
+          fetch-depth: 0
 
       - name: Check the tag against the versions and CHANGELOG.md
         run: |
           bash .github/scripts/release-notes.sh "$GITHUB_REF_NAME" > "$RUNNER_TEMP/notes.md"
           cat "$RUNNER_TEMP/notes.md" >> "$GITHUB_STEP_SUMMARY"
+
+      # Only commits that reached main through a PR are released: a tag on any
+      # other branch, or on a commit main doesn't contain, publishes nothing.
+      - name: Check the tagged commit is on main
+        run: bash .github/scripts/release-on-main.sh "$GITHUB_SHA"
 
   build:
     needs: verify
