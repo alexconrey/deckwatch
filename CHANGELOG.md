@@ -138,6 +138,14 @@ first.
   `DECKWATCH_DATABASE_URL`** through `inherit_env_keys` or
   `inherit_env_file_keys`; deckwatch logs a warning and leaves them out.
   (#207)
+- **Re-enter a plugin's secret config values after changing its code.**
+  Saving settings with a new `source` or a changed or removed `sha256` pin
+  for a plugin returns `400` until its masked config values are entered
+  again (or removed). `POST /api/plugins/{name}/upload`
+  returns `200` with `{sha256, cleared_config_keys}` instead of `204`: on a
+  plugin without a pin it drops the config values that `GET /api/settings`
+  masks, so enter them again after uploading; a pinned plugin only accepts the
+  pinned binary. (#XXX)
 - **The UI needs a recent browser:** Chrome or Edge 111, Firefox 114, or
   Safari 16.4 or newer (vite 8's build target; it was Chrome 87, Firefox 78,
   Safari 14). (#237)
@@ -172,6 +180,19 @@ first.
   `is_secret: true`. And plugin config, which anyone who can reach the API
   can edit, could pass deckwatch's encryption key to a plugin through
   `inherit_env_keys`. (#207)
+- **Changing a plugin's code no longer hands it the stored secrets.** A
+  settings save restored masked plugin values by plugin name and key alone,
+  and an upload kept the config, so pointing a plugin at other code (a new
+  `source`, or a binary through `POST /api/plugins/{name}/upload`) passed
+  that code the values entered for the old one, and its self-declared schema
+  then decided which of them `GET /api/settings` and MCP `get_plugin_config`
+  showed in clear. Masked values are now restored only while the plugin's
+  `source` is unchanged and its `sha256` pin isn't changed or removed;
+  otherwise `PUT /api/settings` returns `400` naming the values to enter
+  again, and the change is audited. An upload to
+  a pinned plugin must match the pin, which now applies to uploaded binaries
+  too; an upload to an unpinned plugin drops the masked config values first.
+  See Upgrade notes. (#XXX)
 - **MCP `update_deployment` ignored the namespace allowlist for
   `service_account`.** An update that set only `service_account` could point
   a Deployment in any namespace at any ServiceAccount. Only deployments that

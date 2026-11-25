@@ -477,7 +477,7 @@ pub fn default_build_architectures() -> Vec<BuildArchitecture> {
 }
 
 /// Where deckwatch fetches the compiled WASM binary for a plugin.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum PluginSource {
     /// Fetch a file from a GitHub repository via raw.githubusercontent.com
@@ -661,11 +661,57 @@ fn mask_secrets(
     for p in &mut settings.plugins {
         let public = public_plugin_keys.get(&p.name);
         for (key, value) in p.config.iter_mut() {
-            if !public.is_some_and(|keys| keys.contains(key)) {
+            if plugin_value_is_masked(public, key) {
                 mask(value);
             }
         }
     }
+}
+
+/// Whether [`mask_secrets`] masks plugin config `key`: every key except the
+/// ones the loaded plugin declares non-secret (`public`).
+fn plugin_value_is_masked(public: Option<&std::collections::HashSet<String>>, key: &str) -> bool {
+    !public.is_some_and(|keys| keys.contains(key))
+}
+
+/// Drop the stored config values of `plugin` that [`mask_secrets`] masks,
+/// for a plugin about to run a binary they weren't entered for. Empty values
+/// stay. Returns the keys dropped.
+pub fn drop_masked_config(
+    plugin: &mut PluginConfig,
+    public: Option<&std::collections::HashSet<String>>,
+) -> Vec<String> {
+    let dropped: Vec<String> = plugin
+        .config
+        .iter()
+        .filter(|(key, value)| !value.is_empty() && plugin_value_is_masked(public, key))
+        .map(|(key, _)| key.clone())
+        .collect();
+    for key in &dropped {
+        plugin.config.remove(key);
+    }
+    dropped
+}
+
+/// What changed about the code a plugin runs, if anything. Its stored
+/// secrets are bound to that code: masked config values are restored only
+/// into the plugin they were entered for, so whoever can edit settings can't
+/// hand them to other code (#207's write-only guarantee, as #253 binds
+/// credentials to their endpoint).
+///
+/// - `source`: any change, since it's other code;
+/// - `sha256`: a changed or removed pin (adding one only narrows what runs).
+pub fn secret_binding_change(
+    stored: &PluginConfig,
+    incoming: &PluginConfig,
+) -> Option<&'static str> {
+    if stored.source != incoming.source {
+        return Some("source");
+    }
+    if stored.sha256.is_some() && stored.sha256 != incoming.sha256 {
+        return Some("sha256 pin");
+    }
+    None
 }
 
 /// Reverse [`mask_secrets`] on a settings document submitted by a client,
@@ -681,7 +727,9 @@ fn mask_secrets(
 /// * `notifications.webhook_url` and `plugins[].config` values still equal
 ///   to [`MASKED_VALUE`] are replaced by the stored value. A masked plugin
 ///   value with nothing stored under that key (e.g. the key was renamed in
-///   the UI) is rejected rather than persisting the placeholder.
+///   the UI) is rejected rather than persisting the placeholder, and so is
+///   every masked value of a plugin whose source or pin changed
+///   ([`secret_binding_change`]): those must be entered again.
 fn restore_secrets(
     incoming: &mut DeckwatchSettings,
     stored: &DeckwatchSettings,
@@ -707,11 +755,25 @@ fn restore_secrets(
     }
 
     for p in &mut incoming.plugins {
-        let stored_config = stored
-            .plugins
-            .iter()
-            .find(|s| s.name == p.name)
-            .map(|s| &s.config);
+        let stored_plugin = stored.plugins.iter().find(|s| s.name == p.name);
+        let change = stored_plugin.and_then(|s| secret_binding_change(s, p));
+        if let Some(change) = change {
+            let masked: Vec<&str> = p
+                .config
+                .iter()
+                .filter(|(_, v)| *v == MASKED_VALUE)
+                .map(|(k, _)| k.as_str())
+                .collect();
+            if !masked.is_empty() {
+                return Err(format!(
+                    "plugin '{}' has a new {change}, so the values stored for it aren't passed \
+                     on; re-enter {} (still the masked placeholder \"{MASKED_VALUE}\")",
+                    p.name,
+                    masked.join(", ")
+                ));
+            }
+        }
+        let stored_config = stored_plugin.map(|s| &s.config);
         for (key, value) in p.config.iter_mut() {
             if value != MASKED_VALUE {
                 continue;
@@ -805,6 +867,15 @@ pub async fn put_settings(
     let policy = crate::outbound::global().policy();
     let endpoint_changes = apply_endpoint_update(&mut settings, &stored, &policy)?;
     validate_ai_provider_region(&settings.ai_provider)?;
+    // Plugins that now run other code.
+    let plugin_changes: Vec<(String, &str)> = settings
+        .plugins
+        .iter()
+        .filter_map(|p| {
+            let before = stored.plugins.iter().find(|s| s.name == p.name)?;
+            Some((p.name.clone(), secret_binding_change(before, p)?))
+        })
+        .collect();
 
     for t in &mut settings.git_token_secrets {
         if t.namespace.is_empty() {
@@ -819,6 +890,22 @@ pub async fn put_settings(
     state
         .plugin_telemetry
         .keep_plugins(crate::plugins::enabled_plugin_names(&settings));
+
+    for (name, change) in &plugin_changes {
+        if let Err(e) = crate::audit::log_action(
+            &state.db,
+            "update",
+            "plugin",
+            name,
+            "",
+            &format!("changed the {change} of plugin '{name}'"),
+            "",
+        )
+        .await
+        {
+            tracing::warn!(error = %e, "failed to write audit log for plugin change");
+        }
+    }
 
     for change in &endpoint_changes {
         if let Err(e) = crate::audit::log_action(

@@ -161,12 +161,29 @@ pub async fn save_plugin_config(
     Ok(StatusCode::NO_CONTENT)
 }
 
+/// What `POST /api/plugins/{name}/upload` did.
+#[derive(Debug, Serialize, PartialEq, Eq)]
+pub struct UploadResult {
+    /// Lowercase hex SHA-256 of the stored binary.
+    pub sha256: String,
+    /// Config keys whose stored values were dropped: the plugin now runs a
+    /// binary they weren't entered for. Enter them again. Always empty for a
+    /// plugin with a `sha256` pin, which the upload had to match.
+    pub cleared_config_keys: Vec<String>,
+}
+
 /// POST /api/plugins/{name}/upload
 ///
 /// Accepts a raw WASM binary (`Content-Type: application/octet-stream`) and
 /// stores it under `UPLOADS_DIR/{name}.wasm`. Switches the plugin source to
 /// `Upload` and triggers an immediate reload, so the new binary is live
 /// without a GitHub push or release workflow.
+///
+/// The upload is other code, so it gets none of the plugin's stored secrets:
+/// - with a `sha256` pin, the binary must match it (the operator chose that
+///   binary), and the config stays;
+/// - without one, the config values that `GET /api/settings` masks are
+///   dropped (`cleared_config_keys`) before the new binary can load.
 ///
 /// Intended for local development — build with `make build` then:
 /// ```sh
@@ -178,9 +195,9 @@ pub async fn upload_plugin_wasm(
     State(state): State<AppState>,
     Path(name): Path<String>,
     body: Bytes,
-) -> Result<StatusCode, AppError> {
+) -> Result<Json<UploadResult>, AppError> {
     let uploads_dir = std::path::Path::new(crate::plugins::UPLOADS_DIR);
-    store_upload(state, uploads_dir, name, body).await
+    store_upload(state, uploads_dir, name, body).await.map(Json)
 }
 
 /// [`upload_plugin_wasm`], storing the binary in `uploads_dir`.
@@ -189,7 +206,7 @@ async fn store_upload(
     uploads_dir: &std::path::Path,
     name: String,
     body: Bytes,
-) -> Result<StatusCode, AppError> {
+) -> Result<UploadResult, AppError> {
     if body.is_empty() {
         return Err(AppError::BadRequest("request body is empty".into()));
     }
@@ -217,25 +234,49 @@ async fn store_upload(
         )));
     };
 
-    // Ensure uploads directory exists.
+    let sha256 = crate::plugins::sha256_hex(&body);
+    if let Some(pin) = settings.plugins[index].sha256.as_deref() {
+        if pin != sha256 {
+            return Err(AppError::BadRequest(format!(
+                "plugin '{name}' is pinned to sha256 {pin}, and this binary's is {sha256}; \
+                 change or remove the pin in Settings first"
+            )));
+        }
+    }
+
+    // Stage the binary next to its destination, switch the source (dropping
+    // an unpinned plugin's stored secrets) and only then move the binary into
+    // place, so no reload ever runs it with the old values.
     tokio::fs::create_dir_all(uploads_dir)
         .await
         .map_err(|e| AppError::BadRequest(format!("failed to create uploads dir: {e}")))?;
-    tokio::fs::write(&dest, &body)
+    let staged = uploads_dir.join(format!(".{filename}.{}.upload", &sha256[..16]));
+    tokio::fs::write(&staged, &body)
         .await
         .map_err(|e| AppError::BadRequest(format!("failed to write WASM: {e}")))?;
 
-    let sha256 = crate::plugins::sha256_hex(&body);
-    tracing::info!(plugin = %name, bytes = body.len(), sha256 = %sha256, path = %dest.display(), "WASM uploaded");
-
-    // Switch the plugin source to Upload and trigger reload.
-    settings.plugins[index].source = PluginSource::Upload {
+    let public = crate::handlers::settings::public_plugin_config_keys(&state).await;
+    let cfg = &mut settings.plugins[index];
+    cfg.source = PluginSource::Upload {
         filename: filename.clone(),
     };
+    let cleared_config_keys = if cfg.sha256.is_some() {
+        Vec::new()
+    } else {
+        crate::handlers::settings::drop_masked_config(cfg, public.get(&name))
+    };
 
-    crate::handlers::settings::upsert_settings_to_db_pub(&state.db, &settings)
+    if let Err(e) = crate::handlers::settings::upsert_settings_to_db_pub(&state.db, &settings).await
+    {
+        let _ = tokio::fs::remove_file(&staged).await;
+        return Err(AppError::BadRequest(format!(
+            "failed to save settings: {e}"
+        )));
+    }
+    tokio::fs::rename(&staged, &dest)
         .await
-        .map_err(|e| AppError::BadRequest(format!("failed to save settings: {e}")))?;
+        .map_err(|e| AppError::BadRequest(format!("failed to move WASM into place: {e}")))?;
+    tracing::info!(plugin = %name, bytes = body.len(), sha256 = %sha256, path = %dest.display(), cleared = cleared_config_keys.len(), "WASM uploaded");
 
     // Reload just this plugin in the background and swap it into the loaded
     // set. Replacing the whole set with the single-plugin fetch result would
@@ -271,15 +312,20 @@ async fn store_upload(
         &name,
         "",
         &format!(
-            "uploaded WASM binary for plugin '{name}' ({} bytes, sha256 {sha256})",
-            body.len()
+            "uploaded WASM binary for plugin '{name}' ({} bytes, sha256 {sha256}); \
+             dropped {} stored config value(s)",
+            body.len(),
+            cleared_config_keys.len()
         ),
         "",
     )
     .await
     .ok();
 
-    Ok(StatusCode::NO_CONTENT)
+    Ok(UploadResult {
+        sha256,
+        cleared_config_keys,
+    })
 }
 
 #[cfg(test)]
