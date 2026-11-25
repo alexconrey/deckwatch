@@ -869,6 +869,31 @@ fn app_set(ids: &[&str]) -> BTreeSet<String> {
     ids.iter().map(|id| (*id).to_owned()).collect()
 }
 
+const OWNER: &str = "this-database";
+
+/// `meta` with fields this database's reconciler applied.
+fn applied_here(mut meta: ObjectMeta) -> ObjectMeta {
+    stamp(&mut meta, OWNER);
+    meta
+}
+
+fn stamp(meta: &mut ObjectMeta, owner: &str) {
+    meta.annotations
+        .get_or_insert_with(Default::default)
+        .insert(
+            PLUGIN_FIELDS_OWNER_ANNOTATION.to_string(),
+            owner.to_string(),
+        );
+}
+
+/// This database, which knows the applications `known`.
+fn here(known: &BTreeSet<String>) -> Provenance<'_> {
+    Provenance {
+        owner: OWNER,
+        known_apps: known,
+    }
+}
+
 #[test]
 fn release_patch_carries_only_identity_fields() {
     let patch = release_patch("apps/v1", "Deployment", "team", "web");
@@ -928,30 +953,35 @@ fn owns_plugin_resource_fields_only_for_our_apply_entry() {
 
 #[test]
 fn stale_plugin_workload_when_app_has_no_resources_left() {
-    let meta = workload_meta(
+    let meta = applied_here(workload_meta(
         Some("shop"),
         vec![managed_by(PLUGIN_RESOURCES_FIELD_MANAGER, "Apply")],
-    );
+    ));
+    let known = app_set(&[]);
     assert_eq!(
-        stale_plugin_workload(&meta, &app_set(&["team/blog"])),
+        stale_plugin_workload(&meta, &app_set(&["team/blog"]), &here(&known)),
         Some(("team", "web"))
     );
     assert_eq!(
-        stale_plugin_workload(&meta, &app_set(&[])),
+        stale_plugin_workload(&meta, &app_set(&[]), &here(&known)),
         Some(("team", "web"))
     );
 }
 
 #[test]
 fn stale_plugin_workload_ignores_apps_that_still_have_resources() {
-    let meta = workload_meta(
+    let meta = applied_here(workload_meta(
         Some("shop"),
         vec![managed_by(PLUGIN_RESOURCES_FIELD_MANAGER, "Apply")],
+    ));
+    let known = app_set(&["team/shop"]);
+    assert_eq!(
+        stale_plugin_workload(&meta, &app_set(&["team/shop"]), &here(&known)),
+        None
     );
-    assert_eq!(stale_plugin_workload(&meta, &app_set(&["team/shop"])), None);
     // Same app name in another namespace is a different application.
     assert_eq!(
-        stale_plugin_workload(&meta, &app_set(&["other/shop"])),
+        stale_plugin_workload(&meta, &app_set(&["other/shop"]), &here(&known)),
         Some(("team", "web"))
     );
 }
@@ -960,20 +990,69 @@ fn stale_plugin_workload_ignores_apps_that_still_have_resources() {
 fn stale_plugin_workload_when_app_label_was_removed() {
     // Deleting an application strips the label from its workloads and
     // cascades to its resources; removing a member strips the label too.
-    let meta = workload_meta(
+    let meta = applied_here(workload_meta(
         None,
         vec![managed_by(PLUGIN_RESOURCES_FIELD_MANAGER, "Apply")],
-    );
+    ));
     assert_eq!(
-        stale_plugin_workload(&meta, &app_set(&["team/shop"])),
+        stale_plugin_workload(&meta, &app_set(&["team/shop"]), &here(&app_set(&[]))),
         Some(("team", "web"))
     );
 }
 
 #[test]
 fn stale_plugin_workload_skips_workloads_without_plugin_fields() {
-    let meta = workload_meta(None, vec![managed_by("deckwatch", "Update")]);
-    assert_eq!(stale_plugin_workload(&meta, &app_set(&[])), None);
+    let meta = applied_here(workload_meta(None, vec![managed_by("deckwatch", "Update")]));
+    assert_eq!(
+        stale_plugin_workload(&meta, &app_set(&[]), &here(&app_set(&[]))),
+        None
+    );
+}
+
+/// Without rows a database can't tell a removed resource from one it never
+/// knew, so it releases only fields it has evidence it applied.
+#[test]
+fn stale_plugin_workload_needs_evidence_this_database_applied_the_fields() {
+    let plugin_fields = || vec![managed_by(PLUGIN_RESOURCES_FIELD_MANAGER, "Apply")];
+    let no_rows = app_set(&[]);
+
+    // Another database's reconciler applied them (a reset database's
+    // predecessor, or another deckwatch).
+    let mut theirs = workload_meta(Some("shop"), plugin_fields());
+    stamp(&mut theirs, "another-database");
+    let mut theirs_unlabelled = workload_meta(None, plugin_fields());
+    stamp(&mut theirs_unlabelled, "another-database");
+    for meta in [&theirs, &theirs_unlabelled] {
+        assert_eq!(
+            stale_plugin_workload(meta, &no_rows, &here(&app_set(&["team/shop"]))),
+            None
+        );
+    }
+
+    // Applied before the annotation existed: only for a known application.
+    let legacy = workload_meta(Some("shop"), plugin_fields());
+    assert_eq!(
+        stale_plugin_workload(&legacy, &no_rows, &here(&app_set(&[]))),
+        None,
+        "an empty database knows no applications"
+    );
+    assert_eq!(
+        stale_plugin_workload(&legacy, &no_rows, &here(&app_set(&["other/shop"]))),
+        None
+    );
+    assert_eq!(
+        stale_plugin_workload(&legacy, &no_rows, &here(&app_set(&["team/shop"]))),
+        Some(("team", "web"))
+    );
+    let legacy_unlabelled = workload_meta(None, plugin_fields());
+    assert_eq!(
+        stale_plugin_workload(
+            &legacy_unlabelled,
+            &no_rows,
+            &here(&app_set(&["team/shop"]))
+        ),
+        None
+    );
 }
 
 #[test]
@@ -1261,15 +1340,40 @@ impl FakeCluster {
                     .as_array()
                     .cloned()
                     .unwrap_or_default();
+                // Annotations are the one kind of field the fake tracks: the
+                // ones the manager applied before are dropped, and the
+                // applied ones set and recorded as owned (`f:<key>`), as the
+                // API server does when no other manager owns them.
+                let owned_before: Vec<String> = entries
+                    .iter()
+                    .filter(|e| e["manager"] == manager.as_str() && e["operation"] == "Apply")
+                    .filter_map(|e| e["fieldsV1"]["f:metadata"]["f:annotations"].as_object())
+                    .flat_map(|keys| keys.keys().filter_map(|k| k.strip_prefix("f:")))
+                    .map(str::to_string)
+                    .collect();
+                if let Some(annotations) = obj["metadata"]["annotations"].as_object_mut() {
+                    for key in &owned_before {
+                        annotations.remove(key);
+                    }
+                }
                 entries
                     .retain(|e| !(e["manager"] == manager.as_str() && e["operation"] == "Apply"));
                 if !is_identity_only(&body_json) {
+                    let applied = body_json["metadata"]["annotations"]
+                        .as_object()
+                        .cloned()
+                        .unwrap_or_default();
+                    let mut owned = serde_json::Map::new();
+                    for (key, value) in &applied {
+                        obj["metadata"]["annotations"][key] = value.clone();
+                        owned.insert(format!("f:{key}"), serde_json::json!({}));
+                    }
                     entries.push(serde_json::json!({
                         "manager": manager,
                         "operation": "Apply",
                         "apiVersion": group_version,
                         "fieldsType": "FieldsV1",
-                        "fieldsV1": {},
+                        "fieldsV1": { "f:metadata": { "f:annotations": owned } },
                     }));
                 }
                 obj["metadata"]["managedFields"] = serde_json::json!(entries);
@@ -1281,6 +1385,13 @@ impl FakeCluster {
 
     fn take_requests(&self) -> Vec<RecordedRequest> {
         std::mem::take(&mut self.0.lock().unwrap().requests)
+    }
+
+    /// Add `objects` to a running fake cluster.
+    fn add(&self, objects: Vec<serde_json::Value>) {
+        let more = FakeCluster::with_objects(objects);
+        let more = std::mem::take(&mut more.0.lock().unwrap().objects);
+        self.0.lock().unwrap().objects.extend(more);
     }
 
     fn set_fail_patches(&self, fail: bool) {
@@ -1670,19 +1781,74 @@ async fn failed_release_is_retried_next_cycle() {
     assert!(!sweep.retry);
 }
 
+/// Workload fixtures for the provenance tests: `name` in team, labelled
+/// for `app` (unlabelled if `None`), with fields the plugin resources field
+/// manager applied, stamped with `owner` (unstamped if `None`, as before the
+/// annotation existed).
+fn plugin_workload(name: &str, app: Option<&str>, owner: Option<&str>) -> serde_json::Value {
+    let mut w = shop_deployment(plugin_apply_entry());
+    w["metadata"]["name"] = serde_json::json!(name);
+    w["metadata"]["labels"] = match app {
+        Some(app) => serde_json::json!({ APP_LABEL: app }),
+        None => serde_json::json!({}),
+    };
+    if let Some(owner) = owner {
+        w["metadata"]["annotations"][PLUGIN_FIELDS_OWNER_ANNOTATION] = serde_json::json!(owner);
+    }
+    w
+}
+
+fn team_deployment_path(name: &str) -> String {
+    format!("/apis/apps/v1/namespaces/team/deployments/{name}")
+}
+
+/// A fresh, reset or restored-empty database pointed at a cluster whose
+/// workloads carry plugin fields must leave them alone: it has no evidence
+/// it applied them, so the fields aren't stale from its point of view.
 #[tokio::test]
-async fn first_cycle_releases_fields_left_behind_before_startup() {
-    // The application lost its last resource (or was deleted, which strips
-    // its label) while deckwatch was down, or before this fix existed.
-    let mut orphan = shop_deployment(plugin_apply_entry());
-    orphan["metadata"]["name"] = serde_json::json!("old-web");
-    orphan["metadata"]["labels"] = serde_json::json!({});
+async fn a_fresh_database_never_strips_plugin_fields() {
     let cluster = FakeCluster::with_objects(vec![
+        // From an older version (no annotation), labelled and not.
         shop_deployment(plugin_apply_entry()),
         shop_cronjob(plugin_apply_entry()),
-        orphan,
+        plugin_workload("old-web", None, None),
+        // From another database's reconciler.
+        plugin_workload("their-web", Some("shop"), Some("another-database")),
+        plugin_workload("their-old-web", None, Some("another-database")),
     ]);
     let state = reconcile_test_state(&cluster).await;
+    let mut sweep = PluginFieldSweep::default();
+
+    reconcile_application_plugins(&state, &mut sweep).await;
+    let requests = cluster.take_requests();
+    assert!(patches(&requests).is_empty(), "{requests:#?}");
+
+    // An application of the new database losing its last resource sweeps
+    // again: still nothing it didn't apply.
+    let row = insert_queue_resource(&state, "team", "blog").await;
+    reconcile_application_plugins(&state, &mut sweep).await;
+    remove_resource(&state, &row).await;
+    reconcile_application_plugins(&state, &mut sweep).await;
+    let requests = cluster.take_requests();
+    assert!(patches(&requests).is_empty(), "{requests:#?}");
+}
+
+#[tokio::test]
+async fn first_cycle_releases_fields_this_database_left_behind() {
+    // This database's reconciler applied them; the application lost its
+    // last resource (or was deleted, which strips its label) while
+    // deckwatch was down.
+    let cluster = FakeCluster::default();
+    let state = reconcile_test_state(&cluster).await;
+    let owner = plugin_fields_owner(&state.db).await.unwrap();
+    let mut cronjob = shop_cronjob(plugin_apply_entry());
+    cronjob["metadata"]["annotations"] =
+        serde_json::json!({ PLUGIN_FIELDS_OWNER_ANNOTATION: owner });
+    cluster.add(vec![
+        plugin_workload("shop-web", Some("shop"), Some(&owner)),
+        cronjob,
+        plugin_workload("old-web", None, Some(&owner)),
+    ]);
     let mut sweep = PluginFieldSweep::default();
 
     reconcile_application_plugins(&state, &mut sweep).await;
@@ -1691,14 +1857,104 @@ async fn first_cycle_releases_fields_left_behind_before_startup() {
     assert!(patch_to(&requests, SHOP_DEPLOYMENT_PATH).is_some());
     assert!(patch_to(&requests, SHOP_CRONJOB_PATH).is_some());
     assert_eq!(
-        patch_to(
-            &requests,
-            "/apis/apps/v1/namespaces/team/deployments/old-web"
-        )
-        .unwrap()
-        .body,
+        patch_to(&requests, &team_deployment_path("old-web"))
+            .unwrap()
+            .body,
         release_patch("apps/v1", "Deployment", "team", "old-web")
     );
+}
+
+/// Fields from before the annotation (older versions never released them)
+/// are released on the first cycle, but only for applications this database
+/// knows.
+#[tokio::test]
+async fn fields_from_before_the_annotation_are_released_only_for_known_applications() {
+    let cluster = FakeCluster::with_objects(vec![
+        plugin_workload("shop-web", Some("shop"), None),
+        plugin_workload("blog-web", Some("blog"), None),
+        plugin_workload("old-web", None, None),
+    ]);
+    let state = reconcile_test_state(&cluster).await;
+    crate::db::ensure_application(&state.db, "team", "shop")
+        .await
+        .unwrap();
+    let mut sweep = PluginFieldSweep::default();
+
+    reconcile_application_plugins(&state, &mut sweep).await;
+    let requests = cluster.take_requests();
+    assert_eq!(patches(&requests).len(), 1, "{requests:#?}");
+    assert_eq!(
+        patch_to(&requests, SHOP_DEPLOYMENT_PATH).unwrap().body,
+        release_patch("apps/v1", "Deployment", "team", "shop-web")
+    );
+}
+
+/// The reconciler stamps what it applies, so a later sweep has its evidence.
+#[tokio::test]
+async fn applied_fields_carry_this_databases_owner_id() {
+    let cluster = FakeCluster::with_objects(vec![
+        shop_deployment(deckwatch_update_entry()),
+        shop_cronjob(deckwatch_update_entry()),
+    ]);
+    let state = reconcile_test_state(&cluster).await;
+    let mut sweep = PluginFieldSweep::default();
+    insert_queue_resource(&state, "team", "shop").await;
+
+    reconcile_application_plugins(&state, &mut sweep).await;
+    let owner = plugin_fields_owner(&state.db).await.unwrap();
+    assert!(!owner.is_empty());
+    let requests = cluster.take_requests();
+    for path in [SHOP_DEPLOYMENT_PATH, SHOP_CRONJOB_PATH] {
+        let apply = patch_to(&requests, path).expect("patched");
+        assert_eq!(
+            apply.body["metadata"]["annotations"][PLUGIN_FIELDS_OWNER_ANNOTATION],
+            owner.as_str(),
+            "{path}"
+        );
+    }
+    // The id is the database's: the same on every read.
+    assert_eq!(plugin_fields_owner(&state.db).await.unwrap(), owner);
+}
+
+/// An application whose remaining resources add no env, sidecars or init
+/// containers is still patched, so a removed resource's fields go, and an
+/// annotation-only resource is applied.
+#[tokio::test]
+async fn removed_fields_go_even_when_the_remaining_resources_add_nothing() {
+    let cluster = FakeCluster::with_objects(vec![shop_deployment(deckwatch_update_entry())]);
+    let state = reconcile_test_state(&cluster).await;
+    let mut sweep = PluginFieldSweep::default();
+    let queue = insert_queue_resource(&state, "team", "shop").await;
+    let now = now_utc();
+    application_plugin_resources::ActiveModel {
+        id: Set(uuid::Uuid::new_v4().to_string()),
+        application_id: Set("team/shop".to_string()),
+        plugin_name: Set("DNS".to_string()),
+        resource_id: Set("zone".to_string()),
+        fields: Set("{}".to_string()),
+        state: Set("{}".to_string()),
+        annotations: Set(r#"{"dns.deckwatch.io/zone":"shop"}"#.to_string()),
+        sidecars: Set("[]".to_string()),
+        init_containers: Set("[]".to_string()),
+        created_at: Set(now),
+        updated_at: Set(now),
+    }
+    .insert(&state.db)
+    .await
+    .unwrap();
+
+    reconcile_application_plugins(&state, &mut sweep).await;
+    cluster.take_requests();
+    remove_resource(&state, &queue).await;
+    reconcile_application_plugins(&state, &mut sweep).await;
+    let requests = cluster.take_requests();
+    let apply = patch_to(&requests, SHOP_DEPLOYMENT_PATH).expect("patched without the queue");
+    let containers = &apply.body["spec"]["template"]["spec"]["containers"];
+    assert_eq!(containers.as_array().map(Vec::len), Some(1), "{containers}");
+    assert_eq!(containers[0]["env"], serde_json::json!([]));
+    let annotations = &apply.body["metadata"]["annotations"];
+    assert_eq!(annotations["dns.deckwatch.io/zone"], "shop");
+    assert!(annotations.get("sqs.deckwatch.io/orders").is_none());
 }
 
 #[tokio::test]
