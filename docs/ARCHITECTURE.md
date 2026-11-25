@@ -272,7 +272,7 @@ The only access control is `--namespaces` (env: `DECKWATCH_NAMESPACES`). If unse
 - **Docker:** Multi-stage `Dockerfile` — Vite build in one stage, Cargo build in another, both copied into a slim runtime image. See `.dockerignore` and `Dockerfile`.
 - **Helm:** `helm/deckwatch/` — templates for Deployment (single replica by default), Service, Ingress (optional), ServiceAccount + ClusterRoleBinding (for kube API access).
 - **Local dev:** k3d + `docker build` + `k3d image import` + `helm upgrade`. Frontend can also be run standalone via `pnpm dev` (proxies `/api` to the backend via Vite dev server config).
-- **Kubernetes version:** 1.33 or newer. Deckwatch compiles against k8s-openapi `v1_33`, the oldest version that k8s-openapi 0.29 (kube 5) supports, and the Helm chart declares `kubeVersion: ">=1.33.0-0"`. Zeus runs 1.35, and local k3d clusters pin `rancher/k3s:v1.35.10-k3s1` to match (see `CLAUDE.md`).
+- **Kubernetes version:** 1.33 or newer. Deckwatch compiles against k8s-openapi `v1_33`, the oldest version that k8s-openapi 0.29 (kube 5) supports, and the Helm chart declares `kubeVersion: ">=1.33.0-0"`. Local k3d clusters pin `rancher/k3s:v1.35.10-k3s1` (see `CLAUDE.md`).
 
 ## What is NOT in the codebase (deliberate scope)
 

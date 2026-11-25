@@ -41,6 +41,8 @@ Changes merged since the last release are listed under `[Unreleased]`.
   `livenessProbe` and `readinessProbe`, each a Kubernetes Probe); raise
   `startupProbe.failureThreshold` if loading your plugins takes longer than
   5 minutes. See [README.md](README.md#helm-chart-probes). (#391)
+- The API docs (`/api/docs`) and `/api/openapi.yaml` report the running
+  deckwatch version. The spec said 0.2.1 since that release. (#384)
 
 ## [0.7.0] - 2026-11-25
 

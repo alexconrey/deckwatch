@@ -122,9 +122,9 @@ k3d cluster create deckwatch --port 8080:80@loadbalancer \
   --image rancher/k3s:v1.35.10-k3s1
 ```
 
-Pin the k3s image: deckwatch needs Kubernetes >= 1.33 and Zeus runs 1.35, but
-k3d's default image tracks whatever k3d release is installed (v5.8.3 defaults to
-1.33). Bump the tag when Zeus moves to a new minor version.
+Pin the k3s image: deckwatch needs Kubernetes >= 1.33, but k3d's default image
+tracks whatever k3d release is installed (v5.8.3 defaults to 1.33). Bump the tag
+when you move to a newer Kubernetes minor version.
 
 After creation, configure the node to allow insecure pulls from the
 internal registry via NodePort:
@@ -320,19 +320,18 @@ refuses a tag that doesn't match all of the versions.
 
 ## Infrastructure
 
-### Zeus (production)
-- EKS, Kubernetes 1.35
-- ArgoCD Application on mgmt cluster targets Zeus cluster
-- Manifest: `~/git/k2/kore/keystone/src/aws/govcloud/shared-services/clusters/mgmt/apps/deckwatch.yaml`
-- Image: `ghcr.io/alexconrey/deckwatch:<tag>`
-- Hostname: `deckwatch.zeus.gc.aws.notskunk.works`
-- Storage: gp3 PVCs for SQLite DB and registry
-- Internal ALB via `alb.ingress.kubernetes.io/group.name: zeus`
-- SSO: `AWS_PROFILE=SHARED-SERVICES-GOV`
+### Production
+- Deployment specifics (hostnames, GitOps manifests, cloud accounts,
+  credentials) live in the maintainer's private deployment repository, not
+  here.
+- Keep them out of this public repo: code, docs, tests, issues, PRs, commit
+  messages and the CHANGELOG.
+- In examples and fixtures, use `example.com` hostnames and AWS's
+  documentation account ID `123456789012`.
 
 ### k3d (local dev)
 - Cluster name: `deckwatch`
-- k3s image pinned to `rancher/k3s:v1.35.10-k3s1` (matches Zeus's 1.35)
+- k3s image pinned to `rancher/k3s:v1.35.10-k3s1`
 - Port 8080 mapped to loadbalancer
 - Registry: NodePort 30500 → ClusterIP 5000 (see "Registry architecture" above)
 - `registries.yaml` on node maps `localhost:30500` → `http://localhost:30500` (insecure)

@@ -2811,7 +2811,7 @@ onMounted(load);
                 <v-text-field
                   v-model="reg.url"
                   label="Registry URL"
-                  placeholder="591839118651.dkr.ecr.us-gov-west-1.amazonaws.com/apps/my-app"
+                  placeholder="123456789012.dkr.ecr.us-east-1.amazonaws.com/apps/my-app"
                   density="comfortable"
                   hide-details
                 />

@@ -19,6 +19,38 @@ use serde::Serialize;
 
 const OPENAPI_YAML: &str = include_str!("../../openapi/openapi.yaml");
 
+/// The embedded spec with `info.version` set to this build's version, so
+/// the API docs always report the running release instead of whatever the
+/// file was last edited to say.
+static OPENAPI_YAML_VERSIONED: std::sync::LazyLock<String> =
+    std::sync::LazyLock::new(|| with_info_version(OPENAPI_YAML, env!("CARGO_PKG_VERSION")));
+
+/// `spec` with the `version:` key directly under the top-level `info:` set
+/// to `version`. Only that key changes (other `version` keys, such as schema
+/// properties, are left alone), and the rest of the text is kept as is.
+fn with_info_version(spec: &str, version: &str) -> String {
+    let mut out = String::with_capacity(spec.len() + 16);
+    let mut in_info = false;
+    let mut replaced = false;
+    for line in spec.split_inclusive('\n') {
+        if !replaced {
+            if line.starts_with("info:") {
+                in_info = true;
+            } else if in_info && !line.starts_with(' ') && !line.trim().is_empty() {
+                // The next top-level key ends `info`.
+                in_info = false;
+            }
+            if in_info && line.starts_with("  version:") {
+                out.push_str(&format!("  version: \"{version}\"\n"));
+                replaced = true;
+                continue;
+            }
+        }
+        out.push_str(line);
+    }
+    out
+}
+
 /// One entry per file in `docs/`. Order matches the intended reading order
 /// so the frontend can render the list directly without re-sorting.
 struct DocPage {
@@ -96,7 +128,7 @@ pub async fn openapi_yaml() -> Response {
     (
         StatusCode::OK,
         [(header::CONTENT_TYPE, "application/yaml; charset=utf-8")],
-        OPENAPI_YAML,
+        OPENAPI_YAML_VERSIONED.as_str(),
     )
         .into_response()
 }
@@ -162,3 +194,7 @@ pub async fn get_page(Path(slug): Path<String>) -> Response {
             .into_response(),
     }
 }
+
+#[cfg(test)]
+#[path = "docs_tests.rs"]
+mod tests;
