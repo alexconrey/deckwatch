@@ -319,32 +319,56 @@ fn now_utc() -> DateTimeUtc {
 /// than this long ago, so a plugin that flaps between failing and working
 /// can't flood the webhook. The matching recovery is then suppressed too.
 pub const NOTIFY_FLAP_GUARD: std::time::Duration = std::time::Duration::from_secs(600);
-/// Notifications being sent at once; more are dropped.
-const MAX_NOTIFICATIONS_IN_FLIGHT: usize = 8;
+/// Notifications waiting to be sent. Past this, new ones are dropped (and
+/// counted) instead of holding up the status worker.
+const NOTIFY_QUEUE_CAPACITY: usize = 64;
+
+/// What the notifier's sender task receives, in order.
+enum NotifyMsg {
+    Send(crate::notifications::NotificationEvent),
+    /// Reply once everything queued before has been sent.
+    Flush(oneshot::Sender<()>),
+}
 
 /// Sends `plugin_failing` and `plugin_recovered` notifications on
 /// transitions, and only on transitions: the worker computes each
 /// transition exactly once, in order.
+///
+/// Delivery keeps that order. Every notification goes through one bounded
+/// queue to a single sender task, which sends them one at a time, so a
+/// webhook never gets a target's `plugin_recovered` before its
+/// `plugin_failing`. Queueing never waits: when the queue is full the
+/// notification is dropped and counted.
 struct TransitionNotifier {
-    client: crate::notifications::NotificationClient,
     last_failing: std::collections::HashMap<StatusKey, std::time::Instant>,
     suppressed: std::collections::HashSet<StatusKey>,
-    in_flight: std::sync::Arc<tokio::sync::Semaphore>,
+    queue: mpsc::Sender<NotifyMsg>,
 }
 
 impl TransitionNotifier {
     fn new(state: &AppState) -> Self {
+        Self::with_capacity(state, NOTIFY_QUEUE_CAPACITY)
+    }
+
+    /// A notifier whose queue holds `capacity` notifications. Starts the
+    /// sender task, so call it inside the Tokio runtime.
+    fn with_capacity(state: &AppState, capacity: usize) -> Self {
+        let (queue, rx) = mpsc::channel(capacity);
+        tokio::spawn(deliver_notifications(
+            crate::notifications::NotificationClient::new(state.clone()),
+            rx,
+        ));
         Self {
-            client: crate::notifications::NotificationClient::new(state.clone()),
             last_failing: Default::default(),
             suppressed: Default::default(),
-            in_flight: std::sync::Arc::new(tokio::sync::Semaphore::new(
-                MAX_NOTIFICATIONS_IN_FLIGHT,
-            )),
+            queue,
         }
     }
 
-    fn on_transition(&mut self, update: &StatusUpdate, transition: Transition) {
+    /// Queue the notification for a transition, if it calls for one.
+    /// Returns whether one was queued (false when the flap guard suppressed
+    /// it or the queue was full).
+    fn on_transition(&mut self, update: &StatusUpdate, transition: Transition) -> bool {
         let key = &update.key;
         let (namespace, application) = key
             .application_id
@@ -359,7 +383,7 @@ impl TransitionNotifier {
                 if self.last_failing.contains_key(key) {
                     self.suppressed.insert(key.clone());
                     tracing::info!(plugin = %key.plugin, "plugin failing again within the flap guard; not notifying");
-                    return;
+                    return false;
                 }
                 self.last_failing.insert(key.clone(), now);
                 let first_error = update.events.iter().find(|r| {
@@ -382,7 +406,7 @@ impl TransitionNotifier {
             }
             Transition::Recovered => {
                 if self.suppressed.remove(key) {
-                    return;
+                    return false;
                 }
                 crate::notifications::NotificationEvent::PluginRecovered {
                     namespace,
@@ -393,25 +417,53 @@ impl TransitionNotifier {
                 }
             }
         };
-        let Ok(permit) = self.in_flight.clone().try_acquire_owned() else {
-            tracing::warn!(plugin = %key.plugin, "too many plugin notifications in flight; dropped one");
-            return;
-        };
-        let client = self.client.clone();
-        tokio::spawn(async move {
-            if let Err(e) = client.send_now(event).await {
-                tracing::warn!(error = %e, "plugin notification failed");
-            }
-            drop(permit);
-        });
+        self.enqueue(&key.plugin, event)
     }
 
-    /// Wait until every notification being sent has been.
+    /// Queue `event` behind every earlier notification, without waiting.
+    /// A full (or closed) queue drops it, counted in
+    /// `deckwatch_plugin_events_dropped_total{reason="notify_queue_full"}`.
+    fn enqueue(&self, plugin: &str, event: crate::notifications::NotificationEvent) -> bool {
+        match self.queue.try_send(NotifyMsg::Send(event)) {
+            Ok(()) => true,
+            Err(e) => {
+                crate::metrics::record_plugin_events_dropped(plugin, "notify_queue_full", 1);
+                let reason = match e {
+                    mpsc::error::TrySendError::Full(_) => "queue full",
+                    mpsc::error::TrySendError::Closed(_) => "sender stopped",
+                };
+                tracing::warn!(plugin, reason, "plugin notification dropped");
+                false
+            }
+        }
+    }
+
+    /// Wait until every notification queued so far has been sent (or has
+    /// failed): the marker goes through the same queue, behind them.
     async fn idle(&self) {
-        let _ = self
-            .in_flight
-            .acquire_many(MAX_NOTIFICATIONS_IN_FLIGHT as u32)
-            .await;
+        let (done, wait) = oneshot::channel();
+        if self.queue.send(NotifyMsg::Flush(done)).await.is_ok() {
+            let _ = wait.await;
+        }
+    }
+}
+
+/// The notifier's sender task: one notification at a time, in queue order.
+async fn deliver_notifications(
+    client: crate::notifications::NotificationClient,
+    mut rx: mpsc::Receiver<NotifyMsg>,
+) {
+    while let Some(msg) = rx.recv().await {
+        match msg {
+            NotifyMsg::Send(event) => {
+                if let Err(e) = client.send_now(event).await {
+                    tracing::warn!(error = %e, "plugin notification failed");
+                }
+            }
+            NotifyMsg::Flush(done) => {
+                let _ = done.send(());
+            }
+        }
     }
 }
 
