@@ -322,7 +322,6 @@ application (see [Applications](APPLICATIONS.md)).
 | Memcached | [deckwatch-plugin-memcached](https://github.com/alexconrey/deckwatch-plugin-memcached) | `memcached:1.6-alpine` | `MEMCACHED_URL=memcached://localhost:11211` |
 | Nginx proxy | [deckwatch-plugin-nginx-proxy](https://github.com/alexconrey/deckwatch-plugin-nginx-proxy) | `nginx:1.27-alpine` | — |
 | Fluent Bit | [deckwatch-plugin-fluent-bit](https://github.com/alexconrey/deckwatch-plugin-fluent-bit) | `fluent/fluent-bit:3.1` | — |
-| OpenTelemetry Collector | [deckwatch-plugin-otel](https://github.com/alexconrey/deckwatch-plugin-otel) | `otel/opentelemetry-collector:latest` | `OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4317`, plus `OTEL_SERVICE_NAME` if you set one |
 | PostgreSQL | [deckwatch-plugin-postgresql](https://github.com/alexconrey/deckwatch-plugin-postgresql) | `postgres:16-alpine` | `PG_HOST=localhost`, `POSTGRES_DB`, `POSTGRES_USER`, `POSTGRES_PASSWORD`, `PGDATA` |
 
 The PostgreSQL plugin also creates a PersistentVolumeClaim named

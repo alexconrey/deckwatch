@@ -1,10 +1,11 @@
 //! Deckwatch: Kubernetes deployment lifecycle manager.
 //!
-//! The binary (`src/main.rs`) only calls [`run`]; everything else lives in
-//! this library so the integration tests in `tests/` can drive real code
-//! paths (see `tests/outbound_tls.rs`). [`outbound`] and [`anthropic`] are
-//! the public outbound HTTP API, `audit` stays public as it was in the
-//! binary, and [`testing`] re-exports what the contract tests need.
+//! The binary (`src/main.rs`) only starts the Tokio runtime and calls
+//! [`run`]; everything else lives in this library so the integration tests
+//! in `tests/` can drive real code paths (see `tests/outbound_tls.rs`).
+//! [`outbound`] and [`anthropic`] are the public outbound HTTP API, `audit`
+//! stays public as it was in the binary, and [`testing`] re-exports what the
+//! contract tests need.
 
 mod ai_provider;
 pub mod anthropic;
@@ -28,6 +29,7 @@ mod metrics;
 mod migrations;
 mod notifications;
 pub mod outbound;
+mod plugin_cache;
 mod plugin_events;
 #[cfg(test)]
 mod plugin_fixture;
@@ -171,6 +173,13 @@ pub async fn run() {
         )),
         plugin_telemetry: plugin_events::PluginTelemetry::new(config.encryption_key.clone()),
     };
+    // Plugin calls cache compiled WebAssembly in DECKWATCH_CACHE_DIR, or
+    // nowhere; resolved once, before the first call (src/plugin_cache.rs).
+    state
+        .plugin_telemetry
+        .set_compile_cache(plugin_cache::CompileCache::resolve(
+            config.cache_dir.as_deref().map(std::path::Path::new),
+        ));
 
     migrate_configmap_apps_to_db(&state).await;
     handlers::settings::bind_legacy_credentials_at_startup(&state).await;

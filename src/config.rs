@@ -140,6 +140,14 @@ pub struct Config {
     /// hourly. 0 means no limit.
     #[arg(long, env = "DECKWATCH_AUDIT_MAX_ROWS", default_value = "100000")]
     pub audit_max_rows: u64,
+
+    /// Directory for deckwatch's cache: plugin calls cache compiled
+    /// WebAssembly in `<dir>/wasmtime`. Unset or empty means no cache, and so
+    /// does a directory deckwatch can't use (with a warning).
+    // An OsString, not a PathBuf: clap refuses an empty PathBuf, which would
+    // stop deckwatch from starting. See src/plugin_cache.rs.
+    #[arg(long, env = "DECKWATCH_CACHE_DIR")]
+    pub cache_dir: Option<std::ffi::OsString>,
 }
 
 impl Config {

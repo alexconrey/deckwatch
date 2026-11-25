@@ -19,6 +19,14 @@ Changes merged since the last release are listed under `[Unreleased]`.
 
 ### Upgrade notes
 
+- **Compiled plugins are cached only if `DECKWATCH_CACHE_DIR` is set.**
+  extism used to cache them in wasmtime's default directory under `$HOME`
+  (`$HOME/.cache/wasmtime`, or `$XDG_CACHE_HOME/wasmtime`), and when it
+  couldn't create that directory, every plugin call failed with
+  `plugin.load_failed`. Now deckwatch caches nothing unless
+  `DECKWATCH_CACHE_DIR` is set. The Helm chart sets it (see Added). If you run
+  deckwatch without the chart, set `DECKWATCH_CACHE_DIR` to a writable
+  directory, or plugins are compiled on every call. (#399)
 - **Send deckwatch's metrics to Prometheus over OTLP to keep the MCP activity
   page's tool call figures.** The page now reads them from deckwatch's OTLP
   metrics first (see Changed). Its fallback, deckwatch's own `/metrics`
@@ -38,15 +46,28 @@ Changes merged since the last release are listed under `[Unreleased]`.
   `mcp_k8s_tool_calls_total` keep working. (#400, #398)
 - **Helm `extraEnv`:** extra environment variables for the deckwatch
   container, as a list of Kubernetes `EnvVar` objects added after the ones
-  the chart sets. Until plugin calls stop blocking the async runtime (#385),
-  use it to set `TOKIO_WORKER_THREADS` if the CPU limit is under 2 cores (the
-  chart's default is `200m`). deckwatch then runs a single worker thread, and
-  while a plugin call holds it, deckwatch answers nothing, health checks
-  included. See
+  the chart sets. See
   [README.md](README.md#helm-chart-extra-environment-variables). (#391)
+- **`DECKWATCH_CACHE_DIR`, and a chart volume for it.** Plugin calls cache
+  compiled WebAssembly in `<dir>/wasmtime`, so each pod compiles a plugin
+  binary once instead of on every call, and plugins no longer need a writable
+  `$HOME`. deckwatch writes the cache's config, `<dir>/wasmtime-cache.toml`,
+  at startup. If it can't create or write the directory, it logs a warning
+  and runs without the cache; the cache never makes a plugin call fail. The
+  chart mounts an emptyDir at `/var/cache/deckwatch` for it, one per pod. The
+  new `cache` values turn it off (`cache.enabled`) or change
+  `cache.mountPath` and `cache.sizeLimit` (default `1Gi`). See
+  [README.md](README.md#helm-chart-plugin-compile-cache). (#399)
 
 ### Changed
 
+- **The OpenTelemetry Collector plugin is retired.** deckwatch-plugin-otel's
+  repository is going away, so remove the plugin under **Settings → Plugins**
+  if you installed it. [docs/TRACING.md](docs/TRACING.md) no longer describes
+  it. Built-in OTLP endpoint settings and per-application `OTEL_*` injection
+  are planned to replace it; until then, set the `OTEL_*` variables on your
+  workloads yourself. deckwatch's own OTLP export (Helm `telemetry.otlp`) is
+  unchanged. (#396)
 - **The MCP activity page reads deckwatch's OTLP metrics.** Its tool call
   figures come from `mcp_server_operation_duration_seconds`, the
   `mcp.server.operation.duration` histogram that deckwatch exports over OTLP,
@@ -63,6 +84,17 @@ Changes merged since the last release are listed under `[Unreleased]`.
 
 ### Fixed
 
+- **Plugin calls no longer stall the server, so the pod stops restarting.**
+  Plugins ran on the async runtime's worker threads, and a container CPU
+  limit under 2 cores leaves the runtime a single worker. While a plugin ran
+  (the reconcile loop calls every plugin for each plugin-managed Deployment
+  every 10 seconds), nothing else did: `/api/healthz` and `/api/readyz` timed
+  out and the kubelet restarted the pod. Plugin calls now run on a separate
+  thread pool, at most 4 at a time, and the runtime starts at least 2 worker
+  threads (`TOKIO_WORKER_THREADS` still sets the number). Plugin calls still
+  have no time limit (#301), but deckwatch now stops waiting for one after 2
+  minutes and reports `plugin.timeout`; the call may still finish in the
+  background. (#385, #395)
 - **The chart's probes give deckwatch time to start, and to answer when
   busy.** deckwatch loads every enabled plugin before it serves HTTP, and the
   liveness probe restarted it after about 30 seconds, so slow plugin

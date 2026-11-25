@@ -419,7 +419,8 @@ pub async fn create(
     // the deployment is committed.
     let application = application_of(deployment.metadata.labels.as_ref());
     let plugin_report: crate::plugins::PluginApplyReport = {
-        let plugins = state.plugins.read().await;
+        // A snapshot, so the plugin list isn't locked while the plugins run.
+        let plugins = state.plugins.read().await.clone();
         if !plugins.is_empty() {
             let call = crate::plugins::PluginCall::new(
                 &state.plugin_telemetry,
@@ -462,6 +463,7 @@ pub async fn create(
             {
                 Some(pod_spec) => {
                     crate::plugins::apply_plugins(&plugins, &ctx, pod_spec, dep_annotations, &call)
+                        .await
                 }
                 None => Default::default(),
             }
@@ -703,7 +705,8 @@ pub async fn update(
     // wanted service accounts to apply after the deployment replace is committed.
     let application = application_of(dep.metadata.labels.as_ref());
     let plugin_report: crate::plugins::PluginApplyReport = {
-        let plugins = state.plugins.read().await;
+        // A snapshot, so the plugin list isn't locked while the plugins run.
+        let plugins = state.plugins.read().await.clone();
         if !plugins.is_empty() {
             let call = crate::plugins::PluginCall::new(
                 &state.plugin_telemetry,
@@ -743,6 +746,7 @@ pub async fn update(
             {
                 Some(pod_spec) => {
                     crate::plugins::apply_plugins(&plugins, &ctx, pod_spec, dep_annotations, &call)
+                        .await
                 }
                 None => Default::default(),
             }

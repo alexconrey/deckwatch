@@ -111,8 +111,9 @@ minimum Kubernetes version, Helm values, API behaviour.
 | `DECKWATCH_PORT` | `--port` | `8080` | Listen port |
 | `DECKWATCH_FRONTEND_DIR` | `--frontend-dir` | `frontend/dist` | Path to built SPA |
 | `DECKWATCH_DATABASE_URL` | `--database-url` | `sqlite://deckwatch.db` | Database connection string (SQLite, Postgres, or MySQL) |
+| `DECKWATCH_CACHE_DIR` | `--cache-dir` | _(unset: no cache)_ | Directory for deckwatch's cache of compiled plugins, kept in `<dir>/wasmtime` (Helm: `cache`, an emptyDir at `/var/cache/deckwatch`). Unset, or a directory deckwatch can't use: plugins are compiled on every call; see [plugin compile cache](#helm-chart-plugin-compile-cache) |
 | `RUST_LOG` | — | `deckwatch=info,tower_http=info,mcp_k8s=info,extism::pdk=info,opentelemetry=warn` | Log filter (Helm: `logFilter`). `mcp_k8s` is the embedded library behind most MCP tools; `extism::pdk` carries plugin log lines; `opentelemetry` reports failed OTLP exports ([docs/TRACING.md](docs/TRACING.md#10-deckwatchs-own-telemetry)) |
-| `TOKIO_WORKER_THREADS` | — | One per CPU the container may use | Async worker threads (Helm: `extraEnv`). A CPU limit under 2 cores gives one; see [extra environment variables](#helm-chart-extra-environment-variables) |
+| `TOKIO_WORKER_THREADS` | — | One per CPU the container may use, at least 2 | Async worker threads (Helm: `extraEnv`); see [extra environment variables](#helm-chart-extra-environment-variables) |
 
 ### Helm chart: probes
 
@@ -149,6 +150,32 @@ handler, set `httpGet: null` next to the new one. To remove a probe, set it to
 startup probe, give `livenessProbe` an `initialDelaySeconds` that covers
 startup.
 
+### Helm chart: plugin compile cache
+
+Every plugin call compiles the plugin's WebAssembly before running it. With a
+cache, each pod compiles a plugin binary once and later calls load the result
+from disk ([#392](https://github.com/alexconrey/deckwatch/issues/392) measured
+about 3 ms instead of 45–62 ms per call for a ~700 KB plugin). The chart
+mounts an emptyDir and sets `DECKWATCH_CACHE_DIR` to it:
+
+| Value | Default | Description |
+|-------|---------|-------------|
+| `cache.enabled` | `true` | Mount the emptyDir and set `DECKWATCH_CACHE_DIR` |
+| `cache.mountPath` | `/var/cache/deckwatch` | Where the emptyDir is mounted |
+| `cache.sizeLimit` | `1Gi` | The emptyDir's size limit; Kubernetes evicts the pod if the cache grows past it. Empty means no limit |
+
+deckwatch keeps wasmtime's cache in `<dir>/wasmtime` and writes its config,
+`<dir>/wasmtime-cache.toml`, at every start. wasmtime trims the cache to stay
+under 512 MiB, checking at most once an hour, so keep `sizeLimit` well above
+that. Each pod has its own cache, so replicas need no shared volume. It lasts
+as long as the pod, container restarts included, and a new pod starts empty.
+
+Without `DECKWATCH_CACHE_DIR`, deckwatch caches nothing and logs how to turn
+the cache on. If it can't create or write the directory, it logs a warning and
+runs without the cache; if the cache stops working later, it warns once and
+stops using it. The cache never makes a plugin call fail. Outside the chart,
+set `DECKWATCH_CACHE_DIR` to a writable directory yourself.
+
 ### Helm chart: extra environment variables
 
 `extraEnv` is a list of Kubernetes `EnvVar` objects (`name`, plus `value` or
@@ -164,16 +191,13 @@ extraEnv:
 ```
 
 `TOKIO_WORKER_THREADS` sets how many worker threads deckwatch's async runtime
-(tokio) runs. The default is one per CPU the container may use, and Rust counts
-a CPU limit in whole cores, rounded down, with a minimum of one. Any limit
-under 2 cores, including the chart's default of `200m`, therefore gives a
-single worker. Plugin calls currently hold a worker for as long as they run,
-their HTTP requests included
-([#385](https://github.com/alexconrey/deckwatch/issues/385)), and while the
-only worker is busy, deckwatch answers nothing, its health checks included.
-More workers don't raise the CPU limit, but they keep deckwatch answering while
-a plugin waits on the network. Use a positive integer; deckwatch doesn't start
-with anything else.
+(tokio) runs. The default is one per CPU the container may use, but at least 2.
+Rust counts a CPU limit in whole cores, rounded down, so any limit under 2
+cores, including the chart's default of `200m`, would otherwise give a single
+worker, and while it was busy, deckwatch would answer nothing, its health checks
+included. More workers don't raise the CPU limit. Plugin calls don't run on
+these workers but on threads of their own, at most 4 at a time. Use a positive
+integer; deckwatch doesn't start with anything else.
 
 ## Architecture
 

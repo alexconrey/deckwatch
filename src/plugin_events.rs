@@ -33,6 +33,7 @@ use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 
+use crate::plugin_cache::CompileCache;
 use crate::plugins::{EventSeverity, KubernetesObjectRef, PluginEvent};
 
 /// Longest message kept, in bytes. Longer text is cut at a character
@@ -661,6 +662,9 @@ struct TelemetryInner {
     last_loads: Mutex<HashMap<String, Vec<PluginEventReport>>>,
     /// The status worker's queue, once `plugin_status::spawn_worker` ran.
     sink: OnceLock<tokio::sync::mpsc::Sender<crate::plugin_status::SinkMsg>>,
+    /// How plugin calls cache compiled WebAssembly, set once at startup from
+    /// `DECKWATCH_CACHE_DIR`. Unset means no cache.
+    compile_cache: OnceLock<CompileCache>,
 }
 
 impl std::fmt::Debug for PluginTelemetry {
@@ -688,6 +692,7 @@ impl PluginTelemetry {
                 call_timeout,
                 last_loads: Mutex::default(),
                 sink: OnceLock::new(),
+                compile_cache: OnceLock::new(),
             }),
         }
     }
@@ -698,6 +703,19 @@ impl PluginTelemetry {
 
     pub fn call_timeout(&self) -> Option<Duration> {
         self.inner.call_timeout
+    }
+
+    /// Set how plugin calls cache compiled WebAssembly. Returns false if it
+    /// was set already.
+    pub fn set_compile_cache(&self, cache: CompileCache) -> bool {
+        self.inner.compile_cache.set(cache).is_ok()
+    }
+
+    /// How plugin calls cache compiled WebAssembly: not at all, until
+    /// [`set_compile_cache`](Self::set_compile_cache).
+    pub fn compile_cache(&self) -> &CompileCache {
+        static OFF: CompileCache = CompileCache::off();
+        self.inner.compile_cache.get().unwrap_or(&OFF)
     }
 
     /// Remember what a plugin's latest load reported, so the action that

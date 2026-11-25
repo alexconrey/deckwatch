@@ -60,14 +60,12 @@ resources:
 # numbers.
 #
 # TOKIO_WORKER_THREADS sets how many async worker threads deckwatch runs. The
-# default is one per CPU the container may use, and a CPU limit counts in
-# whole cores, rounded down, with a minimum of one: any limit under 2 cores,
-# such as the 200m above, gives one worker. Plugin calls currently hold a
-# worker for as long as they run, HTTP requests included (#385), and while
-# the only worker is busy, deckwatch answers nothing, health checks included.
-# More workers don't raise the CPU limit, but they keep deckwatch answering
-# while a plugin waits on the network. Use a positive integer; deckwatch
-# doesn't start with anything else.
+# default is one per CPU the container may use, but at least 2. A CPU limit
+# counts in whole cores, rounded down, so any limit under 2 cores, such as the
+# 200m above, would otherwise give a single worker. More workers don't raise
+# the CPU limit. Plugin calls don't run on these workers but on threads of
+# their own, at most 4 at a time. Use a positive integer; deckwatch doesn't
+# start with anything else.
 extraEnv: []
 #   - name: TOKIO_WORKER_THREADS
 #     value: "4"
@@ -116,6 +114,22 @@ startupProbe:
   periodSeconds: 5
   timeoutSeconds: 5
   failureThreshold: 60
+
+# deckwatch's cache directory: an emptyDir mounted at mountPath and passed to
+# deckwatch as DECKWATCH_CACHE_DIR. Every plugin call compiles the plugin's
+# WebAssembly; with the cache, each plugin binary is compiled once and the
+# result reused (from <mountPath>/wasmtime). Each pod has its own cache, so
+# replicas share no volume, and it lasts as long as the pod, container
+# restarts included. Disabled, plugins are compiled on every call. If
+# deckwatch can't use the directory, it logs a warning and runs without the
+# cache; the cache never makes a plugin call fail.
+cache:
+  enabled: true
+  mountPath: /var/cache/deckwatch
+  # The emptyDir's size limit; Kubernetes evicts the pod if the cache grows
+  # past it. wasmtime trims its cache to stay under 512 MiB, checking at most
+  # hourly, so keep the limit well above that. Empty means no limit.
+  sizeLimit: 1Gi
 
 podAnnotations: {}
 podLabels: {}

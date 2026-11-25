@@ -41,6 +41,18 @@ fn invalid_port_rejected() {
 }
 
 #[test]
+fn cache_dir_takes_a_path_or_an_empty_value() {
+    let cfg = Config::try_parse_from(["deckwatch", "--cache-dir", "/var/cache/deckwatch"]).unwrap();
+    assert_eq!(
+        cfg.cache_dir.as_deref(),
+        Some(std::ffi::OsStr::new("/var/cache/deckwatch"))
+    );
+    // Empty turns the cache off (`plugin_cache`); it mustn't stop startup.
+    let cfg = Config::try_parse_from(["deckwatch", "--cache-dir", ""]).unwrap();
+    assert_eq!(cfg.cache_dir.as_deref(), Some(std::ffi::OsStr::new("")));
+}
+
+#[test]
 fn frontend_dir_override() {
     let cfg =
         Config::try_parse_from(["deckwatch", "--frontend-dir", "/opt/deckwatch/dist"]).unwrap();
