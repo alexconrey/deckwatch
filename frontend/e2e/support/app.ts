@@ -105,11 +105,11 @@ export class App {
   }
 
   /**
-   * Pause the page's timers now, before a screenshot of something that
+   * Pause the page's timers, before the action that shows something that
    * closes itself: a snackbar (3s) or a cluster-alert toast (5s). Timers
    * otherwise run in real time, and on a loaded machine the element could
-   * close between the assertion that it is visible and the capture.
-   * snap() resumes them after the screenshot.
+   * close before the capture. Until snap() resumes them, settle() steps
+   * the clock instead of waiting on page timers.
    */
   async freezeTimers(): Promise<void> {
     await this.page.clock.pauseAt(FIXED_NOW);
