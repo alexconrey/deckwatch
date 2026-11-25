@@ -600,3 +600,69 @@ async fn unload_disabled_drops_what_settings_no_longer_enable() {
     unload_disabled(&state, &settings).await;
     assert!(state.plugins.read().await.is_empty());
 }
+
+// ── Compile cache (DECKWATCH_CACHE_DIR) ──────────────────────────────────────
+
+/// The compiled modules in a wasmtime cache directory: its files without an
+/// extension (wasmtime's `.stats` and `.wip-*` files have one).
+fn cached_modules(dir: &std::path::Path) -> usize {
+    std::fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|entry| {
+            let path = entry.path();
+            if path.is_dir() {
+                cached_modules(&path)
+            } else {
+                usize::from(path.extension().is_none())
+            }
+        })
+        .sum()
+}
+
+/// A cache directory deckwatch can't use turns the cache off at startup, and
+/// plugin calls work without it.
+#[test]
+fn a_call_works_when_the_cache_directory_is_unusable() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("not-a-directory");
+    std::fs::write(&file, b"").unwrap();
+    let t = telemetry();
+    t.set_compile_cache(crate::plugin_cache::CompileCache::resolve(Some(&file)));
+    assert_eq!(t.compile_cache().config_file(), None);
+
+    let plugin = FixturePlugin::new()
+        .export(
+            "apply",
+            Behavior::output(r#"{"env_vars":[{"name":"FROM_PLUGIN","value":"1"}]}"#),
+        )
+        .loaded("fixture");
+    let outcome = apply_with(&plugin, &t);
+    let result = outcome.result.as_ref().expect("the call worked");
+    assert_eq!(result.env_vars[0].name, "FROM_PLUGIN");
+    assert!(outcome.events.is_empty(), "{:?}", outcome.events);
+}
+
+/// With the cache on, calls compile into DECKWATCH_CACHE_DIR. wasmtime reads
+/// the cache config on every compile; once it's gone, calls still work.
+#[test]
+fn calls_compile_into_the_cache_and_keep_working_when_it_breaks() {
+    let dir = tempfile::tempdir().unwrap();
+    let t = telemetry();
+    t.set_compile_cache(crate::plugin_cache::CompileCache::resolve(Some(dir.path())));
+    let plugin = FixturePlugin::new()
+        .export("apply", Behavior::output("{}"))
+        .loaded("fixture");
+
+    let cache_dir = dir.path().join("wasmtime");
+    let before = cached_modules(&cache_dir);
+    let outcome = apply_with(&plugin, &t);
+    assert!(outcome.result.is_some(), "{:?}", outcome.events);
+    assert!(cached_modules(&cache_dir) > before, "nothing was cached");
+
+    std::fs::remove_file(dir.path().join("wasmtime-cache.toml")).unwrap();
+    let outcome = apply_with(&plugin, &t);
+    assert!(outcome.result.is_some(), "{:?}", outcome.events);
+    assert_eq!(t.compile_cache().config_file(), None);
+}

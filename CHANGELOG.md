@@ -19,6 +19,14 @@ Changes merged since the last release are listed under `[Unreleased]`.
 
 ### Upgrade notes
 
+- **Compiled plugins are cached only if `DECKWATCH_CACHE_DIR` is set.**
+  extism used to cache them in wasmtime's default directory under `$HOME`
+  (`$HOME/.cache/wasmtime`, or `$XDG_CACHE_HOME/wasmtime`), and when it
+  couldn't create that directory, every plugin call failed with
+  `plugin.load_failed`. Now deckwatch caches nothing unless
+  `DECKWATCH_CACHE_DIR` is set. The Helm chart sets it (see Added). If you run
+  deckwatch without the chart, set `DECKWATCH_CACHE_DIR` to a writable
+  directory, or plugins are compiled on every call. (#399)
 - **`tracing.otlp_endpoint` is retired.** It was a gRPC `host:port` for the
   retired OpenTelemetry Collector plugin, and deckwatch never exported to it.
   To export deckwatch's own telemetry, enter your collector's OTLP/HTTP
@@ -48,6 +56,16 @@ Changes merged since the last release are listed under `[Unreleased]`.
   container, as a list of Kubernetes `EnvVar` objects added after the ones
   the chart sets. See
   [README.md](README.md#helm-chart-extra-environment-variables). (#391)
+- **`DECKWATCH_CACHE_DIR`, and a chart volume for it.** Plugin calls cache
+  compiled WebAssembly in `<dir>/wasmtime`, so each pod compiles a plugin
+  binary once instead of on every call, and plugins no longer need a writable
+  `$HOME`. deckwatch writes the cache's config, `<dir>/wasmtime-cache.toml`,
+  at startup. If it can't create or write the directory, it logs a warning
+  and runs without the cache; the cache never makes a plugin call fail. The
+  chart mounts an emptyDir at `/var/cache/deckwatch` for it, one per pod. The
+  new `cache` values turn it off (`cache.enabled`) or change
+  `cache.mountPath` and `cache.sizeLimit` (default `1Gi`). See
+  [README.md](README.md#helm-chart-plugin-compile-cache). (#399)
 
 ### Changed
 
