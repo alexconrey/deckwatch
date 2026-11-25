@@ -66,9 +66,16 @@ resources:
 # the CPU limit. Plugin calls don't run on these workers but on threads of
 # their own, at most 4 at a time. Use a positive integer; deckwatch doesn't
 # start with anything else.
+#
+# DECKWATCH_PLUGIN_CALL_TIMEOUT is the time limit of each plugin call, in
+# whole seconds: 60 unless set, and from 1 to 3600. A call that runs longer
+# fails with plugin.timeout. deckwatch doesn't start with anything else, 0
+# and an empty value included.
 extraEnv: []
 #   - name: TOKIO_WORKER_THREADS
 #     value: "4"
+#   - name: DECKWATCH_PLUGIN_CALL_TIMEOUT
+#     value: "120"
 
 # Probes for the deckwatch container. Each is a Kubernetes Probe object,
 # passed to the container unchanged. Helm merges your values into the

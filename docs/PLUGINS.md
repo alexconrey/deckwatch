@@ -75,6 +75,34 @@ a plugin binary once, and later calls load it from the cache. Without it,
 every call compiles. A cache directory deckwatch can't use is logged and the
 cache turned off; the cache never makes a plugin call fail.
 
+### Time limit
+
+Every plugin call (`metadata()`, `apply()`, `provision()` or `deprovision()`)
+may run for at most `DECKWATCH_PLUGIN_CALL_TIMEOUT` seconds, 60 by default.
+extism stops a call that runs longer, and the call fails with
+`plugin.timeout`, reported like any other plugin failure (see
+[Events, warnings and errors](#events-warnings-and-errors)). The plugin's HTTP
+requests count toward the limit: extism gives each request what's left of it
+as the request's timeout, so a server that accepts the connection and never
+answers can't hold up a call past the limit. Compiling the plugin before the
+call doesn't count.
+
+Calls normally take well under a second, so the default leaves room for a
+`provision()` that makes several API calls. To change it, set
+`DECKWATCH_PLUGIN_CALL_TIMEOUT` to a whole number of seconds from 1 to 3600,
+with the Helm chart's `extraEnv`:
+
+```yaml
+extraEnv:
+  - name: DECKWATCH_PLUGIN_CALL_TIMEOUT
+    value: "120"
+```
+
+Plugin calls always have a time limit: deckwatch doesn't start with `0`, an
+empty value or anything else outside that range, and says why. The
+`starting deckwatch` log line shows the limit in use
+(`plugin_call_timeout_secs`).
+
 ---
 
 ## Configuring plugins
@@ -368,8 +396,9 @@ resource id, a Kubernetes object, a `retryable` flag and a hint:
 - **From deckwatch.** Failures it detects itself, with reserved codes:
   `plugin.fetch_failed`, `plugin.checksum_mismatch`, `plugin.load_failed`
   (bad module, missing export, `min_deckwatch_version`), `plugin.trap` (a
-  panic), `plugin.timeout`, `plugin.output_invalid` (the message names the
-  field, e.g. `env_vars[1].name`), `plugin.k8s_apply_failed` and
+  panic), `plugin.timeout` (the call ran past its [time limit](#time-limit)),
+  `plugin.output_invalid` (the message names the field, e.g.
+  `env_vars[1].name`), `plugin.k8s_apply_failed` and
   `plugin.policy_rejected`, plus the informational `plugin.fields_released`
   (the reconciler removed what an application's provisioned resources had
   added to a workload, because none are left). A plugin can't use the
@@ -507,10 +536,26 @@ startupProbe:
 
 Once deckwatch is running, plugin calls run on threads of their own, at most 4
 at a time, not on the async worker threads that answer HTTP, so a slow or stuck
-plugin doesn't hold up the health checks. deckwatch stops waiting for a call
-after 2 minutes and reports `plugin.timeout`. Plugin calls have no time limit
-yet ([#301](https://github.com/alexconrey/deckwatch/issues/301)), so the call
-itself may still be running.
+plugin doesn't hold up the health checks. A call that runs past its
+[time limit](#time-limit) fails with `plugin.timeout`.
+
+### Plugin calls fail with `plugin.timeout`
+
+The call ran past its [time limit](#time-limit), 60 s unless
+`DECKWATCH_PLUGIN_CALL_TIMEOUT` says otherwise. The message names the export
+(`apply()` below) and says how the call ended:
+
+- `apply() was stopped after running past its time limit`: extism stopped
+  the call. Usually the plugin was waiting for an HTTP request to a host that
+  is slow or doesn't answer; check that its `allowed_hosts` are reachable from
+  the deckwatch pod.
+- `apply() didn't finish within 65s; deckwatch stopped waiting for it, but it
+  may still be running` (65 s with the default limit): the call ran on past
+  the limit where extism can't stop it, such as while compiling the plugin.
+  deckwatch waits 5 s past the limit, then gives up on the call and frees its
+  slot.
+
+If a plugin's calls really need longer, raise `DECKWATCH_PLUGIN_CALL_TIMEOUT`.
 
 ### Plugin loaded but not injecting
 
@@ -540,4 +585,4 @@ For developers working on deckwatch itself:
 
 Plugins are instantiated fresh per deployment operation (not pooled). This avoids thread-safety concerns with extism `Plugin` instances and keeps memory bounded since WASM binaries for a single-function plugin are typically 50–200 KB.
 
-A plugin call blocks its thread: extism runs the export synchronously, and the plugin's HTTP requests wait on that thread. So calls never run on Tokio's async workers, where they would stall every other task, health checks included. The entry points in `src/plugins.rs` (`run_plugin`, `run_provision`, `run_deprovision`, `apply_plugins`, `fetch_plugins` and `fetch_and_validate`) are async and run each call on Tokio's blocking pool, at most 4 at a time, inside the caller's span; the blocking functions are private to the module. A caller waits for a call up to the call timeout plus 5 seconds, or 2 minutes when no timeout is set, then reports `plugin.timeout`; the abandoned call may still be running.
+A plugin call blocks its thread: extism runs the export synchronously, and the plugin's HTTP requests wait on that thread. So calls never run on Tokio's async workers, where they would stall every other task, health checks included. The entry points in `src/plugins.rs` (`run_plugin`, `run_provision`, `run_deprovision`, `apply_plugins`, `fetch_plugins` and `fetch_and_validate`) are async and run each call on Tokio's blocking pool, at most 4 at a time, inside the caller's span; the blocking functions are private to the module. Every call's extism manifest carries the time limit (`DECKWATCH_PLUGIN_CALL_TIMEOUT`, held by `PluginTelemetry`), and a caller waits for a call up to the limit plus 5 seconds, then reports `plugin.timeout`; the abandoned call may still be running.
