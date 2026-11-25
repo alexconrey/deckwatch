@@ -485,6 +485,26 @@ Common causes:
 - Token has insufficient scope
 - `use_release: true` but no release exists for the given tag
 
+### deckwatch restarts while plugins load or run
+
+deckwatch fetches and compiles every enabled plugin before it starts serving
+HTTP (the `listening` log line). The Helm chart's startup probe gives it 5
+minutes; plugins load one at a time, and each download can take up to 30 s. If
+the pod's events show `failed startup probe, will be restarted` before
+deckwatch has logged `listening`, raise the budget:
+
+```yaml
+startupProbe:
+  failureThreshold: 120   # 10 minutes, checked every 5 s
+```
+
+Once deckwatch is running, plugin calls run on threads of their own, at most 4
+at a time, not on the async worker threads that answer HTTP, so a slow or stuck
+plugin doesn't hold up the health checks. deckwatch stops waiting for a call
+after 2 minutes and reports `plugin.timeout`. Plugin calls have no time limit
+yet ([#301](https://github.com/alexconrey/deckwatch/issues/301)), so the call
+itself may still be running.
+
 ### Plugin loaded but not injecting
 
 - Verify the deployment has the annotation the plugin checks for
