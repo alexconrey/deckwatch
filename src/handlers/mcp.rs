@@ -2132,53 +2132,22 @@ async fn tool_generate_local_build(
     let dockerfile = &config.dockerfile_path;
     let context = &config.docker_context;
 
-    let local_build_context = if context != "." {
-        format!("{local_context}/{context}")
-    } else {
-        local_context.to_string()
-    };
-
-    let dockerfile_basename = dockerfile.split('/').next_back().unwrap_or(dockerfile);
-
-    let mut kaniko_args = vec![
-        format!("--dockerfile=/workspace/{dockerfile_basename}"),
-        "--context=dir:///workspace".to_string(),
-        format!("{}={platform}", bs.platform_flag),
-        format!("--snapshot-mode={}", bs.snapshot_mode),
-    ];
-
-    if bs.cache_enabled {
-        kaniko_args.push("--cache=true".to_string());
+    // The stored GitOps fields are written by whoever configures GitOps for
+    // the deployment, so every argument is shell-quoted (crate::local_build).
+    let command = crate::local_build::LocalBuild {
+        platform,
+        local_context,
+        docker_context: context,
+        dockerfile_path: dockerfile,
+        oci_repository: &config.oci_repository,
+        no_push,
+        settings: bs,
     }
-
-    if no_push {
-        kaniko_args.push("--no-push".to_string());
-    } else {
-        let oci_repo = &config.oci_repository;
-        kaniko_args.push(format!("--destination={oci_repo}:local-test"));
-    }
-
-    for extra in &bs.extra_kaniko_args {
-        kaniko_args.push(extra.clone());
-    }
-
-    let kaniko_args_str = kaniko_args
-        .iter()
-        .map(|a| format!("  {a}"))
-        .collect::<Vec<_>>()
-        .join(" \\\n");
-
-    let docker_cmd = format!(
-        "docker run --rm \\\n\
-         --platform {platform} \\\n\
-         -v {local_build_context}:/workspace \\\n\
-         {kaniko_image} \\\n\
-         {kaniko_args_str}",
-        kaniko_image = bs.kaniko_image,
-    );
+    .command();
 
     let result = serde_json::json!({
-        "command": docker_cmd,
+        "command": command.shell,
+        "argv": command.argv,
         "kaniko_image": bs.kaniko_image,
         "platform": platform,
         "dockerfile": dockerfile,
@@ -2187,6 +2156,7 @@ async fn tool_generate_local_build(
         "no_push": no_push,
         "notes": [
             "Run this command from your local repo root to reproduce the Kaniko build locally.",
+            "Every argument is shell-quoted, so values are passed literally (a leading ~/ in local_context still expands). argv has the same arguments for running without a shell.",
             "The --no-push flag prevents pushing to the registry (safe for local testing).",
             "To test arm64: change --platform to linux/arm64".to_string(),
             format!("Kaniko image: {} (from deckwatch build settings)", bs.kaniko_image),
