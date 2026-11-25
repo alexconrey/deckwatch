@@ -122,10 +122,9 @@ spec:
             {{- end }}
             - name: OTEL_SERVICE_NAME
               value: {{ $otlp.serviceName | default "deckwatch" | quote }}
-            - name: POD_NAME
-              valueFrom:
-                fieldRef:
-                  fieldPath: metadata.name
+            # POD_NAME and POD_NAMESPACE are defined unconditionally above, so the
+            # $(...) references below resolve; don't re-declare them here (a
+            # duplicate env name fails server-side apply).
             - name: OTEL_RESOURCE_ATTRIBUTES
               value: "k8s.namespace.name=$(POD_NAMESPACE),k8s.pod.name=$(POD_NAME){{ range $key, $value := $otlp.resourceAttributes }},{{ $key }}={{ $value }}{{ end }}"
             {{- with $otlp.sampler }}
