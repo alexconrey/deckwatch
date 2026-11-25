@@ -475,3 +475,6 @@ mod integration_tests;
 mod live_plugin_events_tests;
 #[cfg(test)]
 mod plugin_events_acceptance_tests;
+
+#[cfg(test)]
+mod test_tracing;

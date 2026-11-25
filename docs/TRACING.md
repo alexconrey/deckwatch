@@ -362,9 +362,9 @@ and with no endpoint deckwatch behaves exactly as before.
 
 | Signal | What | Notes |
 |---|---|---|
-| Traces | One span per HTTP request (`http`, with `method`, `path` and `version` attributes), plus any span deckwatch or a library opens | Requests include MCP calls (`POST /mcp`), health probes and `/metrics` scrapes. Drop the latter in your collector if you don't want them. |
-| Logs | Every log line that passes the log filter, as an OTLP log record carrying the trace and span id of the span it was logged in | Includes the `mcp tool call` lines (tool, status, duration; never arguments), mcp-k8s library lines and plugin lines (target `extism::pdk`, attribute `plugin` = the extism instance id). Lines from background tasks (GitOps poller, plugin reconciler) have no span, so no trace id. |
-| Metrics | Log events with fields named `monotonic_counter.*`, `counter.*` or `histogram.*` | None today; this is how libraries that only use `tracing` (mcp-k8s) will report metrics. Prometheus `/metrics` is unchanged and separate. |
+| Traces | One span per HTTP request (`http`, with `method`, `path` and `version` attributes), plus any span deckwatch or a library opens. Each MCP request also gets a SERVER span from mcp-k8s, named `tools/call <tool>` (or the method), with the OpenTelemetry MCP attributes (see [§10.5](#105-mcp-requests)) | Requests include MCP calls (`POST /mcp`), health probes and `/metrics` scrapes. Drop the latter in your collector if you don't want them. |
+| Logs | Every log line that passes the log filter, as an OTLP log record carrying the trace and span id of the span it was logged in | Includes mcp-k8s's `tool call finished` / `request finished` line for every MCP request (never argument values outside the allowlist), other mcp-k8s library lines and plugin lines (target `extism::pdk`, attribute `plugin` = the extism instance id). Lines from background tasks (GitOps poller, plugin reconciler) have no span, so no trace id. |
+| Metrics | Log events with fields named `monotonic_counter.*`, `counter.*` or `histogram.*` | mcp-k8s's `mcp.server.operation.duration` histogram (seconds), one observation per MCP request. Prometheus `/metrics` is unchanged and separate. |
 
 - **One filter for both outputs.** The log filter (`RUST_LOG`, Helm `logFilter`) decides what is
   recorded, for stdout and OTLP alike.
@@ -472,9 +472,35 @@ Point both at the same backend when that is what you want ([§10.3](#103-with-th
 | `OTLP export request failed` with a reason (unknown issuer, connection refused, `HTTP 401`, `HTTP 404`) | Logged once per signal each time the failure changes, and `OTLP export requests succeed again` once it recovers. Unknown issuer: add the CA with `outbound.extraCaBundle`. `HTTP 404` on logs or metrics: the backend accepts traces only, so turn those signals off. |
 | `BatchSpanProcessor.ExportError` / `Export.Failed.Exhausted` (target `opentelemetry_sdk`, `opentelemetry-otlp`) | The SDK's own report for each failed batch, which is then dropped. Telemetry never blocks requests: when the backend is down, data is lost, not queued without bound. |
 | `OTEL_EXPORTER_OTLP_PROTOCOL=grpc is not supported` | deckwatch exports `http/protobuf` only. Use the backend's OTLP/HTTP port. |
-| Spans are named `http`, with kind `internal` | Semantic-convention names and kinds come with the MCP and HTTP instrumentation planned next. |
+| HTTP spans are named `http`, with kind `internal` | MCP requests have semantic-convention SERVER spans ([§10.5](#105-mcp-requests)); HTTP ones come with the HTTP instrumentation planned next. An MCP request with a remote parent has its SERVER span in the caller's trace, apart from the `http` span. |
 | The last few seconds of telemetry are lost on shutdown | deckwatch has no graceful shutdown yet, so the final batch (up to 5 s) is not flushed. |
 | The `plugin` attribute is an instance id, not the plugin name | That is what extism records. The plugin's message usually names it. |
+
+### 10.5 MCP requests
+
+Every `POST /mcp` request is one SERVER span, one `mcp.server.operation.duration` observation and
+one log line, whether the tool is deckwatch's own or one of mcp-k8s's. The names follow the
+OpenTelemetry GenAI MCP conventions (status *Development*), implemented in
+`mcp_k8s::telemetry::semconv`.
+
+- **Span:** `tools/call <tool>`, or just the method for other requests. A tool name deckwatch
+  doesn't serve never appears in a span name. Attributes include `mcp.method.name`,
+  `gen_ai.tool.name`, `jsonrpc.request.id`, `mcp.session.id`, `mcp_k8s.action` (`read`, `write`,
+  `delete` or `exec`), `mcp_k8s.decision`, `mcp_k8s.outcome`, `error.type`, the target
+  (`k8s.namespace.name`, `mcp_k8s.resource.kind`, `mcp_k8s.resource.name`), the argument keys
+  and the allowlisted argument values (`mcp_k8s.tool.arguments`).
+- **Client:** in a session started by `initialize`, `mcp_k8s.client.name` and
+  `mcp_k8s.client.version`. The client reports these itself: a label, never an identity.
+- **Trace context:** the caller's `params._meta.traceparent` (and `tracestate`) is the span's
+  parent, as the MCP conventions specify; the HTTP `traceparent` header is the fallback, or a link
+  when both are present. The span's trace id is also recorded as `trace_id`, so the JSON log lines
+  of the request carry it.
+- **Metric:** `mcp.server.operation.duration`, in seconds, with the conventions' buckets and only
+  `mcp.method.name`, `gen_ai.tool.name`, `gen_ai.operation.name`, `error.type`, `mcp_k8s.action` and
+  `mcp_k8s.decision` as attributes. The namespace, resource, client and session are never metric
+  attributes.
+- mcp-k8s reports the metric as log events on the target `mcp_k8s::telemetry::metrics`. deckwatch
+  keeps them out of stdout and OTLP logs; only the metrics pipeline reads them.
 
 ## 11. Known limitations (deckwatch 0.6.x)
 

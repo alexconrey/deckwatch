@@ -283,6 +283,7 @@ fn in_memory(signals: Signals) -> InMemory {
             SdkMeterProvider::builder()
                 .with_reader(PeriodicReader::builder(metrics.clone()).build())
                 .with_resource(resource())
+                .with_view(mcp_duration_view)
                 .build()
         }),
         logger_provider: signals.logs.then(|| {
@@ -560,6 +561,182 @@ fn metric_events_become_metrics() {
         names.contains(&"deckwatch_telemetry_test_events"),
         "{names:?}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// MCP requests (mcp-k8s telemetry through deckwatch's pipeline)
+// ---------------------------------------------------------------------------
+
+/// The caller's span in the W3C examples.
+const TRACEPARENT: &str = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01";
+const OTHER_TRACEPARENT: &str = "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01";
+
+/// POST a `tools/call` of `list_templates` to the real `/mcp` handler.
+async fn mcp_tool_call(params_meta: Option<&str>, header: Option<&str>) {
+    let mut params = serde_json::json!({ "name": "list_templates", "arguments": {} });
+    if let Some(traceparent) = params_meta {
+        params["_meta"] = serde_json::json!({ "traceparent": traceparent });
+    }
+    let request = serde_json::from_value(serde_json::json!({
+        "jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": params,
+    }))
+    .unwrap();
+    let mut headers = HeaderMap::new();
+    if let Some(traceparent) = header {
+        headers.insert("traceparent", traceparent.parse().unwrap());
+    }
+    let response = crate::handlers::mcp::handle_mcp(
+        axum::extract::State(test_state().await),
+        headers,
+        axum::Json(request),
+    )
+    .await;
+    let response = axum::response::IntoResponse::into_response(response);
+    assert_eq!(response.status(), StatusCode::OK);
+}
+
+fn mcp_span(otel: &InMemory) -> opentelemetry_sdk::trace::SpanData {
+    let spans = otel.spans();
+    let mcp: Vec<_> = spans
+        .into_iter()
+        .filter(|s| s.name == "tools/call list_templates")
+        .collect();
+    assert_eq!(mcp.len(), 1, "one MCP server span");
+    mcp.into_iter().next().unwrap()
+}
+
+#[tokio::test]
+async fn an_mcp_request_joins_the_trace_in_its_meta() {
+    let otel = in_memory(Signals {
+        traces: true,
+        ..NONE
+    });
+    let _guard = tracing::subscriber::set_default(otel.subscriber());
+    mcp_tool_call(Some(TRACEPARENT), None).await;
+
+    let span = mcp_span(&otel);
+    assert_eq!(span.span_kind, opentelemetry::trace::SpanKind::Server);
+    assert_eq!(
+        span.span_context.trace_id().to_string(),
+        "4bf92f3577b34da6a3ce929d0e0e4736"
+    );
+    assert_eq!(span.parent_span_id.to_string(), "00f067aa0ba902b7");
+    assert!(span.parent_span_is_remote);
+    assert_eq!(
+        attribute(&span, "trace_id"),
+        Some(&"4bf92f3577b34da6a3ce929d0e0e4736".into())
+    );
+    assert_eq!(
+        attribute(&span, "gen_ai.tool.name"),
+        Some(&"list_templates".into())
+    );
+    assert!(span.links.is_empty());
+}
+
+#[tokio::test]
+async fn the_traceparent_header_is_the_fallback_and_otherwise_a_link() {
+    let otel = in_memory(Signals {
+        traces: true,
+        ..NONE
+    });
+    let _guard = tracing::subscriber::set_default(otel.subscriber());
+
+    mcp_tool_call(None, Some(TRACEPARENT)).await;
+    let span = mcp_span(&otel);
+    assert_eq!(
+        span.span_context.trace_id().to_string(),
+        "4bf92f3577b34da6a3ce929d0e0e4736"
+    );
+    otel.spans.reset();
+
+    // Both: _meta is the parent (the MCP conventions), the header a link.
+    mcp_tool_call(Some(OTHER_TRACEPARENT), Some(TRACEPARENT)).await;
+    let span = mcp_span(&otel);
+    assert_eq!(
+        span.span_context.trace_id().to_string(),
+        "0af7651916cd43dd8448eb211c80319c"
+    );
+    let links: Vec<String> = span
+        .links
+        .iter()
+        .map(|l| l.span_context.trace_id().to_string())
+        .collect();
+    assert_eq!(links, ["4bf92f3577b34da6a3ce929d0e0e4736"]);
+    otel.spans.reset();
+
+    // A malformed traceparent starts a new trace.
+    mcp_tool_call(Some("00-not-a-trace-01"), None).await;
+    let span = mcp_span(&otel);
+    assert!(span.span_context.is_valid());
+    assert!(!span.parent_span_is_remote);
+}
+
+#[tokio::test]
+async fn mcp_metric_events_become_the_duration_histogram_and_nothing_else() {
+    let otel = in_memory(ALL);
+    let _guard = tracing::subscriber::set_default(otel.subscriber());
+    mcp_tool_call(None, None).await;
+    otel.telemetry
+        .meter_provider
+        .as_ref()
+        .unwrap()
+        .force_flush()
+        .unwrap();
+
+    use opentelemetry_sdk::metrics::data::{AggregatedMetrics, MetricData};
+    let exported = otel.metrics.get_finished_metrics().unwrap();
+    let duration = exported
+        .iter()
+        .flat_map(|rm| rm.scope_metrics())
+        .flat_map(|sm| sm.metrics())
+        .find(|m| m.name() == mcp_semconv::MCP_SERVER_OPERATION_DURATION)
+        .expect("duration histogram");
+    assert_eq!(duration.unit(), "s");
+    let AggregatedMetrics::F64(MetricData::Histogram(histogram)) = duration.data() else {
+        panic!("not an f64 histogram: {:?}", duration.data());
+    };
+    let point = histogram.data_points().next().expect("one point");
+    assert_eq!(point.count(), 1);
+    assert_eq!(
+        point.bounds().collect::<Vec<_>>(),
+        mcp_semconv::MCP_SERVER_OPERATION_DURATION_BUCKETS
+    );
+    for kv in point.attributes() {
+        assert!(
+            mcp_semconv::METRIC_ATTRIBUTES.contains(&kv.key.as_str()),
+            "attribute {} on the metric",
+            kv.key
+        );
+    }
+
+    // The metric event is neither a log record nor a span event.
+    for record in otel.log_records() {
+        assert_ne!(
+            record.record.target().map(|t| t.as_ref()),
+            Some(mcp_semconv::METRICS_TARGET)
+        );
+    }
+    let span = mcp_span(&otel);
+    assert!(
+        span.events.is_empty(),
+        "span events with log export on: {:?}",
+        span.events
+    );
+}
+
+#[tokio::test]
+async fn without_log_export_mcp_metric_events_are_not_span_events() {
+    let otel = in_memory(Signals {
+        traces: true,
+        ..NONE
+    });
+    let _guard = tracing::subscriber::set_default(otel.subscriber());
+    mcp_tool_call(None, None).await;
+
+    let span = mcp_span(&otel);
+    let names: Vec<&str> = span.events.iter().map(|e| e.name.as_ref()).collect();
+    // The log line arrives as a span event; the metric event doesn't.
+    assert_eq!(names, ["tool call finished"]);
 }
 
 // ---------------------------------------------------------------------------
