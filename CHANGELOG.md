@@ -17,6 +17,20 @@ Changes merged since the last release are listed under `[Unreleased]`.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Plugin calls no longer stall the server, so the pod stops restarting.**
+  Plugins ran on the async runtime's worker threads, and a container CPU
+  limit under 2 cores leaves the runtime a single worker. While a plugin ran
+  (the reconcile loop calls every plugin for each plugin-managed Deployment
+  every 10 seconds), nothing else did: `/api/healthz` and `/api/readyz` timed
+  out and the kubelet restarted the pod. Plugin calls now run on a separate
+  thread pool, at most 4 at a time, and the runtime starts at least 2 worker
+  threads (`TOKIO_WORKER_THREADS` still sets the number). Plugin calls still
+  have no time limit (#301), but deckwatch now stops waiting for one after 2
+  minutes and reports `plugin.timeout`; the call may still finish in the
+  background. (#385, #395)
+
 ## [0.7.0] - 2026-11-25
 
 A security and hardening release. It also moves to kube 5, which requires
