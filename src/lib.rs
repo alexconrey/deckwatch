@@ -1,10 +1,11 @@
 //! Deckwatch: Kubernetes deployment lifecycle manager.
 //!
-//! The binary (`src/main.rs`) only calls [`run`]; everything else lives in
-//! this library so the integration tests in `tests/` can drive real code
-//! paths (see `tests/outbound_tls.rs`). [`outbound`] and [`anthropic`] are
-//! the public outbound HTTP API, `audit` stays public as it was in the
-//! binary, and [`testing`] re-exports what the contract tests need.
+//! The binary (`src/main.rs`) only starts the Tokio runtime and calls
+//! [`run`]; everything else lives in this library so the integration tests
+//! in `tests/` can drive real code paths (see `tests/outbound_tls.rs`).
+//! [`outbound`] and [`anthropic`] are the public outbound HTTP API, `audit`
+//! stays public as it was in the binary, and [`testing`] re-exports what the
+//! contract tests need.
 
 mod ai_provider;
 pub mod anthropic;
