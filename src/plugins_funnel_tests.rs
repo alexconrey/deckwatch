@@ -245,7 +245,7 @@ fn secret_plugin(behavior: Behavior, stored: &str) -> LoadedPlugin {
         .insert("AWS_SECRET_ACCESS_KEY".into(), stored.into());
     plugin
         .config
-        .insert("AWS_REGION".into(), "us-gov-west-1".into());
+        .insert("AWS_REGION".into(), "us-west-2".into());
     plugin
 }
 

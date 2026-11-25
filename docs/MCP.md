@@ -28,7 +28,7 @@ For a local deckwatch instance (k3d, kind, minikube):
 claude mcp add --transport http deckwatch-local http://localhost:8080/mcp
 ```
 
-For a remote deckwatch instance (Zeus, EKS, etc.):
+For a remote deckwatch instance (on EKS, for example):
 
 ```bash
 claude mcp add --transport http deckwatch https://deckwatch.your-domain.com/mcp
@@ -323,8 +323,8 @@ the Kubernetes 1.33 API types that deckwatch is built with: DRA
 ClusterTrustBundle and LeaseCandidate `v1beta1`, and MutatingAdmissionPolicy,
 StorageVersion and StorageVersionMigration `v1alpha1`. Clusters serve those
 versions only when they are enabled with `--runtime-config`. A default 1.35
-cluster such as Zeus serves only the GA versions, so these tools return the
-API server's 404 there. IPAddress and ServiceCIDR tools use the GA
+cluster serves only the GA versions, so these tools return the API server's
+404 there. IPAddress and ServiceCIDR tools use the GA
 `networking.k8s.io/v1` and work on every supported cluster.
 
 ### Namespace access denied

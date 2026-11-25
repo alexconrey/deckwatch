@@ -920,7 +920,7 @@ async fn test_update_plugin_config_accepts_key_value_objects_strings_and_null() 
         &state,
         &json!({ "name": "aws", "config": {
             "RESOURCE_TAGS": { "Team": "platform" },
-            "AWS_REGION": "us-gov-west-1"
+            "AWS_REGION": "us-west-2"
         }}),
     )
     .await
@@ -928,7 +928,7 @@ async fn test_update_plugin_config_accepts_key_value_objects_strings_and_null() 
     let cfg = stored_aws_config(&state).await;
     let tags: serde_json::Value = serde_json::from_str(&cfg["RESOURCE_TAGS"]).unwrap();
     assert_eq!(tags, json!({ "Team": "platform" }));
-    assert_eq!(cfg["AWS_REGION"], "us-gov-west-1");
+    assert_eq!(cfg["AWS_REGION"], "us-west-2");
 
     // The same value as a JSON string is accepted too.
     tool_update_plugin_config(
@@ -963,7 +963,7 @@ async fn test_update_plugin_config_rejects_invalid_key_value_without_partial_wri
         let err = tool_update_plugin_config(
             &state,
             &json!({ "name": "aws", "config": {
-                "AWS_REGION": "us-gov-west-1",
+                "AWS_REGION": "us-west-2",
                 "RESOURCE_TAGS": bad
             }}),
         )
