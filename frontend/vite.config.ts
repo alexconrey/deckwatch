@@ -20,7 +20,7 @@ const pkg = JSON.parse(readFileSync("./package.json", "utf-8"));
  * scroll lock while a dialog is open. Inlining Vuetify's own layers.css at
  * the top of <head> puts the declaration first in every build.
  */
-function vuetifyLayerOrder(): Plugin {
+export function vuetifyLayerOrder(): Plugin {
   const layers = readFileSync(createRequire(import.meta.url).resolve("vuetify/styles/layers"), "utf-8");
   return {
     name: "deckwatch:vuetify-layer-order",
@@ -51,7 +51,7 @@ const V3_BREAKPOINTS: Record<string, string> = {
   "2137.98": "2559.98",
 };
 
-function vuetifyV3Breakpoints(): Plugin {
+export function vuetifyV3Breakpoints(): Plugin {
   return {
     name: "deckwatch:vuetify-v3-breakpoints",
     transform(code, id) {
