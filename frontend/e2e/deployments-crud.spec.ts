@@ -1,97 +1,50 @@
 import { expect, test } from "./fixtures";
 
 test.describe("Deployment CRUD", () => {
-  test("create → verify in list → open detail → delete", async ({ page, mockApi }) => {
-    // Track create requests so we can assert the payload.
-    let createBody: Record<string, unknown> | null = null;
-    await mockApi.override(
-      /\/api\/namespaces\/[^/]+\/deployments$/,
-      async (route) => {
-        if (route.request().method() === "POST") {
-          const body = JSON.parse(route.request().postData() ?? "{}") as Record<string, unknown>;
-          createBody = body;
-          return route.fulfill({
-            status: 201,
-            contentType: "application/json",
-            body: JSON.stringify({
-              name: body.name,
-              namespace: "default",
-              image: body.image,
-              replicas: {
-                desired: (body.replicas as number) ?? 1,
-                ready: 0,
-                available: 0,
-                updated: 0,
-              },
-              status: "progressing",
-              created_at: new Date().toISOString(),
-              labels: {},
-              conditions: [],
-              env: [],
-              command: [],
-              args: [],
-              resource_limits: null,
-              resource_requests: null,
-              liveness_probe: null,
-              readiness_probe: null,
-              startup_probe: null,
-              pods: [],
-              ingresses: [],
-            }),
-          });
-        }
-        // GET falls through to the default fixture handler.
-        return route.fallback();
-      },
-    );
-
+  test("create posts the form and opens the new deployment", async ({ page, mockApi }) => {
     await page.goto("/deployments/create");
-    await page.getByLabel(/name/i).first().fill("api-server");
-    await page.getByLabel(/image/i).first().fill("api-server:v1");
+    await page.getByLabel("Deployment Name").fill("api-server");
+    await page.getByLabel("Container Image").fill("api-server:v1");
+    await page.getByRole("button", { name: "Create Deployment" }).click();
 
-    // Try to locate a submit button. The actual label may vary; match
-    // the common variants.
-    const submit = page
-      .getByRole("button", { name: /create|deploy|submit|save/i })
-      .first();
-    await submit.click();
-
-    // Wait for the create call to fire.
-    await expect.poll(() => createBody).not.toBeNull();
-    expect(createBody).toMatchObject({
+    const call = await mockApi.waitForRequest("POST", "/namespaces/default/deployments");
+    // The settings mock has default resource limits; create mode applies them
+    // to the blank resource fields.
+    expect(call.body).toEqual({
       name: "api-server",
       image: "api-server:v1",
+      replicas: 1,
+      resource_requests: { cpu: "100m", memory: "128Mi" },
+      resource_limits: { cpu: "500m", memory: "512Mi" },
     });
+    await expect(page).toHaveURL(/\/deployments\/default\/api-server$/);
   });
 
-  test("delete confirmation dialog cancels cleanly", async ({ page, mockApi }) => {
-    let deleteCalled = false;
-    await mockApi.override(
-      /\/api\/namespaces\/[^/]+\/deployments\/[^/]+$/,
-      async (route) => {
-        if (route.request().method() === "DELETE") {
-          deleteCalled = true;
-          return route.fulfill({ status: 204 });
-        }
-        return route.fallback();
-      },
-    );
-
+  test("delete asks for the name, and cancel sends nothing", async ({ page, mockApi }) => {
     await page.goto("/deployments/default/web");
+    await page.getByRole("button", { name: "Delete" }).click();
 
-    // Look for a delete button; if absent, this test is a soft skip.
-    const del = page.getByRole("button", { name: /delete|remove/i }).first();
-    if ((await del.count()) === 0) {
-      test.info().annotations.push({ type: "skip", description: "No delete button surfaced yet" });
-      return;
-    }
-    await del.click();
+    const dialog = page.getByRole("dialog");
+    await expect(dialog.getByText("Delete Deployment")).toBeVisible();
+    const confirm = dialog.getByRole("button", { name: "Delete" });
+    await expect(confirm).toBeDisabled();
+    await dialog.getByRole("textbox").fill("wrong-name");
+    await expect(confirm).toBeDisabled();
 
-    // Cancel the confirm dialog.
-    const cancel = page.getByRole("button", { name: /cancel|no|dismiss/i }).first();
-    if (await cancel.isVisible()) {
-      await cancel.click();
-    }
-    expect(deleteCalled).toBe(false);
+    await dialog.getByRole("button", { name: "Cancel" }).click();
+    await expect(dialog).toBeHidden();
+    expect(mockApi.requests("DELETE", "/namespaces/:ns/deployments/:name")).toHaveLength(0);
+  });
+
+  test("delete sends DELETE after the name is typed and returns to the list", async ({ page, mockApi }) => {
+    await page.goto("/deployments/default/web");
+    await page.getByRole("button", { name: "Delete" }).click();
+    const dialog = page.getByRole("dialog");
+    await dialog.getByRole("textbox").fill("web");
+    await dialog.getByRole("button", { name: "Delete" }).click();
+
+    await mockApi.waitForRequest("DELETE", "/namespaces/default/deployments/web");
+    await expect(page).toHaveURL(/\/deployments$/);
+    await expect(page.getByRole("cell", { name: "web", exact: true })).toBeHidden();
   });
 });

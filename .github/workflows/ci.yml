@@ -160,6 +160,80 @@ jobs:
       - name: unit tests
         run: pnpm test
 
+  e2e:
+    name: E2E (Playwright)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    # The visual baselines in frontend/e2e/__screenshots__ were rendered in
+    # this image: same fonts, same Chromium, same rasterization. Its version
+    # must equal @playwright/test in frontend/pnpm-lock.yaml (a step below
+    # checks that). Bumping Playwright means bumping this tag and
+    # frontend's lockfile together, then regenerating the baselines: see
+    # docs/TESTING.md.
+    container:
+      image: mcr.microsoft.com/playwright:v1.65.1-noble
+      # Chromium needs more shared memory than Docker's default 64 MB.
+      options: --ipc=host
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v6
+        with:
+          version: 11
+
+      - name: Check the image matches @playwright/test
+        run: |
+          want=$(sed -nE "s/^  '@playwright\/test@([0-9][^']*)':\$/\1/p" pnpm-lock.yaml | head -n 1)
+          have=$(node -p "JSON.parse(require('fs').readFileSync('/ms-playwright/.docker-info', 'utf8')).driverVersion")
+          if [ "$want" != "$have" ]; then
+            echo "::error file=.github/workflows/ci.yml::the e2e container is Playwright $have but frontend/pnpm-lock.yaml has @playwright/test $want; bump both together and regenerate the baselines (docs/TESTING.md)"
+            exit 1
+          fi
+          echo "ok: image and @playwright/test are both $want"
+
+      # Only main writes the cache; PRs restore main's. That keeps the
+      # repo's cache quota for the Docker and Rust caches.
+      - name: Locate the pnpm store
+        id: pnpm-store
+        run: echo "path=$(pnpm store path --silent)" >> "$GITHUB_OUTPUT"
+
+      - name: Restore the pnpm store
+        uses: actions/cache/restore@v6
+        with:
+          path: ${{ steps.pnpm-store.outputs.path }}
+          key: pnpm-store-e2e-${{ hashFiles('frontend/pnpm-lock.yaml') }}
+          restore-keys: pnpm-store-e2e-
+
+      - name: pnpm install
+        run: pnpm install --frozen-lockfile
+
+      - name: Save the pnpm store
+        if: github.event_name == 'push'
+        uses: actions/cache/save@v6
+        with:
+          path: ${{ steps.pnpm-store.outputs.path }}
+          key: pnpm-store-e2e-${{ hashFiles('frontend/pnpm-lock.yaml') }}
+
+      # Builds the app with `vite build`, serves it with `vite preview`
+      # (playwright.config.ts webServer) and runs the functional and visual
+      # specs against it with every /api request mocked in the browser.
+      - name: Playwright e2e and visual regression
+        run: pnpm exec playwright test
+
+      - name: Upload the report, diffs, traces and videos
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: playwright-report
+          path: |
+            frontend/playwright-report/
+            frontend/test-results/
+          retention-days: 14
+
   docs:
     name: Docs Build
     runs-on: ubuntu-latest
