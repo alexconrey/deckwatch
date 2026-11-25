@@ -93,7 +93,7 @@ fn git_auth_user_gitlab_auto_detected() {
         "oauth2"
     );
     assert_eq!(
-        resolve_git_auth_user("", "https://gitlab.gravitas.sh/kore/examples/nginx.git"),
+        resolve_git_auth_user("", "https://gitlab.example.com/group/examples/nginx.git"),
         "oauth2"
     );
 }
@@ -194,8 +194,8 @@ fn arch_node_affinity_amd64() {
 fn rewrite_registry_url_rewrites_matching_public() {
     let result = rewrite_registry_url(
         Some("registry.default.svc.cluster.local:5000"),
-        Some("registry.zeus.gc.aws.notskunk.works"),
-        "registry.zeus.gc.aws.notskunk.works/myapp",
+        Some("registry.example.com"),
+        "registry.example.com/myapp",
     );
     assert_eq!(result, "registry.default.svc.cluster.local:5000/myapp");
 }
@@ -204,7 +204,7 @@ fn rewrite_registry_url_rewrites_matching_public() {
 fn rewrite_registry_url_no_rewrite_different_registry() {
     let result = rewrite_registry_url(
         Some("registry.default.svc.cluster.local:5000"),
-        Some("registry.zeus.gc.aws.notskunk.works"),
+        Some("registry.example.com"),
         "ghcr.io/org/myapp",
     );
     assert_eq!(result, "ghcr.io/org/myapp");
@@ -214,10 +214,10 @@ fn rewrite_registry_url_no_rewrite_different_registry() {
 fn rewrite_registry_url_no_rewrite_when_no_internal() {
     let result = rewrite_registry_url(
         None,
-        Some("registry.zeus.gc.aws.notskunk.works"),
-        "registry.zeus.gc.aws.notskunk.works/myapp",
+        Some("registry.example.com"),
+        "registry.example.com/myapp",
     );
-    assert_eq!(result, "registry.zeus.gc.aws.notskunk.works/myapp");
+    assert_eq!(result, "registry.example.com/myapp");
 }
 
 #[test]
@@ -225,9 +225,9 @@ fn rewrite_registry_url_no_rewrite_when_no_public() {
     let result = rewrite_registry_url(
         Some("registry.default.svc.cluster.local:5000"),
         None,
-        "registry.zeus.gc.aws.notskunk.works/myapp",
+        "registry.example.com/myapp",
     );
-    assert_eq!(result, "registry.zeus.gc.aws.notskunk.works/myapp");
+    assert_eq!(result, "registry.example.com/myapp");
 }
 
 #[test]
@@ -241,9 +241,9 @@ fn rewrite_registry_url_no_rewrite_when_both_none() {
 #[test]
 fn check_internal_registry_matches_public_url() {
     assert!(check_internal_registry(
-        Some("registry.zeus.gc.aws.notskunk.works"),
+        Some("registry.example.com"),
         Some("registry.default.svc.cluster.local:5000"),
-        "registry.zeus.gc.aws.notskunk.works/myapp:latest",
+        "registry.example.com/myapp:latest",
     ));
 }
 
@@ -259,7 +259,7 @@ fn check_internal_registry_falls_back_to_internal_url() {
 #[test]
 fn check_internal_registry_false_for_external() {
     assert!(!check_internal_registry(
-        Some("registry.zeus.gc.aws.notskunk.works"),
+        Some("registry.example.com"),
         Some("registry.default.svc.cluster.local:5000"),
         "ghcr.io/org/myapp:latest",
     ));

@@ -43,7 +43,7 @@ pub struct GitOpsConfigRequest {
     pub docker_context: Option<String>,
     /// Preferred field: OCI-generic registry destination
     /// (e.g. `docker.io/myorg/api`, `ghcr.io/myorg/api`,
-    /// `591839118651.dkr.ecr.us-gov-west-1.amazonaws.com/apps/my-app`).
+    /// `123456789012.dkr.ecr.us-east-1.amazonaws.com/apps/my-app`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub oci_repository: Option<String>,
     /// Deprecated alias for `oci_repository`. Accepted for backwards

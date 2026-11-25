@@ -91,7 +91,7 @@ inventory.
   "oci_registries": [
     {
       "name": "acme-ecr",
-      "url": "591839118651.dkr.ecr.us-gov-west-1.amazonaws.com/apps/api",
+      "url": "123456789012.dkr.ecr.us-east-1.amazonaws.com/apps/api",
       "registry_type": "ecr"
     },
     {
@@ -139,7 +139,7 @@ The build path is OCI-generic. Kaniko is invoked with:
 
 That form works uniformly across:
 
-- **Amazon ECR** — full registry URL, e.g. `591839118651.dkr.ecr.us-gov-west-1.amazonaws.com/apps/api`
+- **Amazon ECR** — full registry URL, e.g. `123456789012.dkr.ecr.us-east-1.amazonaws.com/apps/api`
 - **Docker Hub** — `docker.io/myorg/api`
 - **GitHub Container Registry** — `ghcr.io/myorg/api`
 - **Google Artifact Registry** — `us-central1-docker.pkg.dev/proj/repo/api`

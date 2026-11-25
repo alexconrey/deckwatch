@@ -11,8 +11,8 @@ fn config_request_deserializes_all_fields() {
         "token_secret": "my-token-secret",
         "dockerfile_path": "docker/Dockerfile.prod",
         "docker_context": "./app",
-        "oci_repository": "591839118651.dkr.ecr.us-gov-west-1.amazonaws.com/apps/my-app",
-        "ecr_repository": "591839118651.dkr.ecr.us-gov-west-1.amazonaws.com/apps/legacy",
+        "oci_repository": "123456789012.dkr.ecr.us-east-1.amazonaws.com/apps/my-app",
+        "ecr_repository": "123456789012.dkr.ecr.us-east-1.amazonaws.com/apps/legacy",
         "include_paths": ["src/", "Cargo.toml"],
         "exclude_paths": ["tests/", "docs/"],
         "poll_interval_seconds": 120,
@@ -31,11 +31,11 @@ fn config_request_deserializes_all_fields() {
     assert_eq!(req.docker_context.as_deref(), Some("./app"));
     assert_eq!(
         req.oci_repository.as_deref(),
-        Some("591839118651.dkr.ecr.us-gov-west-1.amazonaws.com/apps/my-app")
+        Some("123456789012.dkr.ecr.us-east-1.amazonaws.com/apps/my-app")
     );
     assert_eq!(
         req.ecr_repository.as_deref(),
-        Some("591839118651.dkr.ecr.us-gov-west-1.amazonaws.com/apps/legacy")
+        Some("123456789012.dkr.ecr.us-east-1.amazonaws.com/apps/legacy")
     );
     assert_eq!(
         req.include_paths.as_deref(),

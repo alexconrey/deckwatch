@@ -254,7 +254,7 @@ fn settings_with_secrets() -> DeckwatchSettings {
             "name": "aws",
             "source": {"type": "github", "repo": "o/r", "ref": "v1", "path": "p.wasm"},
             "config": {
-                "AWS_REGION": "us-gov-west-1",
+                "AWS_REGION": "us-west-2",
                 "AWS_SECRET_ACCESS_KEY": "plaintext-secret",
                 "API_TOKEN": "ciphertext-token",
                 "EMPTY": ""
@@ -293,7 +293,7 @@ fn mask_secrets_hides_every_secret_field() {
 
     let cfg = &s.plugins[0].config;
     assert_eq!(
-        cfg["AWS_REGION"], "us-gov-west-1",
+        cfg["AWS_REGION"], "us-west-2",
         "declared non-secret stays visible"
     );
     assert_eq!(
