@@ -1,5 +1,5 @@
 import type { ApplicationDetail, DeploymentDetailResponse, PluginStatus } from "@/types/api";
-import { FIXED_NOW, ago, deploymentYaml, manifestFor, type MockState } from "./data";
+import { FIXED_NOW, ago, deploymentYaml, manifestFor, mcpActivity, type MockState } from "./data";
 import { HOLD, type MockApi, apiError, created, noContent, ok } from "./mock-api";
 
 /**
@@ -563,12 +563,44 @@ export function installDefaultRoutes(api: MockApi, state: MockState): void {
 
   // ---- audit, agent feedback, docs, previews -----------------------------
   api.on("GET", "/audit", (req) => {
-    const type = req.query.get("resource_type");
-    const ns = req.query.get("namespace");
-    return ok({
-      entries: state.audit.filter((e) => (!type || e.resource_type === type) && (!ns || e.namespace === ns)),
-    });
+    const q = (key: string) => req.query.get(key) || null;
+    const since = q("since");
+    const rows = state.audit.filter(
+      (e) =>
+        (!q("source") || e.source === q("source")) &&
+        (!q("action") || e.action === q("action")) &&
+        (!q("tool") || e.tool === q("tool")) &&
+        (!q("client") || e.client_name === q("client")) &&
+        (!q("outcome") || e.outcome === q("outcome")) &&
+        (!q("resource_type") || e.resource_type === q("resource_type")) &&
+        (!q("namespace") || e.namespace === q("namespace")) &&
+        (!since || e.timestamp >= since),
+    );
+    // Newest first, unless order=asc.
+    rows.sort((a, b) => b.timestamp.localeCompare(a.timestamp));
+    if (q("order") === "asc") rows.reverse();
+    // The cursor is an offset here; the real one is opaque.
+    const offset = Number(q("cursor") ?? 0);
+    const limit = Number(q("limit") ?? 100);
+    const items = rows.slice(offset, offset + limit);
+    return ok({ items, next_cursor: offset + limit < rows.length ? String(offset + limit) : null });
   });
+  api.on("GET", "/prometheus/mcp_activity", (req) =>
+    ok(
+      state.features.prometheus
+        ? mcpActivity(req.query.get("window") ?? "24h")
+        : {
+            window_seconds: 86400,
+            step_seconds: 300,
+            calls_per_minute: [],
+            apply_manifest_per_minute: [],
+            p95_seconds: [],
+            tools: [],
+            unavailable_reason:
+              "prometheus not configured (set PROMETHEUS_URL to the Prometheus that scrapes deckwatch's /metrics)",
+          },
+    ),
+  );
   api.on("GET", "/agent-feedback", () => ok({ items: state.agentFeedback }));
   api.on("PATCH", "/agent-feedback/:id", (req) => {
     const item = state.agentFeedback.find((f) => f.id === req.params.id);

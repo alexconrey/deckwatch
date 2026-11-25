@@ -2,6 +2,7 @@ import type {
   AgentFeedbackItem,
   ApplicationDetail,
   ApplicationPluginEntry,
+  AuditEntry,
   BuildSummary,
   ConfigMapDetail,
   CronJobSummary,
@@ -17,6 +18,7 @@ import type {
   IngressDetail,
   IngressTemplate,
   MarketplaceCatalog,
+  McpActivityResponse,
   NodeSummary,
   OutboundStatus,
   PluginEventReport,
@@ -29,7 +31,6 @@ import type {
   ServiceAccountDetail,
   StorageClassSummary,
 } from "@/types/api";
-import type { AuditEntry } from "@/api/audit";
 import type { ManifestDetail, RepositorySummary, TagSummary } from "@/api/registry";
 import type { NodeUsage, PodUsage } from "@/api/resourceMetrics";
 import type { MonitorSettings } from "@/types/monitoring";
@@ -1131,6 +1132,10 @@ function audit(): AuditEntry[] {
     namespace,
     detail,
     user_identity: user,
+    source: "api",
+    tool: "",
+    outcome: "",
+    client_name: "",
   });
   return [
     e(1, 3, "scale", "deployment", "web", "default", "replicas 2 -> 3"),
@@ -1141,7 +1146,91 @@ function audit(): AuditEntry[] {
     e(6, 600, "create", "application", "storefront", "default", "2 deployments, 1 cronjob"),
     e(7, 1500, "update", "settings", "deckwatch", "", "allowed_namespaces updated", "bob@example.com"),
     e(8, 2900, "create", "namespace", "staging", "staging", ""),
+    ...mcpAudit(),
   ];
+}
+
+/**
+ * MCP rows (SEC-22): what MCP clients changed or were refused, with the JSON
+ * detail the backend writes. Newest first, like the API.
+ */
+function mcpAudit(): AuditEntry[] {
+  const m = (
+    i: number,
+    minutesAgo: number,
+    row: Pick<AuditEntry, "action" | "tool" | "outcome" | "resource_type" | "resource_name" | "namespace" | "client_name">,
+    detail: Record<string, unknown>,
+  ): AuditEntry => ({
+    id: `audit-mcp-${String(i).padStart(4, "0")}`,
+    timestamp: ago({ m: minutesAgo }),
+    user_identity: "",
+    source: "mcp",
+    ...row,
+    detail: JSON.stringify({ tool: row.tool, outcome: row.outcome, argument_keys: [], arguments: {}, duration_ms: 40, ...detail }),
+  });
+  const claude = { name: "claude-code", version: "2.1.0", self_reported: true };
+  return [
+    m(1, 7, { action: "write", tool: "apply_manifest", outcome: "ok", resource_type: "deployment", resource_name: "web", namespace: "default", client_name: "claude-code" }, {
+      argument_keys: ["manifest"],
+      client: claude,
+      trace_id: "4bf92f3577b34da6a3ce929d0e0e4736",
+      duration_ms: 812,
+    }),
+    m(2, 26, { action: "delete", tool: "delete_pod", outcome: "denied", resource_type: "pod", resource_name: "etcd-0", namespace: "kube-system", client_name: "claude-code" }, {
+      denied_rule: "namespace_allowlist",
+      argument_keys: ["name", "namespace"],
+      arguments: { name: "etcd-0", namespace: "kube-system" },
+      client: claude,
+    }),
+    m(3, 64, { action: "exec", tool: "exec_pod", outcome: "ok", resource_type: "pod", resource_name: "web-6c9f7d8b5-4xk2p", namespace: "default", client_name: "cursor" }, {
+      argument_keys: ["command", "name", "namespace"],
+      arguments: { name: "web-6c9f7d8b5-4xk2p", namespace: "default" },
+      client: { name: "cursor", version: "1.4.2", self_reported: true },
+    }),
+    m(4, 190, { action: "write", tool: "scale_deployment", outcome: "error", resource_type: "deployment", resource_name: "worker", namespace: "default", client_name: "" }, {
+      argument_keys: ["name", "namespace", "replicas"],
+      arguments: { name: "worker", namespace: "default", replicas: 40 },
+    }),
+  ];
+}
+
+/**
+ * GET /api/prometheus/mcp_activity: tool calls following a daily curve
+ * (busier in UTC working hours), a few errors and denials, and the per-tool
+ * totals. Deterministic: no randomness, timestamps end at FIXED_NOW.
+ */
+export function mcpActivity(window: string): McpActivityResponse {
+  const { seconds, step } = { "1h": { seconds: 3600, step: 60 }, "7d": { seconds: 604800, step: 1800 } }[window] ?? {
+    seconds: 86400,
+    step: 300,
+  };
+  const n = seconds / step;
+  const at = (i: number) => FIXED_NOW.getTime() - (n - 1 - i) * step * 1000;
+  const load = (t: number) => {
+    const d = new Date(t);
+    const hour = d.getUTCHours() + d.getUTCMinutes() / 60;
+    return 2 + 8 * Math.max(0, Math.sin(((hour - 6) / 12) * Math.PI));
+  };
+  const ok = Array.from({ length: n }, (_, i) => ({ t: at(i), v: Number(load(at(i)).toFixed(2)) }));
+  return {
+    window_seconds: seconds,
+    step_seconds: step,
+    calls_per_minute: [
+      { label: "ok", points: ok },
+      { label: "error", points: ok.map((p, i) => ({ t: p.t, v: i % 37 === 5 ? 0.4 : 0 })) },
+      { label: "denied", points: ok.map((p, i) => ({ t: p.t, v: i % 53 === 11 ? 0.2 : 0 })) },
+    ],
+    apply_manifest_per_minute: [{ label: "ok", points: ok.map((p) => ({ t: p.t, v: Number((p.v / 12).toFixed(3)) })) }],
+    p95_seconds: ok.map((p) => ({ t: p.t, v: Number((0.18 + p.v / 40).toFixed(3)) })),
+    tools: [
+      { tool: "list_pods", calls: 1840, errors: 3, denied: 0, p95_seconds: 0.11 },
+      { tool: "get_deployment", calls: 962, errors: 0, denied: 0, p95_seconds: 0.08 },
+      { tool: "get_pod_logs", calls: 411, errors: 6, denied: 0, p95_seconds: 0.93 },
+      { tool: "apply_manifest", calls: 57.4, errors: 1, denied: 2, p95_seconds: 0.81 },
+      { tool: "exec_pod", calls: 12, errors: 0, denied: 1, p95_seconds: 2.4 },
+      { tool: "delete_pod", calls: 4, errors: 0, denied: 4, p95_seconds: null },
+    ],
+  };
 }
 
 function agentFeedback(): AgentFeedbackItem[] {
