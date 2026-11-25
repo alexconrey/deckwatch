@@ -92,6 +92,14 @@ first.
   (`Plugin events (N):` and an untrusted-data fence), so clients that parse
   these results as JSON must read only the JSON part (#261). MCP
   `get_events` output is wrapped in the same kind of fence (#265).
+- **Re-enter a plugin's secret config values after changing its code.**
+  Saving settings with a new `source` or a changed or removed `sha256` pin
+  for a plugin returns `400` until its masked config values are entered
+  again (or removed). `POST /api/plugins/{name}/upload` returns `200` with
+  `{sha256, cleared_config_keys}` instead of `204`: on a plugin without a
+  pin it drops the config values that `GET /api/settings` masks, so enter
+  them again after uploading; a pinned plugin only accepts the pinned
+  binary. (#342)
 - **Helm sets `RUST_LOG` only from the new `logFilter` value.** The chart
   used to hard-code `RUST_LOG=deckwatch=info,tower_http=info`. With
   `logFilter` empty, the default, deckwatch's built-in filter applies, and it
@@ -138,14 +146,6 @@ first.
   `DECKWATCH_DATABASE_URL`** through `inherit_env_keys` or
   `inherit_env_file_keys`; deckwatch logs a warning and leaves them out.
   (#207)
-- **Re-enter a plugin's secret config values after changing its code.**
-  Saving settings with a new `source` or a changed or removed `sha256` pin
-  for a plugin returns `400` until its masked config values are entered
-  again (or removed). `POST /api/plugins/{name}/upload`
-  returns `200` with `{sha256, cleared_config_keys}` instead of `204`: on a
-  plugin without a pin it drops the config values that `GET /api/settings`
-  masks, so enter them again after uploading; a pinned plugin only accepts the
-  pinned binary. (#342)
 - **The UI needs a recent browser:** Chrome or Edge 111, Firefox 114, or
   Safari 16.4 or newer (vite 8's build target; it was Chrome 87, Firefox 78,
   Safari 14). (#237)
