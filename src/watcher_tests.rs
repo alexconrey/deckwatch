@@ -988,6 +988,7 @@ fn plugin_field_sweep_runs_when_an_app_loses_all_resources() {
     let sweep = PluginFieldSweep {
         apps_with_resources: Some(app_set(&["team/shop", "team/blog"])),
         retry: false,
+        ..Default::default()
     };
     assert!(sweep.needed(&app_set(&["team/blog"])));
     assert!(sweep.needed(&app_set(&[])));
@@ -998,6 +999,7 @@ fn plugin_field_sweep_skipped_when_no_app_lost_resources() {
     let sweep = PluginFieldSweep {
         apps_with_resources: Some(app_set(&["team/shop"])),
         retry: false,
+        ..Default::default()
     };
     assert!(!sweep.needed(&app_set(&["team/shop"])));
     assert!(!sweep.needed(&app_set(&["team/shop", "team/blog"])));
@@ -1008,6 +1010,7 @@ fn plugin_field_sweep_retries_after_failure() {
     let sweep = PluginFieldSweep {
         apps_with_resources: Some(app_set(&["team/shop"])),
         retry: true,
+        ..Default::default()
     };
     assert!(sweep.needed(&app_set(&["team/shop"])));
 }
@@ -1381,6 +1384,7 @@ async fn reconcile_test_state(cluster: &FakeCluster) -> AppState {
         encryption_key: String::new(),
         plugins: std::sync::Arc::new(tokio::sync::RwLock::new(vec![])),
         plugin_patch_fingerprints: std::sync::Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+        plugin_telemetry: Default::default(),
     }
 }
 
@@ -1416,6 +1420,105 @@ async fn remove_resource(state: &AppState, id: &str) {
         .exec(&state.db)
         .await
         .expect("delete resource row");
+}
+
+/// The reconcile loop records each plugin's `apply()` health for the
+/// application, once per cycle, and recovers it when the plugin is fixed.
+#[tokio::test]
+async fn reconcile_records_the_plugin_apply_status_of_the_application() {
+    use crate::entities::plugin_status;
+    use crate::plugin_fixture::{Behavior, FixturePlugin};
+
+    let cluster = FakeCluster::with_objects(vec![shop_deployment(deckwatch_update_entry())]);
+    let state = reconcile_test_state(&cluster).await;
+    // The fake cluster serves workloads only; Events go to a stub.
+    let events =
+        crate::plugin_fixture::fake_kube::FakeKube::new(|_, _, body| Some((201, body.clone())));
+    crate::plugin_status::spawn_worker_with(
+        &state,
+        crate::plugin_k8s_events::KubeEventSink::new(events.client()),
+    );
+    *state.plugins.write().await = vec![FixturePlugin::new()
+        .export("apply", Behavior::Trap)
+        .loaded("vault")];
+    let mut sweep = PluginFieldSweep::default();
+    insert_queue_resource(&state, "team", "shop").await;
+
+    reconcile_application_plugins(&state, &mut sweep).await;
+    reconcile_application_plugins(&state, &mut sweep).await;
+    state.plugin_telemetry.flush().await;
+    let rows = plugin_status::Entity::find().all(&state.db).await.unwrap();
+    assert_eq!(rows.len(), 1, "{rows:#?}");
+    let row = &rows[0];
+    assert_eq!(
+        (
+            row.application_id.as_str(),
+            row.plugin_name.as_str(),
+            row.resource_id.as_str()
+        ),
+        ("team/shop", "vault", "")
+    );
+    assert_eq!(row.health, "failing");
+    assert_eq!(row.consecutive_failures, 2, "one per cycle");
+    assert!(row.last_events.contains("plugin.trap"));
+
+    *state.plugins.write().await = vec![FixturePlugin::new()
+        .export("apply", Behavior::output("{}"))
+        .loaded("vault")];
+    reconcile_application_plugins(&state, &mut sweep).await;
+    state.plugin_telemetry.flush().await;
+    let row = plugin_status::Entity::find()
+        .one(&state.db)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(row.health, "healthy");
+    assert_eq!(row.consecutive_failures, 0);
+    assert!(row.first_failure_at.is_none());
+
+    // The failure and the recovery each became an Event on the Deployment
+    // (the second failing cycle was folded).
+    let reasons: Vec<String> = events
+        .requests()
+        .iter()
+        .filter(|r| r.method == "POST")
+        .map(|r| r.body["reason"].as_str().unwrap_or_default().to_string())
+        .collect();
+    assert_eq!(reasons, vec!["PluginApplyFailed", "PluginRecovered"]);
+}
+
+/// The release is reported as an `info` plugin event against the plugin
+/// whose resources the application had.
+#[tokio::test]
+async fn releasing_plugin_fields_is_reported_as_a_plugin_event() {
+    let cluster = FakeCluster::with_objects(vec![shop_deployment(deckwatch_update_entry())]);
+    let state = reconcile_test_state(&cluster).await;
+    let mut sweep = PluginFieldSweep::default();
+    let row = insert_queue_resource(&state, "team", "shop").await;
+    reconcile_application_plugins(&state, &mut sweep).await;
+    cluster.take_requests();
+
+    remove_resource(&state, &row).await;
+    let (_, events) = crate::plugin_fixture::capture::capture_async(reconcile_application_plugins(
+        &state, &mut sweep,
+    ))
+    .await;
+    let released: Vec<_> = events
+        .iter()
+        .filter(|e| {
+            e.target == "deckwatch::plugin_events"
+                && e.fields.get("code").map(String::as_str)
+                    == Some(crate::plugin_events::codes::FIELDS_RELEASED)
+        })
+        .collect();
+    assert_eq!(released.len(), 1, "{events:#?}");
+    assert_eq!(released[0].level, tracing::Level::INFO);
+    assert_eq!(released[0].fields["plugin"], "AWS");
+    assert!(
+        released[0].message.contains("Deployment team/shop-web"),
+        "{}",
+        released[0].message
+    );
 }
 
 #[tokio::test]
@@ -1736,6 +1839,7 @@ async fn live_cluster_release_removes_only_plugin_owned_fields() {
         encryption_key: String::new(),
         plugins: std::sync::Arc::new(tokio::sync::RwLock::new(vec![])),
         plugin_patch_fingerprints: std::sync::Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+        plugin_telemetry: Default::default(),
     };
     crate::db::ensure_application(&state.db, LIVE_NAMESPACE, "shop")
         .await

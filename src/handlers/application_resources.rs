@@ -9,8 +9,13 @@
 //! ```
 //! GET    /api/namespaces/{ns}/applications/{name}/resources
 //! POST   /api/namespaces/{ns}/applications/{name}/resources/{plugin}/{resource_id}
+//! PATCH  /api/namespaces/{ns}/applications/{name}/resources/{plugin}/{resource_id}
 //! DELETE /api/namespaces/{ns}/applications/{name}/resources/{plugin}/{resource_id}
 //! ```
+//!
+//! POST, PATCH and DELETE return what the plugin reported (`plugin_events`,
+//! sanitized). A `provision()` call that fails outright returns 502 with the
+//! events in the error body.
 
 use std::collections::HashMap;
 
@@ -30,8 +35,10 @@ use crate::audit;
 use crate::entities::application_plugin_resources;
 use crate::error::AppError;
 use crate::metrics;
+use crate::plugin_events::{Health, PluginEventReport};
+use crate::plugin_status::StatusKey;
 use crate::plugins::{
-    KubernetesObjectRef, ResourceProvisionRequest, ResourceProvisionResult, SidecarSpec,
+    KubernetesObjectRef, PluginCall, ResourceProvisionRequest, SidecarSpec, Trigger,
 };
 use crate::state::AppState;
 
@@ -71,6 +78,26 @@ pub struct ProvisionedResource {
     pub sidecars: serde_json::Value,
     pub created_at: String,
     pub updated_at: String,
+    /// What the plugin reported on this provision or refresh, including
+    /// warnings on success. Omitted from list responses.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub plugin_events: Vec<PluginEventReport>,
+}
+
+/// Body of `DELETE …/resources/{plugin}/{resource_id}` (deckwatch#250).
+#[derive(Debug, Serialize)]
+pub struct DeprovisionResponse {
+    /// What the plugin's `deprovision()` says it did and didn't clean up
+    /// (`ResourceDeprovisionResult.message`, sanitized), e.g. "bucket kept
+    /// because it isn't empty". Empty when the plugin said nothing.
+    pub message: String,
+    /// Everything the call reported: its errors and warnings, the message as
+    /// an `info` event, or why the call failed. The record is removed either
+    /// way.
+    pub plugin_events: Vec<PluginEventReport>,
+    /// What happened to each Kubernetes object the plugin asked deckwatch to
+    /// delete (`ResourceDeprovisionResult.delete_kubernetes_resources`).
+    pub kubernetes_resource_deletions: Vec<KubernetesObjectDeletion>,
 }
 
 fn row_to_response(row: application_plugin_resources::Model) -> ProvisionedResource {
@@ -93,6 +120,7 @@ fn row_to_response(row: application_plugin_resources::Model) -> ProvisionedResou
         sidecars,
         created_at: row.created_at.to_string(),
         updated_at: row.updated_at.to_string(),
+        plugin_events: Vec::new(),
     }
 }
 
@@ -167,22 +195,48 @@ pub async fn provision(
         namespace: ns.clone(),
         resource_id: resource_id.clone(),
         fields: fields.clone(),
+        trace_context: None,
     };
 
-    let result: ResourceProvisionResult = crate::plugins::run_provision(plugin, &req)
-        .map_err(|e| AppError::BadRequest(format!("provision() failed: {e}")))?;
+    let call = PluginCall::new(&state.plugin_telemetry, Trigger::Provision)
+        .namespace(&ns)
+        .application(&app_name)
+        .resource(&resource_id);
+    let (result, outcome) = crate::plugins::run_provision(plugin, &req, &call).take_result();
+    let status_key = StatusKey::resource(&app_id, &plugin_name, &resource_id);
+    let Some(result) = result else {
+        state
+            .plugin_telemetry
+            .report(outcome.status_update(status_key));
+        return Err(AppError::PluginFailed {
+            summary: outcome.failure_summary(),
+            events: outcome.reports(),
+        });
+    };
 
     // Drop the read lock before the async apply call.
-    let kubernetes_resources = result.kubernetes_resources.clone();
+    let kubernetes_resources = outcome.k8s_resources(&result.kubernetes_resources);
     let state_map = result.state.clone();
     let deployment_annotations = result.deployment_annotations.clone();
     let sidecars: Vec<SidecarSpec> = result.sidecars.clone();
     drop(plugins);
 
     // Apply any Kubernetes resources emitted by the plugin.
+    let mut status = outcome.status_update(status_key);
     if !kubernetes_resources.is_empty() {
-        crate::plugins::apply_kubernetes_resources(&kubernetes_resources, &state.kube_client).await;
+        let failures = crate::plugins::apply_kubernetes_resources(
+            &kubernetes_resources,
+            &state.kube_client,
+            &state.plugin_telemetry,
+        )
+        .await;
+        if !failures.is_empty() {
+            status.health = Health::Failing;
+        }
+        status.events.extend(failures);
     }
+    let plugin_events = status.events.clone();
+    state.plugin_telemetry.report(status);
 
     // Persist to DB.
     let now = now_utc();
@@ -212,7 +266,9 @@ pub async fn provision(
         .await
         .map_err(|e| AppError::BadRequest(format!("failed to persist resource: {e}")))?;
 
-    Ok((StatusCode::CREATED, Json(row_to_response(inserted))))
+    let mut response = row_to_response(inserted);
+    response.plugin_events = plugin_events;
+    Ok((StatusCode::CREATED, Json(response)))
 }
 
 // ── PATCH /api/namespaces/{ns}/applications/{name}/resources/{plugin}/{resource_id}
@@ -255,20 +311,46 @@ pub async fn refresh(
         namespace: ns.clone(),
         resource_id: resource_id.clone(),
         fields: fields.clone(),
+        trace_context: None,
     };
 
-    let result: ResourceProvisionResult = crate::plugins::run_provision(plugin, &req)
-        .map_err(|e| AppError::BadRequest(format!("provision() failed: {e}")))?;
+    let call = PluginCall::new(&state.plugin_telemetry, Trigger::Refresh)
+        .namespace(&ns)
+        .application(&app_name)
+        .resource(&resource_id);
+    let (result, outcome) = crate::plugins::run_provision(plugin, &req, &call).take_result();
+    let status_key = StatusKey::resource(&app_id, &plugin_name, &resource_id);
+    let Some(result) = result else {
+        state
+            .plugin_telemetry
+            .report(outcome.status_update(status_key));
+        return Err(AppError::PluginFailed {
+            summary: outcome.failure_summary(),
+            events: outcome.reports(),
+        });
+    };
 
-    let kubernetes_resources = result.kubernetes_resources.clone();
+    let kubernetes_resources = outcome.k8s_resources(&result.kubernetes_resources);
     let state_map = result.state.clone();
     let deployment_annotations = result.deployment_annotations.clone();
     let sidecars: Vec<SidecarSpec> = result.sidecars.clone();
     drop(plugins);
 
+    let mut status = outcome.status_update(status_key);
     if !kubernetes_resources.is_empty() {
-        crate::plugins::apply_kubernetes_resources(&kubernetes_resources, &state.kube_client).await;
+        let failures = crate::plugins::apply_kubernetes_resources(
+            &kubernetes_resources,
+            &state.kube_client,
+            &state.plugin_telemetry,
+        )
+        .await;
+        if !failures.is_empty() {
+            status.health = Health::Failing;
+        }
+        status.events.extend(failures);
     }
+    let plugin_events = status.events.clone();
+    state.plugin_telemetry.report(status);
 
     let now = now_utc();
     let state_json = serde_json::to_string(&state_map).unwrap_or_else(|_| "{}".to_string());
@@ -287,7 +369,9 @@ pub async fn refresh(
         .await
         .map_err(|e| AppError::BadRequest(format!("failed to update resource: {e}")))?;
 
-    Ok(Json(row_to_response(updated)))
+    let mut response = row_to_response(updated);
+    response.plugin_events = plugin_events;
+    Ok(Json(response))
 }
 
 // ── DELETE /api/namespaces/{ns}/applications/{name}/resources/{plugin}/{resource_id}
@@ -295,15 +379,14 @@ pub async fn refresh(
 pub async fn deprovision(
     State(state): State<AppState>,
     Path((ns, app_name, plugin_name, resource_id)): Path<(String, String, String, String)>,
-) -> Result<StatusCode, AppError> {
+) -> Result<Json<DeprovisionResponse>, AppError> {
     let resource = DeprovisionTarget {
         namespace: &ns,
         application: &app_name,
         plugin: &plugin_name,
         resource_id: &resource_id,
     };
-    deprovision_resource(&state, &resource).await?;
-    Ok(StatusCode::NO_CONTENT)
+    Ok(Json(deprovision_resource(&state, &resource).await?))
 }
 
 /// The resource being deprovisioned, for lookups, logs and audit entries.
@@ -316,12 +399,12 @@ pub struct DeprovisionTarget<'a> {
 
 /// Call the plugin's `deprovision()`, delete the Kubernetes objects it asks
 /// for, then remove the resource record. Shared by the HTTP handler and the
-/// MCP `deprovision_resource` tool. Returns what happened to each object the
-/// plugin asked deckwatch to delete.
+/// MCP `deprovision_resource` tool. Returns the plugin's message and events,
+/// and what happened to each object it asked deckwatch to delete.
 pub async fn deprovision_resource(
     state: &AppState,
     resource: &DeprovisionTarget<'_>,
-) -> Result<Vec<KubernetesObjectDeletion>, AppError> {
+) -> Result<DeprovisionResponse, AppError> {
     let DeprovisionTarget {
         namespace: ns,
         application: app_name,
@@ -359,37 +442,105 @@ pub async fn deprovision_resource(
         resource_id: resource_id.to_string(),
         state: state_map,
         fields: fields_map,
+        trace_context: None,
     };
 
-    let requested: Vec<KubernetesObjectRef> = {
+    let (requested, message, plugin_events): (Vec<KubernetesObjectRef>, String, _) = {
         let plugins = state.plugins.read().await;
         match plugins.iter().find(|p| p.name == plugin_name) {
-            Some(plugin) => match crate::plugins::run_deprovision(plugin, &dep_req) {
-                Ok(result) => {
-                    if !result.message.is_empty() {
-                        tracing::info!(
+            Some(plugin) => {
+                let call = PluginCall::new(&state.plugin_telemetry, Trigger::Deprovision)
+                    .namespace(ns)
+                    .application(app_name)
+                    .resource(resource_id);
+                let (result, outcome) =
+                    crate::plugins::run_deprovision(plugin, &dep_req, &call).take_result();
+                let (requested, message) = match result {
+                    Some(result) => (
+                        result.delete_kubernetes_resources,
+                        crate::plugin_events::sanitize_text(
+                            &result.message,
+                            crate::plugin_events::MAX_MESSAGE_BYTES,
+                            &outcome.scrubber,
+                        ),
+                    ),
+                    None => {
+                        tracing::warn!(
                             plugin = %plugin_name,
                             resource_id = %resource_id,
-                            "deprovision: {}", result.message
+                            "deprovision() call failed — removing DB record anyway"
                         );
+                        (Vec::new(), String::new())
                     }
-                    result.delete_kubernetes_resources
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        plugin = %plugin_name,
-                        resource_id = %resource_id,
-                        error = %e,
-                        "deprovision() call failed — removing DB record anyway"
-                    );
-                    Vec::new()
-                }
-            },
-            None => Vec::new(),
+                };
+                (requested, message, outcome.reports())
+            }
+            None => (Vec::new(), String::new(), Vec::new()),
         }
     };
 
-    finish_deprovision(state, resource, row, &requested).await
+    let kubernetes_resource_deletions =
+        finish_deprovision(state, resource, row, &requested).await?;
+    // The resource is gone, and so is its status. Say what happened on the
+    // application's Deployments.
+    state
+        .plugin_telemetry
+        .forget(StatusKey::resource(&app_id, plugin_name, resource_id));
+    if let Some(event) = deprovision_event(plugin_name, resource_id, &message, &plugin_events) {
+        state
+            .plugin_telemetry
+            .kube_event(crate::plugin_k8s_events::KubeEventRequest {
+                application_id: app_id.clone(),
+                targets: Vec::new(),
+                event,
+            });
+    }
+    Ok(DeprovisionResponse {
+        message,
+        plugin_events,
+        kubernetes_resource_deletions,
+    })
+}
+
+/// The Kubernetes Event for a deprovision: a Warning when it failed or the
+/// plugin reported errors, otherwise a Normal one with the plugin's message.
+/// Nothing when the plugin isn't loaded (no call happened).
+fn deprovision_event(
+    plugin: &str,
+    resource_id: &str,
+    message: &str,
+    events: &[PluginEventReport],
+) -> Option<crate::plugin_k8s_events::KubeEvent> {
+    use crate::plugin_k8s_events::{action, note, reasons, KubeEvent};
+    use crate::plugins::EventSeverity;
+    let error = events.iter().find(|r| {
+        crate::plugin_events::effective_severity(r.event.severity) == EventSeverity::Error
+    });
+    if let Some(error) = error {
+        return Some(KubeEvent {
+            warning: true,
+            reason: reasons::DEPROVISION_FAILED,
+            action: action("Deprovision", Some(&error.event.code)),
+            note: note(&format!(
+                "plugin {plugin} ({resource_id}): {}: {}",
+                error.event.code, error.event.message
+            )),
+        });
+    }
+    if message.is_empty() && events.is_empty() {
+        return None;
+    }
+    let text = if message.is_empty() {
+        "deprovisioned".to_string()
+    } else {
+        message.to_string()
+    };
+    Some(KubeEvent {
+        warning: false,
+        reason: reasons::DEPROVISIONED,
+        action: action("Deprovision", None),
+        note: note(&format!("plugin {plugin} ({resource_id}): {text}")),
+    })
 }
 
 /// Delete the objects the plugin asked for, then the resource record.
@@ -712,3 +863,7 @@ async fn record_deletion(
 #[cfg(test)]
 #[path = "application_resources_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "application_resources_events_tests.rs"]
+mod events_tests;

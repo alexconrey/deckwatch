@@ -48,6 +48,9 @@ src/                              # Rust backend (library + thin binary)
   db.rs                           # Database connect + migrate + ensure_application
   audit.rs                        # Audit log insert + list endpoint
   metrics.rs                      # Prometheus metrics (deckwatch_* prefix)
+  logging.rs                      # Default log filter (RUST_LOG fallback)
+  telemetry.rs                    # Subscriber + optional OTLP export of deckwatch's
+                                  #   own traces/logs/metrics (OTEL_*, docs/TRACING.md)
   entities/                       # SeaORM entity definitions
     settings.rs                   # settings table (key-value)
     applications.rs               # applications table
@@ -403,6 +406,29 @@ Key files: `src/plugins.rs` (fetch, execute, merge), `src/handlers/plugins.rs`
 - **Prometheus monitoring**: runtime setting in DB (Settings → Observability)
 - **Container registry**: controlled by `registry.enabled` in Helm values (not settings page)
 - **AI providers**: server-side toggles in DB (Settings → AI Providers)
+- **deckwatch's own telemetry**: off unless `OTEL_EXPORTER_OTLP_ENDPOINT` (or a
+  per-signal endpoint) is set, through Helm `telemetry.otlp.*`. Read once at
+  startup, never from the settings DB.
+
+## Logging and telemetry
+
+- Code logs with `tracing`; libraries in the process (mcp-k8s, extism plugin
+  log lines under `extism::pdk`) do the same. `src/logging.rs` holds the
+  default filter. With `RUST_LOG` unset, it keeps `deckwatch`, `tower_http`,
+  `mcp_k8s` and `extism::pdk` at info and `opentelemetry` at warn.
+- `src/telemetry.rs` builds the subscriber: JSON lines on stdout, plus
+  OpenTelemetry layers when OTLP export is configured. Spans become traces,
+  events become log records with the span's trace id (span events when logs
+  aren't exported), and `monotonic_counter.*`/`counter.*`/`histogram.*` event
+  fields become metrics. Prometheus `/metrics` is separate.
+- Export is OTLP/HTTP (`http/protobuf` only) through
+  `outbound::global().client(Purpose::Observability)`, so
+  `DECKWATCH_EXTRA_CA_FILE` applies. Never put tool arguments, Secret data, env
+  values or manifests in span or event fields: they are exported.
+- Tests: `src/telemetry_tests.rs` uses opentelemetry_sdk's in-memory exporters.
+  Callsite interest is cached per process, so a test that captures events from
+  code other tests also run should use a process-wide subscriber (see
+  `tool_call_events` in `src/handlers/mcp_tests.rs`).
 
 ## Key Files for Common Tasks
 

@@ -17,6 +17,15 @@ pub enum AppError {
 
     #[error("Invalid request: {0}")]
     BadRequest(String),
+
+    /// A plugin call the request depended on failed. `summary` is the first
+    /// error as `code: message`; `events` is everything the call reported,
+    /// already sanitized. Returned as 502 with the events in the body.
+    #[error("Plugin call failed: {summary}")]
+    PluginFailed {
+        summary: String,
+        events: Vec<crate::plugin_events::PluginEventReport>,
+    },
 }
 
 /// Map common Kubernetes API error strings to human-friendly messages.
@@ -64,14 +73,20 @@ impl IntoResponse for AppError {
             ),
             AppError::NotFound(_) => (StatusCode::NOT_FOUND, "not_found", self.to_string()),
             AppError::BadRequest(_) => (StatusCode::BAD_REQUEST, "bad_request", self.to_string()),
+            AppError::PluginFailed { .. } => {
+                (StatusCode::BAD_GATEWAY, "plugin_failed", self.to_string())
+            }
         };
 
         metrics::record_error("handler", error_type);
 
-        let body = serde_json::json!({
+        let mut body = serde_json::json!({
             "error": error_type,
             "message": message,
         });
+        if let AppError::PluginFailed { events, .. } = &self {
+            body["plugin_events"] = serde_json::to_value(events).unwrap_or_default();
+        }
 
         (status, axum::Json(body)).into_response()
     }
