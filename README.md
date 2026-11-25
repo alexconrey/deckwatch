@@ -112,6 +112,7 @@ minimum Kubernetes version, Helm values, API behaviour.
 | `DECKWATCH_FRONTEND_DIR` | `--frontend-dir` | `frontend/dist` | Path to built SPA |
 | `DECKWATCH_DATABASE_URL` | `--database-url` | `sqlite://deckwatch.db` | Database connection string (SQLite, Postgres, or MySQL) |
 | `DECKWATCH_CACHE_DIR` | `--cache-dir` | _(unset: no cache)_ | Directory for deckwatch's cache of compiled plugins, kept in `<dir>/wasmtime` (Helm: `cache`, an emptyDir at `/var/cache/deckwatch`). Unset, or a directory deckwatch can't use: plugins are compiled on every call; see [plugin compile cache](#helm-chart-plugin-compile-cache) |
+| `DECKWATCH_PLUGIN_CALL_TIMEOUT` | `--plugin-call-timeout` | `60` | The longest one plugin call may run, in whole seconds, from 1 to 3600 (Helm: `extraEnv`). A call that runs longer is stopped and fails with `plugin.timeout`; the plugin's HTTP requests count toward the limit. deckwatch doesn't start with `0`, an empty value or anything else outside that range; see [plugin time limit](docs/PLUGINS.md#time-limit) |
 | `RUST_LOG` | — | `deckwatch=info,tower_http=info,mcp_k8s=info,extism::pdk=info,opentelemetry=warn` | Log filter (Helm: `logFilter`). `mcp_k8s` is the embedded library behind most MCP tools; `extism::pdk` carries plugin log lines; `opentelemetry` reports failed OTLP exports ([docs/TRACING.md](docs/TRACING.md#10-deckwatchs-own-telemetry)) |
 | `TOKIO_WORKER_THREADS` | — | One per CPU the container may use, at least 2 | Async worker threads (Helm: `extraEnv`); see [extra environment variables](#helm-chart-extra-environment-variables) |
 
@@ -188,6 +189,8 @@ server-side apply. Environment variable values are strings, so quote numbers.
 extraEnv:
   - name: TOKIO_WORKER_THREADS
     value: "4"
+  - name: DECKWATCH_PLUGIN_CALL_TIMEOUT
+    value: "120"
 ```
 
 `TOKIO_WORKER_THREADS` sets how many worker threads deckwatch's async runtime
@@ -198,6 +201,11 @@ worker, and while it was busy, deckwatch would answer nothing, its health checks
 included. More workers don't raise the CPU limit. Plugin calls don't run on
 these workers but on threads of their own, at most 4 at a time. Use a positive
 integer; deckwatch doesn't start with anything else.
+
+`DECKWATCH_PLUGIN_CALL_TIMEOUT` is the time limit of each plugin call, in whole
+seconds: 60 unless you set it, and from 1 to 3600. deckwatch doesn't start with
+anything else, `0` and an empty value included. See
+[plugin time limit](docs/PLUGINS.md#time-limit).
 
 ## Architecture
 

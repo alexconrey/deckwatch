@@ -655,7 +655,9 @@ struct TelemetryInner {
     limiter: EventRateLimiter,
     /// `DECKWATCH_ENCRYPTION_KEY`, to recognise decrypted secret values.
     encryption_key: String,
-    /// Upper bound for one plugin call. `None` (the default) means no limit.
+    /// Upper bound for one plugin call, set on every call's manifest. deckwatch
+    /// always sets one (`DECKWATCH_PLUGIN_CALL_TIMEOUT`, see
+    /// [`PluginTelemetry::new`]); `None`, which only tests use, means no limit.
     call_timeout: Option<Duration>,
     /// The events of each plugin's most recent load, by configured name.
     /// Bounded by the number of configured plugins.
@@ -676,8 +678,15 @@ impl std::fmt::Debug for PluginTelemetry {
 }
 
 impl PluginTelemetry {
-    pub fn new(encryption_key: impl Into<String>) -> Self {
-        Self::with_options(encryption_key, None, EventRateLimiter::default())
+    /// deckwatch's own handle: `encryption_key` is `DECKWATCH_ENCRYPTION_KEY`
+    /// and `call_timeout` is `DECKWATCH_PLUGIN_CALL_TIMEOUT`, the time limit of
+    /// every plugin call.
+    pub fn new(encryption_key: impl Into<String>, call_timeout: Duration) -> Self {
+        Self::with_options(
+            encryption_key,
+            Some(call_timeout),
+            EventRateLimiter::default(),
+        )
     }
 
     pub fn with_options(

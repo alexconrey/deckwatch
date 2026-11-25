@@ -1,4 +1,16 @@
+use std::time::Duration;
+
 use clap::Parser;
+
+/// The environment variable that sets [`Config::plugin_call_timeout`].
+const PLUGIN_CALL_TIMEOUT_ENV: &str = "DECKWATCH_PLUGIN_CALL_TIMEOUT";
+
+/// The longest plugin call time limit deckwatch accepts, in seconds. Plugin
+/// calls hold up the request, provision or reconcile pass that made them, so
+/// a limit anywhere near an hour isn't useful, and a bound keeps the value
+/// well inside what extism handles (it converts the limit to milliseconds in
+/// a `u64` and adds it to an `Instant`).
+const MAX_PLUGIN_CALL_TIMEOUT_SECS: u64 = 3600;
 
 #[derive(Parser, Debug)]
 #[command(name = "deckwatch", about = "Kubernetes deployment lifecycle manager")]
@@ -148,6 +160,42 @@ pub struct Config {
     // stop deckwatch from starting. See src/plugin_cache.rs.
     #[arg(long, env = "DECKWATCH_CACHE_DIR")]
     pub cache_dir: Option<std::ffi::OsString>,
+
+    /// The longest one plugin call may run, in whole seconds, from 1 to 3600.
+    /// A call that runs longer is stopped and fails with `plugin.timeout`; the
+    /// plugin's HTTP requests count toward it. Plugin calls always have a time
+    /// limit: deckwatch doesn't start with 0, an empty value or anything else
+    /// outside that range.
+    #[arg(
+        long,
+        env = PLUGIN_CALL_TIMEOUT_ENV,
+        value_name = "SECONDS",
+        default_value = "60",
+        value_parser = parse_plugin_call_timeout
+    )]
+    pub plugin_call_timeout: Duration,
+}
+
+/// Parse a plugin call time limit: whole seconds, 1 to
+/// [`MAX_PLUGIN_CALL_TIMEOUT_SECS`].
+///
+/// 0 doesn't mean "no limit", as it does for the audit limits: that would
+/// bring back #301. extism gives a plugin's HTTP request what's left of the
+/// call's time limit as its only timeout, so without a limit, a request that
+/// never gets an answer holds its thread for good. Empty is refused like any
+/// other value that isn't a whole number.
+fn parse_plugin_call_timeout(value: &str) -> Result<Duration, String> {
+    match value.trim().parse::<u64>() {
+        Ok(0) => Err(format!(
+            "{PLUGIN_CALL_TIMEOUT_ENV} can't be 0: plugin calls always have a time limit, \
+             from 1 to {MAX_PLUGIN_CALL_TIMEOUT_SECS} seconds"
+        )),
+        Ok(secs) if secs <= MAX_PLUGIN_CALL_TIMEOUT_SECS => Ok(Duration::from_secs(secs)),
+        _ => Err(format!(
+            "{PLUGIN_CALL_TIMEOUT_ENV} must be a whole number of seconds, \
+             from 1 to {MAX_PLUGIN_CALL_TIMEOUT_SECS}"
+        )),
+    }
 }
 
 impl Config {

@@ -263,7 +263,7 @@ fn secret_config_values_are_masked_wherever_the_plugin_echoes_them() {
                             "hint":"rotate {stored}","resource_id":"wJalrXUtnFEMI"}}]}}"#
         );
         let plugin = secret_plugin(Behavior::output(output), stored);
-        let t = PluginTelemetry::new(key);
+        let t = PluginTelemetry::with_options(key, None, EventRateLimiter::default());
         let outcome = apply_with(&plugin, &t);
         let all = serde_json::to_string(&outcome.reports()).unwrap();
         assert!(!all.contains("wJalrXUtnFEMI"), "{all}");

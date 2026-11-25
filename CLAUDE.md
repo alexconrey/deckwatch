@@ -379,7 +379,9 @@ plugins.
   or the MCP plugin tools). The WASM comes from a GitHub file or release, a URL,
   or `POST /api/plugins/{name}/upload`. Enabled plugins load at startup and on
   settings changes. They run in extism with WASI disabled, and outbound HTTP is
-  limited to each plugin's `allowed_hosts`.
+  limited to each plugin's `allowed_hosts`. Every call has a time limit,
+  `DECKWATCH_PLUGIN_CALL_TIMEOUT` (60 s by default, 1 to 3600); extism stops a
+  call that runs past it, and the call fails with `plugin.timeout`.
 - **Per deployment:** every loaded plugin's `apply()` runs when a deployment is
   created or updated through the REST API (`POST`/`PUT` handlers in
   `src/handlers/deployments.rs`; MCP `create_deployment` does not run them).

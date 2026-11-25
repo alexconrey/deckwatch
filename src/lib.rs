@@ -88,6 +88,7 @@ pub async fn run() {
         book_dir = %config.book_dir,
         registry_enabled = config.registry_enabled,
         registry_storage = %config.registry_storage,
+        plugin_call_timeout_secs = config.plugin_call_timeout.as_secs(),
         "starting deckwatch"
     );
 
@@ -171,7 +172,7 @@ pub async fn run() {
         plugin_patch_fingerprints: std::sync::Arc::new(tokio::sync::Mutex::new(
             std::collections::HashMap::new(),
         )),
-        plugin_telemetry: plugin_events::PluginTelemetry::new(config.encryption_key.clone()),
+        plugin_telemetry: plugin_telemetry(&config),
     };
     // Plugin calls cache compiled WebAssembly in DECKWATCH_CACHE_DIR, or
     // nowhere; resolved once, before the first call (src/plugin_cache.rs).
@@ -246,6 +247,13 @@ pub async fn run() {
 
     tracing::info!(%addr, "listening");
     axum::serve(listener, app).await.expect("server error");
+}
+
+/// The plugin telemetry handle for `AppState`. It carries the time limit of
+/// every plugin call (`DECKWATCH_PLUGIN_CALL_TIMEOUT`), which extism enforces
+/// and reports as `plugin.timeout` (#301).
+fn plugin_telemetry(config: &Config) -> plugin_events::PluginTelemetry {
+    plugin_events::PluginTelemetry::new(config.encryption_key.clone(), config.plugin_call_timeout)
 }
 
 /// The "connecting to database" line. A PostgreSQL or MySQL URL can carry

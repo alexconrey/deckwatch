@@ -2609,18 +2609,20 @@ const MAX_CONCURRENT_PLUGIN_CALLS: usize = 4;
 static PLUGIN_CALLS: tokio::sync::Semaphore =
     tokio::sync::Semaphore::const_new(MAX_CONCURRENT_PLUGIN_CALLS);
 
-/// How long a caller waits for a call when no call timeout is configured,
-/// which is the default (#301). Calls normally take well under a second.
+/// How long a caller waits for a call whose `PluginTelemetry` has no call
+/// timeout. deckwatch always sets one (`DECKWATCH_PLUGIN_CALL_TIMEOUT`, 60 s
+/// by default), so only tests that build a `PluginTelemetry` without one get
+/// this wait.
 const DEFAULT_CALL_WAIT: Duration = Duration::from_secs(120);
 
-/// How much longer than a configured call timeout a caller waits. extism
-/// stops a call at its timeout (and bounds the plugin's HTTP requests by
-/// what's left of it), but not while it compiles the module, so the call's
-/// own `plugin.timeout` outcome normally arrives first.
+/// How much longer than the call timeout a caller waits. extism stops a call
+/// at its timeout (and bounds the plugin's HTTP requests by what's left of
+/// it), but not while it compiles the module, so the call's own
+/// `plugin.timeout` outcome normally arrives first.
 const CALL_WAIT_GRACE: Duration = Duration::from_secs(5);
 
-/// How long a caller waits for one plugin call, given the configured call
-/// timeout.
+/// How long a caller waits for one plugin call, given the call timeout: 65 s
+/// with the default limit.
 fn call_wait(call_timeout: Option<Duration>) -> Duration {
     call_timeout.map_or(DEFAULT_CALL_WAIT, |t| t.saturating_add(CALL_WAIT_GRACE))
 }
@@ -2676,14 +2678,14 @@ async fn run_blocking<R: Send + 'static>(
     wait: Duration,
     f: impl FnOnce() -> R + Send + 'static,
 ) -> Result<R, Lost> {
-    // The slot belongs to the waiting caller, not to the blocking task. With
-    // no call timeout, a plugin HTTP request that never gets an answer never
-    // returns, and four such calls holding their slots would stop every later
-    // plugin call. So a caller gives up after `wait` and frees its slot, and
-    // so does a caller that goes away (a dropped request). The abandoned call
-    // finishes on its own (its outcome is then only logged and counted) or,
-    // if it really never returns, keeps its thread for good: Tokio can't stop
-    // a blocking task.
+    // The slot belongs to the waiting caller, not to the blocking task.
+    // extism stops a call at its time limit, but not while it compiles the
+    // module, and a call that outlasts the limit that way mustn't keep its
+    // slot: four of them would hold up every later plugin call. So a caller
+    // gives up after `wait` and frees its slot, and so does a caller that
+    // goes away (a dropped request). The abandoned call finishes on its own
+    // (its outcome is then only logged and counted) or, if it really never
+    // returns, keeps its thread for good: Tokio can't stop a blocking task.
     let _slot = PLUGIN_CALLS
         .acquire()
         .await
