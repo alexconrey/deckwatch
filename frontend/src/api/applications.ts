@@ -3,6 +3,8 @@ import type {
   AddMemberRequest,
   ApplicationDetail,
   ApplicationListResponse,
+  ApplicationObservability,
+  ApplicationObservabilityUpdate,
   ApplicationPluginEntry,
   CreateApplicationRequest,
   UpdateApplicationRequest,
@@ -46,6 +48,25 @@ export const applicationsApi = {
     apiFetch<ApplicationDetail>(
       `/namespaces/${ns}/applications/${name}/members/${kind}/${resource}`,
       { method: "DELETE" },
+    ),
+
+  // --- Observability section ---
+
+  /** GET /api/namespaces/{ns}/applications/{name}/observability */
+  getObservability: (ns: string, name: string) =>
+    apiFetch<ApplicationObservability>(
+      `/namespaces/${ns}/applications/${name}/observability`,
+    ),
+
+  /** PUT /api/namespaces/{ns}/applications/{name}/observability */
+  updateObservability: (
+    ns: string,
+    name: string,
+    body: ApplicationObservabilityUpdate,
+  ) =>
+    apiFetch<ApplicationObservability>(
+      `/namespaces/${ns}/applications/${name}/observability`,
+      { method: "PUT", body: JSON.stringify(body) },
     ),
 
   // --- Plugin association (Feature 2) ---

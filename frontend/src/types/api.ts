@@ -954,6 +954,88 @@ export interface AddMemberRequest {
   resource_name: string;
 }
 
+// --- The application's Observability section (src/handlers/app_observability.rs) ---
+
+/** One extra resource attribute; the value is already percent-encoded. */
+export interface ResourceAttribute {
+  key: string;
+  value: string;
+}
+
+/** OpenTelemetry injection settings of one application (off by default). */
+export interface OtelInjectionSettings {
+  enabled: boolean;
+  /** OTEL_SERVICE_NAME for every workload; null: each workload's own name. */
+  service_name: string | null;
+  /** Added to OTEL_RESOURCE_ATTRIBUTES after the attributes deckwatch sets. */
+  resource_attributes: ResourceAttribute[];
+}
+
+export type InjectionState = "injected" | "pending" | "off" | "foreign";
+
+export type InjectedWorkloadKind = "Deployment" | "StatefulSet" | "CronJob";
+
+export interface WorkloadInjection {
+  kind: InjectedWorkloadKind;
+  name: string;
+  /** The primary container, which gets the variables. */
+  container: string | null;
+  /**
+   * injected: carries what it should; pending: the reconciler patches it
+   * within seconds; foreign: another deckwatch database set its variables.
+   */
+  state: InjectionState;
+  /** The variables deckwatch has set on it. */
+  injected: string[];
+  /** Variables deckwatch leaves to the workload, which sets them itself. */
+  kept: string[];
+  /** It sets an OTLP endpoint itself: deckwatch only sets its service name and resource attributes. */
+  exports_itself: boolean;
+}
+
+export interface SignalDestination {
+  signal: OtlpSignal;
+  /** Where the signal goes; null: turned off (OTEL_<SIGNAL>_EXPORTER=none). */
+  endpoint: string | null;
+}
+
+export interface ApplicationOpenTelemetry extends OtelInjectionSettings {
+  /** The endpoints workloads get, from Settings → Observability; null: not set. */
+  otlp_endpoint: string | null;
+  otlp_metrics_endpoint: string | null;
+  signals: SignalDestination[];
+  workloads: WorkloadInjection[];
+  workloads_error: string | null;
+}
+
+/** A Deployment's PodMonitor, or the defaults it would get. */
+export interface DeploymentMonitor {
+  deployment: string;
+  enabled: boolean;
+  /** The PodMonitor's name. */
+  name: string;
+  port: string;
+  path: string;
+  interval: string;
+}
+
+export interface ApplicationPrometheus {
+  /** Prometheus monitoring is on in Settings and the PodMonitor CRD is installed. */
+  available: boolean;
+  unavailable_reason: string | null;
+  deployments: DeploymentMonitor[];
+}
+
+/** GET/PUT /api/namespaces/{ns}/applications/{name}/observability */
+export interface ApplicationObservability {
+  prometheus: ApplicationPrometheus;
+  opentelemetry: ApplicationOpenTelemetry;
+}
+
+export interface ApplicationObservabilityUpdate {
+  opentelemetry?: OtelInjectionSettings;
+}
+
 // --- GitOps Settings types ---
 
 export type OciRegistryType = "ecr" | "dockerhub" | "ghcr" | "gar" | "harbor" | "generic" | "deckwatch";
