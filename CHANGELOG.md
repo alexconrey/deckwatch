@@ -407,6 +407,12 @@ first.
   Notifications, which reported success while nothing was sent: the
   notification client read the old settings ConfigMap instead of the
   database (see Upgrade notes). (#270)
+- `plugin_failing` and `plugin_recovered` notifications reach the webhook in
+  the order the transitions happened. Each was sent from its own task, so a
+  receiver could get a target's recovery before its failure. They now go
+  through one queue and are sent one at a time; when 64 are already waiting,
+  a new one is dropped and counted in
+  `deckwatch_plugin_events_dropped_total{reason="notify_queue_full"}`. (#296)
 - deckwatch's event views show the time, count and source of events.k8s.io
   Events (from `eventTime`, `series` and `reportingComponent`), so Events
   from deckwatch and other modern controllers no longer sort to the bottom
