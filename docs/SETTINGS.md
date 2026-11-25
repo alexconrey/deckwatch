@@ -24,7 +24,7 @@ The Settings page renders a sidebar tree with the following sections:
 | **General** | `general` | Allowed namespaces, default resource limits |
 | **Authentication** | `auth` | Entra ID tenant/client config, auth toggle |
 | **AI Providers** | `ai_providers` | Server-side toggles for AI provider integrations (not browser-local) |
-| **Observability** | `observability` | Prometheus runtime toggle (`prometheus_enabled`), metrics config |
+| **Observability** | `observability` | Prometheus runtime toggle (`prometheus_enabled`), the OTLP endpoints for deckwatch's own telemetry (`observability`), metrics config |
 | **Templates** | `templates` | Deployment templates (CRUD, per-category defaults) |
 | **Git Repositories** | `git_repositories` | Managed list of Git repos for GitOps dropdowns |
 | **Container Registries** | `container_registries` | Managed list of OCI registries for GitOps dropdowns |
@@ -55,6 +55,10 @@ The Settings page renders a sidebar tree with the following sections:
     "webhook_url": ""
   },
   "prometheus_enabled": true,
+  "observability": {
+    "otlp_endpoint": "http://otel-collector.observability:4318",
+    "otlp_metrics_endpoint": "http://prometheus.monitoring:9090/api/v1/otlp/v1/metrics"
+  },
   "git_repositories": [],
   "oci_registries": [],
   "git_token_secrets": []
@@ -72,6 +76,7 @@ JSON payload when unset.
 | `PUT`  | `/api/settings`              | Writes the full settings body to the database                            |
 | `POST` | `/api/settings/credentials`  | Encrypts and stores AI provider keys, bound to the current endpoints     |
 | `GET`  | `/api/settings/outbound`     | Endpoint defaults, credential bindings, extra CA and endpoint policy     |
+| `GET`  | `/api/settings/observability` | Where each signal of deckwatch's own telemetry goes, now and after a restart |
 
 ## Endpoints and outbound TLS
 
@@ -93,6 +98,18 @@ Prometheus metrics collection is a runtime toggle controlled by the
 `prometheus_enabled` field in settings (default: `true`). Toggling this in the
 Observability section enables or disables the `/metrics` scrape endpoint
 without requiring a pod restart.
+
+### deckwatch's own telemetry
+
+`observability.otlp_endpoint` (OTLP/HTTP base URL of a collector, for traces
+and logs) and `observability.otlp_metrics_endpoint` (full URL of Prometheus's
+OTLP receiver, for metrics) tell deckwatch where to export its own telemetry.
+Both are optional and validated on save (`http://` or `https://`, no
+credentials, query or fragment), and every change is audit-logged. deckwatch
+reads them at startup, so a change applies after a restart, and an
+`OTEL_EXPORTER_OTLP_*ENDPOINT` environment variable wins, per signal. A `PUT`
+that omits `observability` (or `tracing`) keeps the stored value. See
+[TRACING.md](TRACING.md#10-deckwatchs-own-telemetry).
 
 ### Container registry
 
