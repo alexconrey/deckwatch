@@ -366,19 +366,14 @@ impl TelemetryInit {
     }
 }
 
-/// `endpoint` without userinfo, query or fragment, for the startup log.
+/// `endpoint` with its credentials masked ([`crate::redact::url`]), for the
+/// startup log.
 fn endpoint_for_log(endpoint: Option<String>) -> String {
     let Some(endpoint) = endpoint.filter(|e| !e.trim().is_empty()) else {
         return "(per-signal endpoints)".to_string();
     };
     match reqwest::Url::parse(endpoint.trim()) {
-        Ok(mut url) => {
-            let _ = url.set_username("");
-            let _ = url.set_password(None);
-            url.set_query(None);
-            url.set_fragment(None);
-            url.to_string()
-        }
+        Ok(_) => crate::redact::url(endpoint.trim()),
         Err(_) => "(invalid URL)".to_string(),
     }
 }

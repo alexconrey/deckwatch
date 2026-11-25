@@ -102,7 +102,7 @@ pub async fn receive(
 
     tracing::info!(
         provider = provider.name(),
-        repo = %event.repo_url,
+        repo = %crate::redact::url(&event.repo_url),
         branch = %event.branch,
         commit = %event.commit_sha,
         "webhook received"

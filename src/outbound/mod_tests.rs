@@ -198,3 +198,20 @@ fn error_chain_includes_every_source_once() {
          invalid peer certificate: UnknownIssuer"
     );
 }
+
+#[test]
+fn error_chain_redacts_credentials_in_urls() {
+    let err = Layer {
+        msg: "error sending request for url (https://git.example/p.wasm?private_token=abc123)",
+        source: Some(Box::new(Layer {
+            msg: "redirected to https://user:pw@mirror.example/p.wasm",
+            source: None,
+        })),
+    };
+    let chain = error_chain(&err);
+    assert_eq!(
+        chain,
+        "error sending request for url (https://git.example/p.wasm?private_token=***): \
+         redirected to https://***@mirror.example/p.wasm"
+    );
+}

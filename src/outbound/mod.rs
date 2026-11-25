@@ -54,6 +54,10 @@ pub const ALLOW_INSECURE_ENDPOINTS_ENV: &str = "DECKWATCH_ALLOW_INSECURE_ENDPOIN
 /// `err` followed by its sources, joined with ": ". reqwest's `Display` stops
 /// at "error sending request for url (...)"; the reason (unknown issuer,
 /// expired certificate, connection refused) is only in the source chain.
+///
+/// URLs in the text are redacted ([`crate::redact::urls_in_text`]): these
+/// messages are logged, and a request URL can carry a token in its query
+/// string (reqwest already moves userinfo into a header).
 pub fn error_chain(err: &(dyn std::error::Error + 'static)) -> String {
     let mut parts: Vec<String> = Vec::new();
     let mut current = Some(err);
@@ -65,7 +69,7 @@ pub fn error_chain(err: &(dyn std::error::Error + 'static)) -> String {
         }
         current = e.source();
     }
-    parts.join(": ")
+    crate::redact::urls_in_text(&parts.join(": ")).into_owned()
 }
 
 /// `deckwatch/<version>`, sent on every outbound request.
