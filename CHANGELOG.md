@@ -123,7 +123,7 @@ first.
   get a `plugins.deckwatch.io/fields-owner` annotation identifying the
   database, and later releases need it, so a new or reset database, or
   another deckwatch on the same cluster, never strips fields it didn't apply.
-  (#229, #XXX)
+  (#229, #345)
 - **Outbound requests have timeouts.** Git (GitOps polling, branch lookups
   and manual builds): 60 s per request. AI calls: 10 minutes. Registry probes
   and Entra JWKS: 15 s. These had none before. The Vertex AI and Bedrock
@@ -478,7 +478,7 @@ first.
   containers is still reconciled, so the fields of a removed resource go and
   annotation-only resources are applied. A database restored from an older
   backup still releases the fields of resources it has no record of.
-  (#XXX)
+  (#345)
 - A plugin that declares a config field type deckwatch doesn't know no longer
   loses all its config fields and resources; the field renders as text.
   (#243)
