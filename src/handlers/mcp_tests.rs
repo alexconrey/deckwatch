@@ -980,3 +980,74 @@ async fn test_update_plugin_config_rejects_invalid_key_value_without_partial_wri
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// generate_local_build
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn generate_local_build_shell_quotes_the_stored_gitops_fields() {
+    use sea_orm::{ActiveModelTrait as _, IntoActiveModel as _};
+
+    let dir = tempfile::tempdir().unwrap();
+    let state = crate::plugin_fixture::test_state(dir.path(), vec![], None).await;
+    let app_id = crate::db::ensure_application(&state.db, "team", "web")
+        .await
+        .unwrap();
+    let now = sea_orm::prelude::DateTimeUtc::default();
+    // Whoever configures GitOps for the deployment writes these fields.
+    gitops_configs::Model {
+        id: "gitops-1".into(),
+        application_id: app_id,
+        repo_url: "https://git.example/team/web".into(),
+        branch: "main".into(),
+        token_secret: String::new(),
+        encrypted_token: None,
+        token_binding: None,
+        git_auth_user: String::new(),
+        dockerfile_path: "build/Dockerfile$(touch canary)".into(),
+        docker_context: "app;touch canary".into(),
+        oci_repository: "registry.example/team/web`touch canary`".into(),
+        include_paths: String::new(),
+        exclude_paths: String::new(),
+        poll_interval_seconds: 60,
+        webhook_enabled: false,
+        last_commit_sha: None,
+        last_build_status: None,
+        last_build_job: None,
+        last_build_time: None,
+        last_build_error: None,
+        created_at: now,
+        updated_at: now,
+    }
+    .into_active_model()
+    .reset_all()
+    .insert(&state.db)
+    .await
+    .unwrap();
+
+    let out = tool_generate_local_build(
+        &state,
+        &json!({"namespace": "team", "deployment_name": "web", "no_push": false}),
+    )
+    .await
+    .unwrap();
+    let result: serde_json::Value = serde_json::from_str(&out).unwrap();
+    let command = result["command"].as_str().unwrap();
+    for quoted in [
+        "-v './app;touch canary:/workspace'",
+        "'--dockerfile=/workspace/Dockerfile$(touch canary)'",
+        "'--destination=registry.example/team/web`touch canary`:local-test'",
+    ] {
+        assert!(command.contains(quoted), "{quoted} in\n{command}");
+    }
+    let argv: Vec<&str> = result["argv"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|a| a.as_str().unwrap())
+        .collect();
+    assert_eq!(argv[..3], ["docker", "run", "--rm"]);
+    assert!(argv.contains(&"./app;touch canary:/workspace"), "{argv:?}");
+    assert!(argv.contains(&"--dockerfile=/workspace/Dockerfile$(touch canary)"));
+}

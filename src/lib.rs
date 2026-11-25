@@ -21,6 +21,7 @@ mod handlers;
 mod kube_ext;
 mod license;
 mod license_middleware;
+mod local_build;
 mod log_sanitize;
 mod logging;
 mod metrics;
