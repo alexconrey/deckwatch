@@ -18,27 +18,35 @@ static PROM_HANDLE: OnceLock<PrometheusHandle> = OnceLock::new();
 
 /// Install the Prometheus recorder as the global `metrics` sink and register
 /// the histogram buckets we care about. Call once from `main`.
-///
-/// Latency buckets are geared toward interactive dashboard traffic (a few ms
-/// up to a couple seconds) plus a long tail for slow k8s api calls / log
-/// history fetches.
 pub fn init() {
-    let latency_buckets: &[f64] = &[
-        0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0,
-    ];
-
-    let handle = PrometheusBuilder::new()
-        .set_buckets_for_metric(
-            metrics_exporter_prometheus::Matcher::Suffix("_duration_seconds".to_string()),
-            latency_buckets,
-        )
-        .expect("configure latency buckets")
+    let handle = exporter()
         .install_recorder()
         .expect("install prometheus recorder");
 
     if PROM_HANDLE.set(handle).is_err() {
         tracing::warn!("metrics::init called more than once");
     }
+}
+
+/// The Prometheus exporter with deckwatch's histogram buckets: every metric
+/// ending in `_duration_seconds` is a histogram with the latency buckets
+/// (anything else recorded with `histogram!` renders as a summary, without
+/// `_bucket` series).
+///
+/// Latency buckets are geared toward interactive dashboard traffic (a few ms
+/// up to a couple seconds) plus a long tail for slow k8s api calls / log
+/// history fetches.
+pub(crate) fn exporter() -> PrometheusBuilder {
+    let latency_buckets: &[f64] = &[
+        0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0,
+    ];
+
+    PrometheusBuilder::new()
+        .set_buckets_for_metric(
+            metrics_exporter_prometheus::Matcher::Suffix("_duration_seconds".to_string()),
+            latency_buckets,
+        )
+        .expect("configure latency buckets")
 }
 
 /// Render the current Prometheus exposition text. Cheap enough to call per
@@ -440,24 +448,66 @@ pub fn record_build_duration(namespace: &str, deployment: &str, status: &str, du
     .record(duration_s);
 }
 
+/// MCP tool calls deckwatch served itself, and calls a guardrail refused.
+pub const MCP_TOOL_CALLS: &str = "deckwatch_mcp_tool_calls_total";
+/// The duration of the calls in [`MCP_TOOL_CALLS`].
+pub const MCP_TOOL_CALL_DURATION: &str = "deckwatch_mcp_tool_call_duration_seconds";
+/// MCP tool calls deckwatch handed to mcp-k8s.
+pub const MCP_PASSTHROUGH_TOOL_CALLS: &str = "deckwatch_mcp_passthrough_tool_calls_total";
+/// The duration of the calls in [`MCP_PASSTHROUGH_TOOL_CALLS`].
+pub const MCP_PASSTHROUGH_TOOL_CALL_DURATION: &str =
+    "deckwatch_mcp_passthrough_tool_call_duration_seconds";
+
 /// Record an MCP tool call deckwatch served itself (e.g. `create_application`,
-/// `exec_pod`). Calls mcp-k8s runs are counted by the library itself in
-/// `mcp_k8s_tool_calls_total` / `mcp_k8s_tool_call_duration_seconds`,
-/// including the intercepted tools deckwatch hands on (`create_deployment`),
-/// so every call is counted exactly once across the two.
+/// `exec_pod`), or that a guardrail refused before any tool ran
+/// (`status="denied"`, for any tool). Calls deckwatch hands to mcp-k8s go to
+/// [`record_mcp_passthrough_tool_call`], so every call is counted exactly once
+/// across the two.
 pub fn record_mcp_tool_call(tool: &str, status: &str, duration_s: f64) {
+    record_tool_call(
+        MCP_TOOL_CALLS,
+        MCP_TOOL_CALL_DURATION,
+        tool,
+        status,
+        duration_s,
+    );
+}
+
+/// Record an MCP tool call mcp-k8s ran: an mcp-k8s tool deckwatch forwards,
+/// or an intercepted tool deckwatch hands on (`apply_manifest`, and
+/// `create_pod`/`update_deployment` when they delegate). `status` is `ok` or
+/// `error`.
+///
+/// These are the calls mcp-k8s counts in its own `mcp_k8s_tool_calls_total`,
+/// which mcp-k8s v0.7.0 deprecated. A new metric rather than a label on
+/// [`MCP_TOOL_CALLS`]: dashboards that add `deckwatch_mcp_tool_calls_total`
+/// and `mcp_k8s_tool_calls_total` (the bundled ones do) would count these
+/// calls twice while mcp-k8s still exports its counter.
+pub fn record_mcp_passthrough_tool_call(tool: &str, status: &str, duration_s: f64) {
+    record_tool_call(
+        MCP_PASSTHROUGH_TOOL_CALLS,
+        MCP_PASSTHROUGH_TOOL_CALL_DURATION,
+        tool,
+        status,
+        duration_s,
+    );
+}
+
+fn record_tool_call(
+    calls: &'static str,
+    duration: &'static str,
+    tool: &str,
+    status: &str,
+    duration_s: f64,
+) {
     counter!(
-        "deckwatch_mcp_tool_calls_total",
+        calls,
         "tool" => tool.to_owned(),
         "status" => status.to_owned(),
     )
     .increment(1);
 
-    histogram!(
-        "deckwatch_mcp_tool_call_duration_seconds",
-        "tool" => tool.to_owned(),
-    )
-    .record(duration_s);
+    histogram!(duration, "tool" => tool.to_owned()).record(duration_s);
 }
 
 // -----------------------------------------------------------------------------
