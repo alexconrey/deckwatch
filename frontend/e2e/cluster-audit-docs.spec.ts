@@ -1,5 +1,6 @@
 import { expect, test } from "./fixtures";
-import { openMenu } from "./support/ui";
+import { FIXED_NOW } from "./support/data";
+import { choose, openMenu } from "./support/ui";
 
 test.describe("Cluster overview", () => {
   test("shows node counts and expands a node to its conditions", async ({ app, page }) => {
@@ -58,6 +59,72 @@ test.describe("Audit log", () => {
     await app.goto("/audit");
     await openMenu(page.locator("main"), "Items per page:");
     await expect(page.getByRole("listbox").getByRole("option")).toHaveText(["10", "25", "50", "100"]);
+  });
+});
+
+test.describe("MCP activity", () => {
+  const DAY_AGO = new Date(FIXED_NOW.getTime() - 24 * 3600 * 1000).toISOString();
+  const WEEK_AGO = new Date(FIXED_NOW.getTime() - 7 * 24 * 3600 * 1000).toISOString();
+
+  test("the app bar opens it, and it loads the metrics and the MCP rows of the last 24 hours", async ({
+    app,
+    page,
+    mockApi,
+  }) => {
+    await app.goto("/applications");
+    await page.getByTestId("mcp-activity-nav").click();
+    await expect(page).toHaveURL(/\/mcp-activity$/);
+
+    const metrics = await mockApi.waitForRequest("GET", "/prometheus/mcp_activity");
+    expect(metrics.query.get("window")).toBe("24h");
+    const rows = mockApi.requests("GET", "/audit").at(-1)!;
+    expect(Object.fromEntries(rows.query)).toEqual({ source: "mcp", since: DAY_AGO, limit: "50" });
+
+    await expect(page.getByTestId("kpi-calls")).toHaveText("3,286");
+    await expect(page.getByTestId("kpi-denied")).toHaveText("7");
+    await expect(page.getByTestId("audit-row")).toHaveCount(4);
+    const denied = page.getByTestId("audit-row").filter({ hasText: "delete_pod" });
+    await expect(denied).toContainText("denied");
+    await expect(denied.getByTestId("denied-rule")).toHaveText("namespace_allowlist");
+    await expect(denied).toContainText("name=etcd-0 namespace=kube-system");
+    await expect(denied.getByTestId("client-says")).toHaveText("client says claude-code 2.1.0");
+    await expect(page.getByText("1 denied", { exact: true })).toBeVisible();
+  });
+
+  test("the window toggle refetches both for the last 7 days", async ({ app, page, mockApi }) => {
+    await app.goto("/mcp-activity");
+    await page.getByRole("button", { name: "Last 7 days" }).click();
+    await expect
+      .poll(() => mockApi.requests("GET", "/prometheus/mcp_activity").map((c) => c.query.get("window")))
+      .toContain("7d");
+    await expect
+      .poll(() => mockApi.requests("GET", "/audit").map((c) => c.query.get("since")))
+      .toContain(WEEK_AGO);
+  });
+
+  test("the outcome filter narrows the rows", async ({ app, page, mockApi }) => {
+    await app.goto("/mcp-activity");
+    await choose(page.getByTestId("filter-outcome"), "Outcome", "denied");
+    await expect.poll(() => mockApi.requests("GET", "/audit").some((c) => c.query.get("outcome") === "denied")).toBe(true);
+    await expect(page.getByTestId("audit-row")).toHaveCount(1);
+    await expect(page.getByTestId("audit-row")).toContainText("delete_pod");
+  });
+
+  test("without Prometheus it says so and still lists the audit rows", async ({ app, page, mockState }) => {
+    mockState.features.prometheus = false;
+    await app.goto("/mcp-activity");
+    await expect(page.getByTestId("metrics-unavailable")).toContainText("prometheus not configured");
+    await expect(page.getByTestId("kpi-row")).toHaveCount(0);
+    await expect(page.getByTestId("audit-row")).toHaveCount(4);
+  });
+
+  test("the audit log links to it and shows each row's source", async ({ app, page }) => {
+    await app.goto("/audit");
+    const table = page.locator(".v-data-table");
+    await expect(table.getByRole("row").filter({ hasText: "etcd-0" })).toContainText("MCP delete_pod");
+    await expect(table.getByRole("row").filter({ hasText: "cache-warmer" })).toContainText("UI/API");
+    await page.getByRole("link", { name: "MCP activity" }).click();
+    await expect(page).toHaveURL(/\/mcp-activity$/);
   });
 });
 

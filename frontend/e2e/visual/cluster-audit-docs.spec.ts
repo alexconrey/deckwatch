@@ -3,8 +3,8 @@ import { eachTheme, expect, test } from "./visual-test";
 import { openMenu } from "../support/ui";
 
 /**
- * Cluster overview, audit log, docs, agent feedback, 404 and the auth
- * callback error page.
+ * Cluster overview, audit log, MCP activity, docs, agent feedback, 404 and
+ * the auth callback error page.
  */
 
 const nodeRow = (page: Page, name: string) => page.locator(".v-data-table").getByRole("row").filter({ hasText: name });
@@ -52,6 +52,20 @@ eachTheme(() => {
     await openMenu(page.locator("main"), "Items per page:");
     await expect(page.getByRole("option", { name: "100" })).toBeVisible();
     await app.snap("audit/items-per-page-menu");
+  });
+
+  test("mcp activity", async ({ app, page }) => {
+    await app.goto("/mcp-activity");
+    await expect(page.getByTestId("audit-row")).toHaveCount(4);
+    await expect(page.getByTestId("kpi-calls")).toHaveText("3,286");
+    await app.snap("mcp/activity", { fullPage: true });
+  });
+
+  test("mcp activity without prometheus", async ({ app, page, mockState }) => {
+    mockState.features.prometheus = false;
+    await app.goto("/mcp-activity");
+    await expect(page.getByTestId("metrics-unavailable")).toBeVisible();
+    await app.snap("mcp/activity-no-prometheus", { fullPage: true });
   });
 
   test("docs page", async ({ app, page }) => {
