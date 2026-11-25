@@ -146,14 +146,14 @@ first.
   read AWS keys from deckwatch's environment needs its own credentials: a
   workload identity token through `inherit_env_file_keys` (for example
   `{"AWS_IDENTITY_TOKEN": "AWS_WEB_IDENTITY_TOKEN_FILE"}`), or keys in its
-  `config`. (#XXX)
+  `config`. (#298)
 - **MCP: deckwatch's own tools refuse arguments their schema doesn't allow.**
   An undeclared argument, a missing required one, or a value of the wrong
   type (such as `"replicas": "3"`) used to be ignored or replaced by a
   default; now the call fails with an error naming it. `validate_plugin` no
   longer takes `token_secret` or `allowed_hosts`, so a plugin in a private
   repository can't be dry-run over MCP: configure it disabled and use
-  `enable_plugin`. (#XXX)
+  `enable_plugin`. (#298)
 - **The UI needs a recent browser:** Chrome or Edge 111, Firefox 114, or
   Safari 16.4 or newer (vite 8's build target; it was Chrome 87, Firefox 78,
   Safari 14). (#237)
@@ -237,16 +237,16 @@ first.
   `inherit_env_file_keys` and `upload` sources are refused with an error
   naming them, and the result lists env var names and Secret or ConfigMap
   references, never values. Every call, refused ones included, is audited as
-  `exec`. (#XXX)
+  `exec`. (#298)
 - **deckwatch's own MCP tools enforce their input schemas.** Each call is
   checked against the tool's `inputSchema` before it runs, and undeclared
   arguments are refused (see Upgrade notes), so a handler can no longer act
   on an argument that clients are never told about. The mcp-k8s tools,
-  including the four deckwatch replaces, aren't checked this way yet. (#XXX)
+  including the four deckwatch replaces, aren't checked this way yet. (#298)
 - **More of deckwatch's own secrets are kept from plugins.**
   `inherit_env_keys` and `inherit_env_file_keys` also refuse static AWS
   credentials and the OTLP exporter's headers (see Upgrade notes). This
-  remains a denylist; an operator-set allowlist is planned. (#XXX)
+  remains a denylist; an operator-set allowlist is planned. (#298)
 - **Stored credentials can't be redirected:** they are only sent to the
   endpoint they were saved for (see Added), and a crafted Vertex AI or
   Bedrock region can no longer redirect the access token or a signed request.
