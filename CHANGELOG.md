@@ -145,7 +145,7 @@ first.
   returns `200` with `{sha256, cleared_config_keys}` instead of `204`: on a
   plugin without a pin it drops the config values that `GET /api/settings`
   masks, so enter them again after uploading; a pinned plugin only accepts the
-  pinned binary. (#XXX)
+  pinned binary. (#342)
 - **The UI needs a recent browser:** Chrome or Edge 111, Firefox 114, or
   Safari 16.4 or newer (vite 8's build target; it was Chrome 87, Firefox 78,
   Safari 14). (#237)
@@ -192,7 +192,7 @@ first.
   again, and the change is audited. An upload to
   a pinned plugin must match the pin, which now applies to uploaded binaries
   too; an upload to an unpinned plugin drops the masked config values first.
-  See Upgrade notes. (#XXX)
+  See Upgrade notes. (#342)
 - **MCP `update_deployment` ignored the namespace allowlist for
   `service_account`.** An update that set only `service_account` could point
   a Deployment in any namespace at any ServiceAccount. Only deployments that
