@@ -14,7 +14,9 @@ import AuditLogPage from "@/components/pages/AuditLogPage.vue";
 import MarketplacePage from "@/components/pages/MarketplacePage.vue";
 import ConfirmDialog from "@/components/common/ConfirmDialog.vue";
 import OutboundEndpointsSection from "@/components/settings/OutboundEndpointsSection.vue";
+import OtlpExportSection from "@/components/settings/OtlpExportSection.vue";
 import { bindingState, emptyEndpoints, fieldFor } from "@/utils/endpoints";
+import { emptyObservability, validateObservability } from "@/utils/observability";
 import type {
   AiProviderConfig,
   AiProviderType,
@@ -35,6 +37,7 @@ import type {
   McpTuningField,
   NotificationEventType,
   NotificationSettings,
+  ObservabilitySettings,
   OciRegistry,
   OciRegistryType,
   PluginConfig,
@@ -180,6 +183,11 @@ const savingCredentials = ref(false);
 // of the settings document; empty strings mean "use the default".
 const endpoints = ref<EndpointSettings>(emptyEndpoints());
 const endpointsSection = ref<InstanceType<typeof OutboundEndpointsSection> | null>(null);
+
+// Where deckwatch exports its own telemetry (Settings → Observability). Saved
+// with the rest of the settings document; read by deckwatch at startup.
+const observability = ref<ObservabilitySettings>(emptyObservability());
+const otlpSection = ref<InstanceType<typeof OtlpExportSection> | null>(null);
 
 // Where each stored AI credential may be sent, against the endpoints as
 // currently edited. The server enforces this; the UI only explains it.
@@ -582,6 +590,7 @@ function applySettings(s: DeckwatchSettings) {
     gcp_sa_key: null,
   };
   endpoints.value = { ...emptyEndpoints(), ...(s.endpoints ?? {}) };
+  observability.value = { ...emptyObservability(), ...(s.observability ?? {}) };
   defaultStorageClass.value = s.default_storage_class ?? null;
 }
 
@@ -663,6 +672,7 @@ function buildPayload(): DeckwatchSettings {
     mcp_tuning: mcpTuning.value,
     marketplace_url: marketplaceUrl.value,
     endpoints: endpoints.value,
+    observability: observability.value,
   };
 }
 
@@ -710,7 +720,8 @@ function validateManagedLists(): string | null {
 }
 
 async function save() {
-  const validationError = validateManagedLists() ?? validateTemplates();
+  const validationError =
+    validateManagedLists() ?? validateTemplates() ?? validateObservability(observability.value);
   if (validationError) {
     error.value = validationError;
     snackbarMessage.value = validationError;
@@ -726,6 +737,7 @@ async function save() {
     const updated = await settingsApi.update(buildPayload());
     applySettings(updated);
     void endpointsSection.value?.refresh();
+    void otlpSection.value?.refresh();
     // Refresh the module-cached AI toggles so DiagnoseButton / AiFixButton
     // pick up the new enabled state without a page reload.
     void refreshAiSettings();
@@ -2152,6 +2164,10 @@ onMounted(load);
             inset
             density="compact"
           />
+
+          <v-divider class="my-6" />
+
+          <OtlpExportSection ref="otlpSection" v-model="observability" />
 
           <v-divider class="my-6" />
 

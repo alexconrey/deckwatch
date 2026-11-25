@@ -10,7 +10,8 @@ separately:
 | **Trace queries** | Lets deckwatch list recent traces and link into the backend's UI | The `tracing` block of deckwatch's settings ([§6](#6-trace-queries-and-deep-links)) |
 
 These parts are about your workloads' traces. deckwatch can also export its **own** traces, log
-lines and metrics over OTLP. That export is separate and off by default; see
+lines and metrics over OTLP, to endpoints set in **Settings → Observability** or in its
+environment. That export is separate and off by default; see
 [§10](#10-deckwatchs-own-telemetry).
 
 ```
@@ -114,13 +115,15 @@ queries, as `http://<release>-jaeger.<namespace>.svc:16686` ([§6.1](#61-trace-q
 
 ## 5. Exporting from your workloads
 
-The OpenTelemetry Collector plugin (`deckwatch-plugin-otel`) is retired. Built-in support is
-planned to replace it: OTLP endpoints that the operator sets in deckwatch's settings, and
-per-application injection of the `OTEL_*` variables. Until then, set the `OTEL_*` variables on
-your workloads yourself ([§7](#7-instrumenting-applications)).
+The OpenTelemetry Collector plugin (`deckwatch-plugin-otel`) is retired. Built-in support
+replaces it: the OTLP endpoints in **Settings → Observability**, which deckwatch already uses for
+its own telemetry ([§10.2](#102-configuration)), and per-application injection of the `OTEL_*`
+variables that point your workloads at them, which is planned. Until then, set the `OTEL_*`
+variables on your workloads yourself ([§7](#7-instrumenting-applications)).
 
-deckwatch's own telemetry export is not affected. It is configured through the standard `OTEL_*`
-environment variables and works as described in [§10](#10-deckwatchs-own-telemetry).
+deckwatch's own telemetry export is not affected by the plugin's retirement. It is configured in
+**Settings → Observability** or through the standard `OTEL_*` environment variables, and works as
+described in [§10](#10-deckwatchs-own-telemetry).
 
 ## 6. Trace queries and deep links
 
@@ -168,8 +171,8 @@ An empty `ui_url` hides the link.
 | `backend_kind` | Deep links | `tempo` or `jaeger`. Blank or unknown means `tempo`. |
 | `query_url` | Query proxy | HTTP base URL of a Jaeger query API, such as `http://<jaeger>:16686`. Empty disables queries. Tempo does not serve this API ([§6.1](#61-trace-query-proxy)). |
 | `ui_url` | Deep links | Public base URL of Grafana (for Tempo) or the Jaeger UI. |
-| `otlp_endpoint` | Operators | Where the backend receives OTLP. deckwatch itself does not use it. deckwatch's own export is configured separately ([§10](#10-deckwatchs-own-telemetry)). |
-| `otlp_insecure` | Operators | `true` when that endpoint is plaintext. |
+| `otlp_endpoint` | Nothing | **Retired.** A gRPC `host:port` for the OpenTelemetry Collector plugin. deckwatch never exported to it and doesn't convert it; while it is set, deckwatch asks for the OTLP/HTTP endpoint in **Settings → Observability** instead ([§10.2](#102-configuration)). |
+| `otlp_insecure` | Nothing | **Retired** with `otlp_endpoint`. |
 
 Set these through Helm under `settings.defaults.tracing`. The chart renders them into the
 settings ConfigMap (`settings.configMapName`, by default `deckwatch-config`), and the query
@@ -184,8 +187,6 @@ settings:
   defaults:
     tracing:
       backend_kind: jaeger
-      otlp_endpoint: deckwatch-jaeger.deckwatch.svc:4317
-      otlp_insecure: true
       query_url: http://deckwatch-jaeger.deckwatch.svc:16686
       ui_url: https://jaeger.example.com   # port 16686 through your ingress
 ```
@@ -198,8 +199,6 @@ settings:
   defaults:
     tracing:
       backend_kind: tempo
-      otlp_endpoint: deckwatch-tempo.deckwatch.svc:4317
-      otlp_insecure: true
       query_url: ""
       ui_url: https://grafana.example.com
 ```
@@ -233,7 +232,8 @@ the endpoint expects, so set `OTEL_EXPORTER_OTLP_PROTOCOL` to match its port: `g
 deckwatch can export what it records about itself over OTLP: its own traces, its log lines and
 metrics. This includes the embedded mcp-k8s library, which implements most MCP tools, and plugin
 log lines. It is separate from your workloads' telemetry ([§5](#5-exporting-from-your-workloads)).
-Export is **off** unless an OTLP endpoint is configured, and with no endpoint deckwatch behaves
+Export is **off** unless an OTLP endpoint is configured, in **Settings → Observability** or in
+deckwatch's environment ([§10.2](#102-configuration)), and with no endpoint deckwatch behaves
 exactly as before.
 
 ### 10.1 What is exported
@@ -259,11 +259,54 @@ exactly as before.
 
 ### 10.2 Configuration
 
-deckwatch reads the standard OpenTelemetry environment variables once, at startup.
+Each signal's endpoint comes from deckwatch's settings or from its environment. deckwatch reads
+them at startup: the environment first, then the settings once its database is up. **A change
+takes effect when deckwatch restarts.**
+
+**In Settings → Observability** (the `observability` block of the settings document):
+
+| Setting | Signals | Value |
+|---|---|---|
+| **OTLP endpoint** (`otlp_endpoint`) | Traces and logs | The OTLP/HTTP base URL of an OpenTelemetry Collector, such as `http://otel-collector.observability:4318`. deckwatch appends `/v1/traces` and `/v1/logs`. |
+| **OTLP metrics endpoint** (`otlp_metrics_endpoint`) | Metrics | The full URL of an OTLP metrics receiver, used as is. Prometheus 3 started with `--web.enable-otlp-receiver` receives at `/api/v1/otlp/v1/metrics`, for example `http://prometheus.monitoring:9090/api/v1/otlp/v1/metrics`. A collector's `/v1/metrics` works too. |
+
+- Both are optional. Each is an `http://` or `https://` URL without a username, password, query
+  string or fragment, at most 2048 characters long. Plain `http://` is fine for an in-cluster
+  collector: deckwatch sends these endpoints telemetry, never credentials.
+- The OTLP endpoint doesn't carry metrics. Without a metrics endpoint, metrics aren't exported.
+- For each signal, the Settings page shows where it is exported now and where it will go after a
+  restart (`GET /api/settings/observability`). Every change is written to the audit log.
+
+```json
+{
+  "observability": {
+    "otlp_endpoint": "http://otel-collector.observability:4318",
+    "otlp_metrics_endpoint": "http://prometheus.monitoring:9090/api/v1/otlp/v1/metrics"
+  }
+}
+```
+
+**Precedence.** For each signal, an endpoint variable wins over settings:
+
+1. `OTEL_EXPORTER_OTLP_<SIGNAL>_ENDPOINT` (`TRACES`, `METRICS` or `LOGS`), used as is;
+2. `OTEL_EXPORTER_OTLP_ENDPOINT`, with `/v1/<signal>` appended;
+3. the endpoint in settings.
+
+With only `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` set, for example, traces go there and logs go to
+the OTLP endpoint in settings. `OTEL_SDK_DISABLED`, `OTEL_<SIGNAL>_EXPORTER=none` and the protocol
+variables below apply to a signal whatever its endpoint's source.
+
+**Exporter headers stay with the environment.** `OTEL_EXPORTER_OTLP_HEADERS` and the per-signal
+`OTEL_EXPORTER_OTLP_<SIGNAL>_HEADERS`, usually credentials, are only sent to an endpoint set in
+the environment. An endpoint from settings gets no exporter headers, and deckwatch logs a warning
+when headers are set for a signal whose endpoint comes from settings. For a backend that needs
+credentials, set its endpoint in the environment too.
+
+**Environment variables.** deckwatch reads the standard OpenTelemetry environment variables.
 
 | Variable | Effect |
 |---|---|
-| `OTEL_EXPORTER_OTLP_ENDPOINT` | OTLP/HTTP base URL; deckwatch appends `/v1/traces`, `/v1/logs` and `/v1/metrics`. **Setting it (or a per-signal endpoint) turns export on.** |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | OTLP/HTTP base URL; deckwatch appends `/v1/traces`, `/v1/logs` and `/v1/metrics`. **Setting it (or a per-signal endpoint) turns export on**, and it wins over settings for every signal. |
 | `OTEL_EXPORTER_OTLP_{TRACES,METRICS,LOGS}_ENDPOINT` | Full URL for one signal. On its own, it turns on only that signal. |
 | `OTEL_{TRACES,METRICS,LOGS}_EXPORTER` | `otlp` (default) or `none`. |
 | `OTEL_EXPORTER_OTLP_PROTOCOL` (and per signal) | Must be unset or `http/protobuf`. `grpc` and `http/json` are refused with an error in the log, and that signal is not exported. |
@@ -310,22 +353,22 @@ telemetry:
 | `telemetry.otlp.resourceAttributes` | `{}` | Added to `OTEL_RESOURCE_ATTRIBUTES` after `k8s.namespace.name` and `k8s.pod.name`. Values must not contain commas or `=`. |
 | `telemetry.otlp.sampler`, `.samplerArg` | `""` | `OTEL_TRACES_SAMPLER`, `OTEL_TRACES_SAMPLER_ARG`. |
 
-**Why not `tracing.otlp_endpoint`?** deckwatch's export does not fall back to the
-`tracing.otlp_endpoint` setting ([§6.3](#63-settings-and-valuesyaml)), for four reasons:
+**`tracing.otlp_endpoint` is retired.** That setting was a gRPC `host:port` for the OpenTelemetry
+Collector plugin, and deckwatch never exported to it. deckwatch exports OTLP over HTTP, which needs
+a URL and usually another port (4318 rather than 4317), so the old value isn't converted. While it
+is still set (in the settings, or in the chart's `settings.defaults.tracing`) and the OTLP endpoint
+in **Settings → Observability** isn't, deckwatch logs a warning at startup, and the Settings page
+and `GET /api/settings/observability` ask for the OTLP/HTTP endpoint. The trace viewer's
+`query_url`, `ui_url` and `backend_kind` are unaffected ([§6.3](#63-settings-and-valuesyaml)).
 
-- **Different format.** That setting is documented as a gRPC `host:port` for collectors.
-  deckwatch exports OTLP/HTTP, which needs a URL and usually a different port (4318, not 4317).
-- **Exfiltration risk.** Settings can be changed at runtime through `PUT /api/settings`, and that
-  API is not authenticated yet. An export endpoint read from settings would let anyone who can
-  reach deckwatch redirect its telemetry, and any credential headers, to a host of their choosing.
-  The endpoint is therefore deployment configuration (environment variables), like
-  `DECKWATCH_ALLOW_INSECURE_ENDPOINTS` ([docs/TLS.md](TLS.md)).
-- **Startup only.** The pipeline is built at startup, before the database is read; a settings
-  change would not take effect without a restart.
-- **Settings are already split.** The query proxy reads the `tracing` block from the ConfigMap,
-  not the database. Coupling export to that block would inherit the confusion.
+**Who can change the endpoints.** deckwatch's API, settings included, has no authentication by
+default ([docs/AUTH.md](AUTH.md)), so anyone who can reach it can point deckwatch's telemetry at
+another host. Telemetry carries no secrets ([§10.1](#101-what-is-exported)), and an endpoint from
+settings gets no exporter headers. If that still matters in your cluster, limit who can reach
+deckwatch, or set the endpoints in the environment, which win.
 
-Point both at the same backend when that is what you want ([§10.3](#103-with-your-workloads-and-the-bundled-backend)).
+To see deckwatch next to your workloads, point both at the same backend
+([§10.3](#103-with-your-workloads-and-the-bundled-backend)).
 
 ### 10.3 With your workloads and the bundled backend
 
@@ -345,7 +388,10 @@ Point both at the same backend when that is what you want ([§10.3](#103-with-yo
 
 | Symptom or limitation | Explanation |
 |---|---|
-| Startup logs `exporting deckwatch's telemetry over OTLP (http/protobuf)` | Export is on; the line lists the signals and the endpoint (without credentials). No such line means export is off. |
+| Startup logs `exporting deckwatch's telemetry over OTLP (http/protobuf)` | Export is on; the line lists the signals and the endpoint (without credentials). A second line, `... to the endpoints in settings`, lists what the settings added. No such line means export is off. |
+| A changed endpoint in **Settings → Observability** has no effect | deckwatch reads the endpoints at startup: restart it. The Settings page says when the saved endpoints differ from the ones in use. An endpoint variable for that signal also wins over settings. |
+| `OTEL_EXPORTER_OTLP_HEADERS is not sent to the logs endpoint from settings` | Exporter headers go only to endpoints set in the environment. If the backend needs them, set its endpoint in the environment as well. |
+| `tracing.otlp_endpoint (…) is retired and deckwatch doesn't use it` | Enter the collector's OTLP/HTTP endpoint as the OTLP endpoint in **Settings → Observability**, or remove the old value. |
 | `OTLP export request failed` with a reason (unknown issuer, connection refused, `HTTP 401`, `HTTP 404`) | Logged once per signal each time the failure changes, and `OTLP export requests succeed again` once it recovers. Unknown issuer: add the CA with `outbound.extraCaBundle`. `HTTP 404` on logs or metrics: the backend accepts traces only, so turn those signals off. |
 | `BatchSpanProcessor.ExportError` / `Export.Failed.Exhausted` (target `opentelemetry_sdk`, `opentelemetry-otlp`) | The SDK's own report for each failed batch, which is then dropped. Telemetry never blocks requests: when the backend is down, data is lost, not queued without bound. |
 | `OTEL_EXPORTER_OTLP_PROTOCOL=grpc is not supported` | deckwatch exports `http/protobuf` only. Use the backend's OTLP/HTTP port. |

@@ -1,5 +1,11 @@
 import type { Page } from "@playwright/test";
-import { GATEWAY_URL, type MockState, movedOutbound } from "../support/data";
+import {
+  GATEWAY_URL,
+  MOVED_COLLECTOR_URL,
+  type MockState,
+  movedOutbound,
+  pendingObservability,
+} from "../support/data";
 import { apiError } from "../support/mock-api";
 import { openMenu, openSelect, row } from "../support/ui";
 import { eachTheme, expect, test } from "./visual-test";
@@ -116,6 +122,20 @@ eachTheme(() => {
       await page.getByRole("textbox", { name: "GitHub API base URL" }).fill("https://github.acme.test/api/v3?per_page=100");
       await expect(page.getByText("Must not contain a query string or fragment.")).toBeVisible();
       await app.snap("settings/advanced-endpoints-moved", { fullPage: true });
+    });
+
+    test("OpenTelemetry export waiting for a restart, with the retired endpoint", async ({
+      app,
+      page,
+      mockState,
+    }) => {
+      mockState.settings.observability = { otlp_endpoint: MOVED_COLLECTOR_URL, otlp_metrics_endpoint: "" };
+      mockState.observability = pendingObservability();
+      await app.goto("/settings");
+      await section(page, "Observability");
+      await expect(page.getByTestId("otlp-retired-notice")).toContainText("deckwatch-tempo.deckwatch.svc:4317");
+      await expect(page.getByTestId("otlp-after-restart-traces")).toContainText(MOVED_COLLECTOR_URL);
+      await app.snap("settings/observability-restart-pending", { fullPage: true });
     });
 
     test("AI providers with the key bound to the old endpoint", async ({ app, page, mockState }) => {

@@ -718,6 +718,55 @@ export interface BindingStatus {
   matches: boolean;
 }
 
+// --- deckwatch's own telemetry (src/telemetry/endpoints.rs) ---
+
+/**
+ * Where deckwatch sends its own traces, log lines and metrics over OTLP/HTTP
+ * (`observability` in the settings document). Read at startup: a change
+ * applies when deckwatch restarts. An OTEL_EXPORTER_OTLP_*ENDPOINT variable
+ * wins, per signal. "" = not set.
+ */
+export interface ObservabilitySettings {
+  /** OTLP/HTTP base URL of a collector, for traces and logs; /v1/traces and /v1/logs are appended. */
+  otlp_endpoint: string;
+  /** Full URL of an OTLP metrics receiver (Prometheus: /api/v1/otlp/v1/metrics), used as is. */
+  otlp_metrics_endpoint: string;
+}
+
+export type OtlpSignal = "traces" | "metrics" | "logs";
+
+/** Where a signal's endpoint comes from. */
+export type OtlpSource = "env" | "settings" | "unset";
+
+export interface OtlpSignalExport {
+  source: OtlpSource;
+  /** Where the signal is sent, credentials masked; "" when unset. */
+  endpoint: string;
+  /** The environment variable or setting the endpoint comes from. */
+  from: string | null;
+  exported: boolean;
+  /** Why it isn't exported although it has an endpoint. */
+  reason: string | null;
+}
+
+export interface OtlpSignalStatus {
+  signal: OtlpSignal;
+  /** What deckwatch exports to now, as set up at startup. */
+  running: OtlpSignalExport | null;
+  /** What the environment and the saved settings ask for: used from the next start. */
+  configured: OtlpSignalExport;
+}
+
+/** GET /api/settings/observability */
+export interface ObservabilityStatus {
+  /** Traces, metrics and logs, in that order. */
+  signals: OtlpSignalStatus[];
+  /** The saved settings send a signal somewhere else: deckwatch must restart. */
+  restart_required: boolean;
+  /** Set while the retired tracing.otlp_endpoint is set and otlp_endpoint isn't. */
+  retired_otlp_endpoint: { value: string; message: string } | null;
+}
+
 export type PluginSourceType = "github" | "url";
 
 export interface PluginSourceGithub {
@@ -784,6 +833,8 @@ export interface DeckwatchSettings {
   marketplace_url?: string;
   /** Always present on GET; omit on PUT to keep the stored endpoints. */
   endpoints?: EndpointSettings;
+  /** Always present on GET; omit on PUT to keep the stored endpoints. */
+  observability?: ObservabilitySettings;
 }
 
 // --- Agent Feedback types ---

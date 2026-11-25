@@ -398,6 +398,11 @@ pub fn build_router(
         .route("/api/settings/credentials", post(settings::set_credentials))
         // Endpoint defaults, credential bindings, TLS / endpoint policy
         .route("/api/settings/outbound", get(settings::get_outbound_status))
+        // deckwatch's own telemetry: where each signal goes, now and after a restart
+        .route(
+            "/api/settings/observability",
+            get(settings::get_observability_status),
+        )
         // Notifications
         .route("/api/notifications/test", post(settings::test_notification))
         // Cross-namespace deployment promotion

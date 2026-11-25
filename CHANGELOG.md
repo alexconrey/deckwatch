@@ -27,9 +27,31 @@ Changes merged since the last release are listed under `[Unreleased]`.
   `DECKWATCH_CACHE_DIR` is set. The Helm chart sets it (see Added). If you run
   deckwatch without the chart, set `DECKWATCH_CACHE_DIR` to a writable
   directory, or plugins are compiled on every call. (#399)
+- **`tracing.otlp_endpoint` is retired.** It was a gRPC `host:port` for the
+  retired OpenTelemetry Collector plugin, and deckwatch never exported to it.
+  To export deckwatch's own telemetry, enter your collector's OTLP/HTTP
+  endpoint (usually port 4318, not 4317) as the OTLP endpoint in
+  **Settings → Observability**. The old value isn't converted. Until you set
+  it, or remove the old value from the settings and from the chart's
+  `settings.defaults.tracing`, deckwatch logs a warning at startup and the
+  Settings page asks for it. `tracing.query_url`, `ui_url` and
+  `backend_kind` are unchanged. (#401, #398)
 
 ### Added
 
+- **OTLP endpoints for deckwatch's own telemetry in Settings →
+  Observability:** `observability.otlp_endpoint`, an OpenTelemetry
+  Collector's OTLP/HTTP base URL for traces and logs, and
+  `observability.otlp_metrics_endpoint`, the full URL of Prometheus's OTLP
+  receiver (`/api/v1/otlp/v1/metrics`) for metrics. An
+  `OTEL_EXPORTER_OTLP_*ENDPOINT` variable still wins, per signal, and the
+  exporter headers (`OTEL_EXPORTER_OTLP_*HEADERS`) are only sent to an
+  endpoint from the environment. deckwatch reads the endpoints at startup,
+  so restart it after a change. The Settings page and
+  `GET /api/settings/observability` show where each signal goes now and
+  after a restart. See
+  [docs/TRACING.md](docs/TRACING.md#10-deckwatchs-own-telemetry).
+  (#401, #398)
 - **Helm `extraEnv`:** extra environment variables for the deckwatch
   container, as a list of Kubernetes `EnvVar` objects added after the ones
   the chart sets. See
@@ -50,10 +72,11 @@ Changes merged since the last release are listed under `[Unreleased]`.
 - **The OpenTelemetry Collector plugin is retired.** deckwatch-plugin-otel's
   repository is going away, so remove the plugin under **Settings → Plugins**
   if you installed it. [docs/TRACING.md](docs/TRACING.md) no longer describes
-  it. Built-in OTLP endpoint settings and per-application `OTEL_*` injection
-  are planned to replace it; until then, set the `OTEL_*` variables on your
-  workloads yourself. deckwatch's own OTLP export (Helm `telemetry.otlp`) is
-  unchanged. (#396)
+  it. Per-application `OTEL_*` injection is planned to replace it (#398);
+  until then, set the `OTEL_*` variables on your workloads yourself.
+  deckwatch's own OTLP export (Helm `telemetry.otlp`) works as before, and its
+  endpoints can now also be set in **Settings → Observability** (see Added).
+  (#396)
 
 ### Fixed
 
@@ -68,6 +91,10 @@ Changes merged since the last release are listed under `[Unreleased]`.
   have no time limit (#301), but deckwatch now stops waiting for one after 2
   minutes and reports `plugin.timeout`; the call may still finish in the
   background. (#385, #395)
+- Saving the Settings page no longer drops the trace viewer's settings
+  (`tracing.query_url`, `ui_url` and `backend_kind`) from the settings
+  database, where the MCP activity page reads its trace links from. A
+  `PUT /api/settings` without `tracing` now keeps the stored block. (#401)
 - **The chart's probes give deckwatch time to start, and to answer when
   busy.** deckwatch loads every enabled plugin before it serves HTTP, and the
   liveness probe restarted it after about 30 seconds, so slow plugin

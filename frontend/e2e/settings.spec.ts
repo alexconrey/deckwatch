@@ -1,6 +1,6 @@
 import type { Page } from "@playwright/test";
 import { expect, test } from "./fixtures";
-import { GATEWAY_URL, movedOutbound } from "./support/data";
+import { COLLECTOR_URL, GATEWAY_URL, movedOutbound } from "./support/data";
 import { choose, row } from "./support/ui";
 
 /**
@@ -176,6 +176,42 @@ test.describe("Settings", () => {
     await section(page, "Observability");
     await page.getByLabel("Enable Agent Feedback").uncheck();
     await expect(nav.getByText("Agent Feedback", { exact: true })).toBeHidden();
+  });
+});
+
+test.describe("Settings: OpenTelemetry export", () => {
+  test("OTLP endpoints are checked while typing, saved with the settings, and the status reloads", async ({
+    app,
+    page,
+    mockApi,
+  }) => {
+    await app.goto("/settings");
+    await section(page, "Observability");
+    await mockApi.waitForRequest("GET", "/settings/observability");
+    await expect(page.getByTestId("otlp-signal-traces")).toContainText(`${COLLECTOR_URL}/v1/traces`);
+
+    const endpoint = page.getByRole("textbox", { name: "OTLP endpoint (traces and logs)" });
+    await expect(endpoint).toHaveValue(COLLECTOR_URL);
+    // The retired gRPC setting's format isn't accepted.
+    await endpoint.fill("otel-collector.observability:4317");
+    await expect(page.getByText("Use an http:// or https:// URL", { exact: false })).toBeVisible();
+    await page.getByRole("button", { name: "Save" }).first().click();
+    await expect(page.getByRole("alert").filter({ hasText: "OTLP endpoint: Use an http:// or https:// URL" })).toBeVisible();
+    expect(mockApi.requests("PUT", "/settings")).toHaveLength(0);
+
+    await endpoint.fill("https://otel-collector.platform.internal");
+    await page
+      .getByRole("textbox", { name: "OTLP metrics endpoint" })
+      .fill("http://prometheus.monitoring:9090/api/v1/otlp/v1/metrics");
+    await page.getByRole("button", { name: "Save" }).first().click();
+    const put = await mockApi.waitForRequest("PUT", "/settings");
+    expect((put.body as { observability: unknown }).observability).toEqual({
+      otlp_endpoint: "https://otel-collector.platform.internal",
+      otlp_metrics_endpoint: "http://prometheus.monitoring:9090/api/v1/otlp/v1/metrics",
+    });
+    await expect(page.getByText("Settings saved")).toBeVisible();
+    // Where each signal goes now and after a restart is reloaded.
+    await expect.poll(() => mockApi.requests("GET", "/settings/observability").length).toBe(2);
   });
 });
 

@@ -50,7 +50,8 @@ src/                              # Rust backend (library + thin binary)
   metrics.rs                      # Prometheus metrics (deckwatch_* prefix)
   logging.rs                      # Default log filter (RUST_LOG fallback)
   telemetry.rs                    # Subscriber + optional OTLP export of deckwatch's
-                                  #   own traces/logs/metrics (OTEL_*, docs/TRACING.md)
+                                  #   own traces/logs/metrics (OTEL_* or settings,
+                                  #   docs/TRACING.md); telemetry/endpoints.rs: precedence
   entities/                       # SeaORM entity definitions
     settings.rs                   # settings table (key-value)
     applications.rs               # applications table
@@ -405,9 +406,12 @@ Key files: `src/plugins.rs` (fetch, execute, merge), `src/handlers/plugins.rs`
 - **Prometheus monitoring**: runtime setting in DB (Settings → Observability)
 - **Container registry**: controlled by `registry.enabled` in Helm values (not settings page)
 - **AI providers**: server-side toggles in DB (Settings → AI Providers)
-- **deckwatch's own telemetry**: off unless `OTEL_EXPORTER_OTLP_ENDPOINT` (or a
-  per-signal endpoint) is set, through Helm `telemetry.otlp.*`. Read once at
-  startup, never from the settings DB.
+- **deckwatch's own telemetry**: off unless an OTLP endpoint is set, through
+  `OTEL_EXPORTER_OTLP_ENDPOINT` (or a per-signal endpoint, Helm
+  `telemetry.otlp.*`) or Settings → Observability (`observability.otlp_endpoint`
+  for traces and logs, `observability.otlp_metrics_endpoint` for metrics). A
+  variable wins, per signal. Read at startup, settings once the DB is up; a
+  change takes a restart.
 
 ## Logging and telemetry
 
@@ -416,18 +420,24 @@ Key files: `src/plugins.rs` (fetch, execute, merge), `src/handlers/plugins.rs`
   default filter. With `RUST_LOG` unset, it keeps `deckwatch`, `tower_http`,
   `mcp_k8s` and `extism::pdk` at info and `opentelemetry` at warn.
 - `src/telemetry.rs` builds the subscriber: JSON lines on stdout, plus
-  OpenTelemetry layers when OTLP export is configured. Spans become traces,
+  OpenTelemetry layers, each off until its exporter is attached (endpoints
+  from the environment at startup, from settings once the DB is read; a
+  `reload` layer would break `OpenTelemetrySpanExt`). Spans become traces,
   events become log records with the span's trace id (span events when logs
   aren't exported), and `monotonic_counter.*`/`counter.*`/`histogram.*` event
   fields become metrics. Prometheus `/metrics` is separate.
 - Export is OTLP/HTTP (`http/protobuf` only) through
   `outbound::global().client(Purpose::Observability)`, so
-  `DECKWATCH_EXTRA_CA_FILE` applies. Never put tool arguments, Secret data, env
+  `DECKWATCH_EXTRA_CA_FILE` applies. An endpoint from settings never gets the
+  `OTEL_EXPORTER_OTLP_*HEADERS`. Never put tool arguments, Secret data, env
   values or manifests in span or event fields: they are exported.
 - Tests: `src/telemetry_tests.rs` uses opentelemetry_sdk's in-memory exporters.
   Callsite interest is cached per process, so a test that captures events from
   code other tests also run should use a process-wide subscriber (see
-  `tool_call_events` in `src/handlers/mcp_tests.rs`).
+  `tool_call_events` in `src/handlers/mcp_tests.rs`). Keep the `Telemetry`
+  pipeline alive until the assertions: dropping the subscriber and the last
+  handle shuts its providers down, and the in-memory exporters forget their
+  records on shutdown.
 
 ## Key Files for Common Tasks
 

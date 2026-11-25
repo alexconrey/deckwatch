@@ -113,6 +113,7 @@ minimum Kubernetes version, Helm values, API behaviour.
 | `DECKWATCH_DATABASE_URL` | `--database-url` | `sqlite://deckwatch.db` | Database connection string (SQLite, Postgres, or MySQL) |
 | `DECKWATCH_CACHE_DIR` | `--cache-dir` | _(unset: no cache)_ | Directory for deckwatch's cache of compiled plugins, kept in `<dir>/wasmtime` (Helm: `cache`, an emptyDir at `/var/cache/deckwatch`). Unset, or a directory deckwatch can't use: plugins are compiled on every call; see [plugin compile cache](#helm-chart-plugin-compile-cache) |
 | `RUST_LOG` | — | `deckwatch=info,tower_http=info,mcp_k8s=info,extism::pdk=info,opentelemetry=warn` | Log filter (Helm: `logFilter`). `mcp_k8s` is the embedded library behind most MCP tools; `extism::pdk` carries plugin log lines; `opentelemetry` reports failed OTLP exports ([docs/TRACING.md](docs/TRACING.md#10-deckwatchs-own-telemetry)) |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | — | _(unset)_ | OTLP/HTTP base URL for deckwatch's own traces, logs and metrics (Helm: `telemetry.otlp`). The endpoints can also be set in **Settings → Observability**; a variable wins, per signal. Read at startup ([docs/TRACING.md](docs/TRACING.md#10-deckwatchs-own-telemetry)) |
 | `TOKIO_WORKER_THREADS` | — | One per CPU the container may use, at least 2 | Async worker threads (Helm: `extraEnv`); see [extra environment variables](#helm-chart-extra-environment-variables) |
 
 ### Helm chart: probes

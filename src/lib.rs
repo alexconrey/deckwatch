@@ -60,21 +60,14 @@ use state::AppState;
 pub async fn run() {
     let _ = rustls::crypto::ring::default_provider().install_default();
 
-    // JSON logs on stdout, plus OpenTelemetry export of deckwatch's own
-    // telemetry when an OTEL_EXPORTER_OTLP_*ENDPOINT is set (src/telemetry.rs).
-    let telemetry = telemetry::Telemetry::from_env();
-    telemetry::subscriber(
-        logging::env_filter(),
-        telemetry.telemetry(),
-        std::io::stdout,
-    )
-    .init();
-    telemetry.log();
-    // Plugins get the trace context of their call (`trace_context`), so
-    // their own API calls join the trace, only while traces are exported.
-    if telemetry.telemetry().is_some_and(|t| t.signals().traces) {
-        plugin_events::install_trace_context_provider(plugin_events::otel_traceparent);
-    }
+    // JSON logs on stdout from the first line. deckwatch's own telemetry is
+    // exported over OTLP for each signal with an endpoint: one set by an
+    // OTEL_EXPORTER_OTLP_*ENDPOINT variable from here, one in Settings →
+    // Observability once the database is read (src/telemetry.rs).
+    let (subscriber, telemetry) = telemetry::subscriber(logging::env_filter(), std::io::stdout);
+    subscriber.init();
+    telemetry.start();
+    install_trace_context_provider(&telemetry);
 
     metrics::init();
 
@@ -190,6 +183,13 @@ pub async fn run() {
     // logged and skipped so a bad plugin URL never blocks startup.
     {
         let settings = handlers::settings::load_settings_from_db(&state).await;
+        // The second phase of deckwatch's own telemetry: the endpoints in
+        // settings, for the signals no variable sets. A change applies at
+        // the next restart.
+        telemetry.apply_settings(&settings.observability.clone().unwrap_or_default());
+        install_trace_context_provider(&telemetry);
+        telemetry::install_global(telemetry.clone());
+        handlers::settings::warn_about_retired_otlp_endpoint(&state, &settings).await;
         state
             .plugin_telemetry
             .keep_plugins(plugins::enabled_plugin_names(&settings));
@@ -246,6 +246,15 @@ pub async fn run() {
 
     tracing::info!(%addr, "listening");
     axum::serve(listener, app).await.expect("server error");
+}
+
+/// Plugins get the trace context of their call (`trace_context`), so their
+/// own API calls join the trace, only while traces are exported. Installing
+/// it again is a no-op.
+fn install_trace_context_provider(pipeline: &telemetry::Telemetry) {
+    if pipeline.is_on(telemetry::endpoints::Signal::Traces) {
+        plugin_events::install_trace_context_provider(plugin_events::otel_traceparent);
+    }
 }
 
 /// The "connecting to database" line. A PostgreSQL or MySQL URL can carry
