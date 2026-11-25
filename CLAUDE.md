@@ -434,7 +434,10 @@ Key files: `src/plugins.rs` (fetch, execute, merge), `src/handlers/plugins.rs`
 - Tests: `src/telemetry_tests.rs` uses opentelemetry_sdk's in-memory exporters.
   Callsite interest is cached per process, so a test that captures events from
   code other tests also run should use a process-wide subscriber (see
-  `tool_call_events` in `src/handlers/mcp_tests.rs`).
+  `tool_call_events` in `src/handlers/mcp_tests.rs`). Keep the `Telemetry`
+  pipeline alive until the assertions: dropping the subscriber and the last
+  handle shuts its providers down, and the in-memory exporters forget their
+  records on shutdown.
 
 ## Key Files for Common Tasks
 
