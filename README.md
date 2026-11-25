@@ -113,6 +113,68 @@ minimum Kubernetes version, Helm values, API behaviour.
 | `DECKWATCH_FRONTEND_DIR` | `--frontend-dir` | `frontend/dist` | Path to built SPA |
 | `DECKWATCH_DATABASE_URL` | `--database-url` | `sqlite://deckwatch.db` | Database connection string (SQLite, Postgres, or MySQL) |
 | `RUST_LOG` | — | `deckwatch=info,tower_http=info,mcp_k8s=info,extism::pdk=info,opentelemetry=warn` | Log filter (Helm: `logFilter`). `mcp_k8s` is the embedded library behind most MCP tools; `extism::pdk` carries plugin log lines; `opentelemetry` reports failed OTLP exports ([docs/TRACING.md](docs/TRACING.md#10-deckwatchs-own-telemetry)) |
+| `TOKIO_WORKER_THREADS` | — | One per CPU the container may use | Async worker threads (Helm: `extraEnv`). A CPU limit under 2 cores gives one; see [extra environment variables](#helm-chart-extra-environment-variables) |
+
+### Helm chart: probes
+
+The chart's `livenessProbe`, `readinessProbe` and `startupProbe` values are
+the deckwatch container's probes. Each is a Kubernetes Probe object, passed to
+the container unchanged:
+
+| Value | Default | On failure |
+|-------|---------|------------|
+| `startupProbe` | `GET /api/healthz` every 5 s, 5 s timeout, 60 failures (5 minutes) | Restarts the container |
+| `livenessProbe` | `GET /api/healthz` every 10 s, 5 s timeout, 3 failures | Restarts the container |
+| `readinessProbe` | `GET /api/readyz` every 10 s, 5 s timeout, 3 failures | Takes the pod out of the Service until it passes again |
+
+deckwatch fetches and compiles every enabled plugin before it starts serving
+HTTP. Kubernetes runs the liveness and readiness probes only after the startup
+probe succeeds, so neither has an initial delay, and the startup probe sets how
+long deckwatch has to start. Plugins load one at a time, and each download can
+take up to 30 s; if yours need more than 5 minutes, raise
+`startupProbe.failureThreshold`. `/api/readyz` also checks that deckwatch can
+reach the Kubernetes API. Liveness and readiness wait 5 s for an answer, rather
+than Kubernetes' default of 1 s, so a few slow answers from a busy pod don't
+restart it or take it out of the Service.
+
+```yaml
+startupProbe:
+  failureThreshold: 120   # 10 minutes to start
+livenessProbe:
+  timeoutSeconds: 10
+```
+
+Helm merges your values into these defaults. To switch a probe to another
+handler, set `httpGet: null` next to the new one. To remove a probe, set it to
+`null` (`--set startupProbe=null`; `{}` keeps the defaults). Without the
+startup probe, give `livenessProbe` an `initialDelaySeconds` that covers
+startup.
+
+### Helm chart: extra environment variables
+
+`extraEnv` is a list of Kubernetes `EnvVar` objects (`name`, plus `value` or
+`valueFrom`), added to the deckwatch container after the variables the chart
+sets. Don't repeat one of those; use the chart's value for it instead
+(`logFilter` for `RUST_LOG`, for example), because a duplicate name fails
+server-side apply. Environment variable values are strings, so quote numbers.
+
+```yaml
+extraEnv:
+  - name: TOKIO_WORKER_THREADS
+    value: "4"
+```
+
+`TOKIO_WORKER_THREADS` sets how many worker threads deckwatch's async runtime
+(tokio) runs. The default is one per CPU the container may use, and Rust counts
+a CPU limit in whole cores, rounded down, with a minimum of one. Any limit
+under 2 cores, including the chart's default of `200m`, therefore gives a
+single worker. Plugin calls currently hold a worker for as long as they run,
+their HTTP requests included
+([#385](https://github.com/alexconrey/deckwatch/issues/385)), and while the
+only worker is busy, deckwatch answers nothing, its health checks included.
+More workers don't raise the CPU limit, but they keep deckwatch answering while
+a plugin waits on the network. Use a positive integer; deckwatch doesn't start
+with anything else.
 
 ## Architecture
 
