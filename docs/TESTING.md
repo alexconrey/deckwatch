@@ -260,7 +260,10 @@ version matches the installed one.
   change. Timers still run; specs that need polling to happen (e.g. two
   metric samples for a sparkline) advance them with
   `app.runTimers(ms)`. While a screenshot is taken the timers are paused,
-  so a poll cannot flash a progress bar into it.
+  so a poll cannot flash a progress bar into it. A spec that captures
+  something that closes itself (a snackbar, a cluster-alert toast) calls
+  `app.freezeTimers()` as soon as it is visible, so a slow machine can't
+  let it time out before the capture.
 - **Environment:**
   - viewport 1440x900 (1200 and 900 for the responsive shots);
   - `deviceScaleFactor` 1;
