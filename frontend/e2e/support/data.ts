@@ -21,6 +21,7 @@ import type {
   McpActivityResponse,
   NodeSummary,
   ObservabilityStatus,
+  OtelInjectionSettings,
   OtlpSignalExport,
   OutboundStatus,
   PluginEventReport,
@@ -1042,6 +1043,17 @@ function monitor(): Record<string, MonitorSettings> {
   };
 }
 
+/** storefront injects OpenTelemetry with one extra attribute; the others don't. */
+function appObservability(): Record<string, OtelInjectionSettings> {
+  return {
+    storefront: {
+      enabled: true,
+      service_name: null,
+      resource_attributes: [{ key: "deployment.environment", value: "prod" }],
+    },
+  };
+}
+
 function history(): Record<string, RevisionSummary[]> {
   return {
     web: [
@@ -1379,6 +1391,10 @@ export interface MockState {
   gitops: Record<string, GitOpsStatus>;
   builds: BuildSummary[];
   monitor: Record<string, MonitorSettings>;
+  /** Each application's OpenTelemetry injection settings; missing = off. */
+  appObservability: Record<string, OtelInjectionSettings>;
+  /** OTEL_* variables a workload sets itself, by workload name. */
+  otelKept: Record<string, string[]>;
   history: Record<string, RevisionSummary[]>;
   revisionYaml: Record<number, string>;
   ingresses: IngressDetail[];
@@ -1428,6 +1444,8 @@ export function createMockState(): MockState {
     gitops: gitops(),
     builds: builds(),
     monitor: monitor(),
+    appObservability: appObservability(),
+    otelKept: { api: ["OTEL_SERVICE_NAME"] },
     history: history(),
     revisionYaml: {
       7: revisionYaml("nginx:1.25", "          resources:\n            requests:\n              cpu: 250m\n"),

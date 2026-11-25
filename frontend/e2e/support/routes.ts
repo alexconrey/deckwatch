@@ -1,4 +1,11 @@
-import type { ApplicationDetail, DeploymentDetailResponse, PluginStatus } from "@/types/api";
+import type {
+  ApplicationDetail,
+  ApplicationObservability,
+  DeploymentDetailResponse,
+  OtelInjectionSettings,
+  PluginStatus,
+  WorkloadInjection,
+} from "@/types/api";
 import { FIXED_NOW, ago, deploymentYaml, manifestFor, mcpActivity, type MockState } from "./data";
 import { HOLD, type MockApi, apiError, created, noContent, ok } from "./mock-api";
 
@@ -133,6 +140,87 @@ export function installDefaultRoutes(api: MockApi, state: MockState): void {
     app.deployments = app.deployments.filter((d) => d.name !== req.params.resource);
     app.cronjobs = app.cronjobs.filter((c) => c.name !== req.params.resource);
     return ok(app);
+  });
+  // The Observability section, computed from the settings' endpoints, the
+  // application's injection settings and the PodMonitors in state.monitor.
+  const observabilityOf = (app: ApplicationDetail): ApplicationObservability => {
+    const otel: OtelInjectionSettings = state.appObservability[app.name] ?? {
+      enabled: false,
+      service_name: null,
+      resource_attributes: [],
+    };
+    const otlp = state.settings.observability?.otlp_endpoint || null;
+    const metrics = state.settings.observability?.otlp_metrics_endpoint || null;
+    const names = [
+      otlp && "OTEL_EXPORTER_OTLP_ENDPOINT",
+      metrics && "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT",
+      "OTEL_EXPORTER_OTLP_PROTOCOL",
+      "OTEL_RESOURCE_ATTRIBUTES",
+      "OTEL_SERVICE_NAME",
+      !otlp && "OTEL_TRACES_EXPORTER",
+      !metrics && "OTEL_METRICS_EXPORTER",
+      !otlp && "OTEL_LOGS_EXPORTER",
+    ]
+      .filter((n): n is string => !!n)
+      .sort();
+    const injecting = otel.enabled && (otlp !== null || metrics !== null);
+    const workload = (kind: WorkloadInjection["kind"], name: string): WorkloadInjection => {
+      const kept = otel.enabled ? (state.otelKept[name] ?? []) : [];
+      return {
+        kind,
+        name,
+        container: name,
+        state: injecting ? "injected" : "off",
+        injected: injecting ? names.filter((n) => !kept.includes(n)) : [],
+        kept,
+        exports_itself: false,
+      };
+    };
+    return {
+      prometheus: {
+        available: state.features.prometheus,
+        unavailable_reason: state.features.prometheus
+          ? null
+          : "Prometheus monitoring is disabled. Enable it in Settings.",
+        deployments: app.deployments.map((d) => {
+          const m = app.namespace === "default" ? state.monitor[d.name] : undefined;
+          return {
+            deployment: d.name,
+            enabled: !!m,
+            name: `${d.name}-deckwatch`,
+            port: m?.port ?? "http",
+            path: m?.path ?? "/metrics",
+            interval: m?.interval ?? "30s",
+          };
+        }),
+      },
+      opentelemetry: {
+        ...otel,
+        otlp_endpoint: otlp,
+        otlp_metrics_endpoint: metrics,
+        signals: [
+          { signal: "traces", endpoint: otlp && `${otlp}/v1/traces` },
+          { signal: "metrics", endpoint: metrics },
+          { signal: "logs", endpoint: otlp && `${otlp}/v1/logs` },
+        ],
+        workloads: [
+          ...app.deployments.map((d) => workload("Deployment", d.name)),
+          ...app.cronjobs.map((c) => workload("CronJob", c.name)),
+        ],
+        workloads_error: null,
+      },
+    };
+  };
+  api.on("GET", "/namespaces/:ns/applications/:name/observability", (req) => {
+    const app = findApp(req.params.ns, req.params.name);
+    return app ? ok(observabilityOf(app)) : notFound(`application/${req.params.name}`);
+  });
+  api.on("PUT", "/namespaces/:ns/applications/:name/observability", (req) => {
+    const app = findApp(req.params.ns, req.params.name);
+    if (!app) return notFound(`application/${req.params.name}`);
+    const body = req.body as { opentelemetry?: OtelInjectionSettings };
+    if (body.opentelemetry) state.appObservability[app.name] = body.opentelemetry;
+    return ok(observabilityOf(app));
   });
   api.on("GET", "/namespaces/:ns/applications/:name/plugins", (req) =>
     ok(state.applicationPlugins[req.params.name] ?? []),

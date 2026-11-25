@@ -114,6 +114,31 @@ eachTheme(() => {
     await app.snap("applications/provision-select");
   });
 
+  test("application detail observability tab", async ({ app, page }) => {
+    await app.goto("/applications/default/storefront");
+    await page.getByRole("tab", { name: "Observability" }).click();
+    await expect(page.getByTestId("app-otel-workloads").getByText("OTEL_SERVICE_NAME")).toBeVisible();
+    await app.snap("applications/detail-observability", { fullPage: true });
+  });
+
+  test("observability tab without an OTLP endpoint", async ({ app, page, mockState }) => {
+    mockState.settings.observability = { otlp_endpoint: "", otlp_metrics_endpoint: "" };
+    await app.goto("/applications/default/billing");
+    await page.getByRole("tab", { name: "Observability" }).click();
+    await expect(page.getByTestId("app-otel-no-endpoint")).toBeVisible();
+    await app.snap("applications/detail-observability-no-endpoint", { fullPage: true });
+  });
+
+  test("turn on OpenTelemetry injection confirmation", async ({ app, page }) => {
+    await app.goto("/applications/default/billing");
+    await page.getByRole("tab", { name: "Observability" }).click();
+    const otel = page.getByTestId("app-otel");
+    await otel.getByLabel("Inject OpenTelemetry variables").check();
+    await otel.getByRole("button", { name: "Save" }).click();
+    await expect(app.dialog("Turn on OpenTelemetry injection?")).toBeVisible();
+    await app.snap("applications/otel-turn-on-confirm");
+  });
+
   test("edit application dialog", async ({ app, page }) => {
     await openStorefront(app);
     await page.getByRole("button", { name: "Edit" }).click();
