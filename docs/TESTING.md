@@ -272,8 +272,9 @@ version matches the installed one.
   `app.runTimers(ms)`. While a screenshot is taken the timers are paused,
   so a poll cannot flash a progress bar into it. A spec that captures
   something that closes itself (a snackbar, a cluster-alert toast) calls
-  `app.freezeTimers()` as soon as it is visible, so a slow machine can't
-  let it time out before the capture.
+  `app.freezeTimers()` before the action that shows it, so a slow machine
+  can't let it time out before the capture. Until the screenshot,
+  `app.settle()` then steps the clock instead of waiting on page timers.
 - **Environment:**
   - viewport 1440x900 (1200 and 900 for the responsive shots);
   - `deviceScaleFactor` 1;
