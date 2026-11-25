@@ -98,6 +98,7 @@ test.describe("Deployments tab", () => {
     await openRowAction(page, "web", "Scale");
 
     const dialog = app.dialog("Scale Deployment");
+    await app.autofocused(dialog.getByLabel("Replicas"));
     await expect(dialog.getByText("Set replica count for web:")).toBeVisible();
     const replicas = dialog.getByRole("spinbutton", { name: "Replicas" });
     await expect(replicas).toHaveValue("3");
@@ -127,6 +128,7 @@ test.describe("Deployments tab", () => {
     await openRowAction(page, "worker", "Delete");
 
     const dialog = app.dialog("Delete Deployment");
+    await app.autofocused(dialog.getByRole("textbox"));
     const confirm = dialog.getByRole("button", { name: "Delete" });
     await expect(confirm).toBeDisabled();
     await dialog.getByRole("textbox").fill("worke");
@@ -159,6 +161,7 @@ test.describe("CronJobs tab", () => {
     await page.getByRole("button", { name: "New CronJob" }).click();
 
     const dialog = app.dialog("New CronJob");
+    await app.autofocused(dialog.getByLabel("Name"));
     await expect(dialog.getByLabel("Name")).toBeFocused();
     await dialog.getByLabel("Name").fill("Db_Vacuum");
     await expect(dialog.getByText("Lowercase alphanumeric or '-', start/end alphanumeric")).toBeVisible();
@@ -188,6 +191,7 @@ test.describe("CronJobs tab", () => {
     await row(page, "cache-warmer").getByTitle("Edit").click();
 
     const dialog = app.dialog("Edit cache-warmer");
+    await app.autofocused(dialog.getByLabel("Name"));
     await expect(dialog.getByLabel("Name")).toHaveValue("cache-warmer");
     await expect(dialog.getByLabel("Name")).toHaveAttribute("readonly", "");
     await expect(dialog.getByText("Leave blank to keep existing image")).toBeVisible();
@@ -241,6 +245,7 @@ test.describe("Secrets tab", () => {
     await page.getByRole("button", { name: "Create Secret" }).click();
 
     const dialog = app.dialog("Create Secret");
+    await app.autofocused(dialog.getByLabel("Name"));
     await dialog.getByLabel("Name").fill("smtp");
     await expect(dialog.getByLabel("Type")).toHaveValue("Opaque");
 
@@ -313,6 +318,7 @@ test.describe("Secrets tab", () => {
     await app.goto("/deployments?tab=secrets");
     await page.getByRole("button", { name: "Create Secret" }).click();
     const dialog = app.dialog("Create Secret");
+    await app.autofocused(dialog.getByLabel("Name"));
     await expect(dialog).toHaveAttribute("aria-modal", "true");
     await expect(dialog.getByLabel("Name")).toBeFocused();
 
@@ -331,6 +337,7 @@ test.describe("ConfigMaps tab", () => {
 
     await mockApi.waitForRequest("GET", "/namespaces/default/configmaps/app-config");
     const dialog = app.dialog("Edit app-config");
+    await app.autofocused(dialog.getByLabel("Name"));
     await expect(dialog.getByLabel("Name")).toHaveValue("app-config");
     await expect(dialog.getByLabel("Key")).toHaveCount(2);
     await expect(dialog.getByLabel("Key").first()).toHaveValue("LOG_LEVEL");
@@ -349,6 +356,7 @@ test.describe("ConfigMaps tab", () => {
     await app.goto("/deployments?tab=configmaps");
     await page.getByRole("button", { name: "Create ConfigMap" }).click();
     const dialog = app.dialog("Create ConfigMap");
+    await app.autofocused(dialog.getByLabel("Name"));
     await dialog.getByLabel("Name").fill("Bad Name");
     await dialog.getByRole("button", { name: "Create" }).click();
     await expect(dialog.getByRole("alert").filter({ hasText: "Invalid configmap name" })).toBeVisible();
@@ -369,6 +377,7 @@ test.describe("ServiceAccounts tab", () => {
     await page.getByRole("button", { name: "Create ServiceAccount" }).click();
 
     const dialog = app.dialog("Create ServiceAccount");
+    await app.autofocused(dialog.getByLabel("Name"));
     await dialog.getByLabel("Name").fill("billing-worker");
     await dialog.getByLabel("IRSA Role ARN (optional)").fill("  arn:aws:iam::123456789012:role/billing  ");
     await dialog.getByRole("button", { name: "Create" }).click();
@@ -385,6 +394,7 @@ test.describe("ServiceAccounts tab", () => {
     await app.goto("/deployments?tab=serviceaccounts");
     await page.getByRole("button", { name: "Create ServiceAccount" }).click();
     const dialog = app.dialog("Create ServiceAccount");
+    await app.autofocused(dialog.getByLabel("Name"));
     await dialog.getByLabel("Name").fill("plain");
     await dialog.getByRole("button", { name: "Create" }).click();
     const call = await mockApi.waitForRequest("POST", "/namespaces/default/serviceaccounts");

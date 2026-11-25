@@ -15,9 +15,11 @@ const probeCard = (page: Page, probe: string) =>
   page.locator(".v-card", { has: page.getByLabel(probe, { exact: true }), hasNot: page.locator(".v-card") });
 
 /** Open a v-select by clicking its field (the inner input is 1 character wide). */
-async function chooseOption(page: Page, combobox: Locator, option: string): Promise<void> {
-  await openSelect(combobox);
-  await page.getByRole("option", { name: option, exact: true }).click();
+async function chooseOption(combobox: Locator, option: string): Promise<void> {
+  // Scoped to the open menu: a just-closed menu of another select can still
+  // be in the DOM (Vuetify 4), with the same options.
+  const menu = await openSelect(combobox);
+  await menu.getByRole("option", { name: option, exact: true }).click();
 }
 
 async function openForm(app: { goto(path: string): Promise<void> }, page: Page): Promise<void> {
@@ -41,7 +43,7 @@ test.describe("Create deployment form", () => {
     await ports.nth(0).fill("8080");
     await page.getByRole("textbox", { name: "Name (optional)" }).nth(0).fill(" http ");
     await ports.nth(1).fill("8125");
-    await chooseOption(page, page.getByRole("combobox", { name: "Protocol" }).nth(1), "UDP");
+    await chooseOption(page.getByRole("combobox", { name: "Protocol" }).nth(1), "UDP");
 
     // Env rows without a name are dropped.
     await page.getByRole("button", { name: "Add Variable" }).click();
@@ -60,14 +62,12 @@ test.describe("Create deployment form", () => {
 
     const readiness = probeCard(page, "Readiness Probe");
     await readiness.getByLabel("Readiness Probe", { exact: true }).check();
-    await openSelect(readiness.getByRole("combobox", { name: "Type" }));
-    await page.getByRole("option", { name: "TCP Socket" }).click();
+    await chooseOption(readiness.getByRole("combobox", { name: "Type" }), "TCP Socket");
     await readiness.getByRole("spinbutton", { name: "Port" }).fill("8080");
 
     const startup = probeCard(page, "Startup Probe");
     await startup.getByLabel("Startup Probe", { exact: true }).check();
-    await openSelect(startup.getByRole("combobox", { name: "Type" }));
-    await page.getByRole("option", { name: "Exec" }).click();
+    await chooseOption(startup.getByRole("combobox", { name: "Type" }), "Exec");
     await startup.getByRole("textbox", { name: "Command (comma-separated)" }).fill("cat, /tmp/ready, ");
     await startup.getByRole("spinbutton", { name: "Failure Threshold" }).fill("30");
 
