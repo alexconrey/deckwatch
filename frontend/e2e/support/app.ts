@@ -22,6 +22,22 @@ export interface SnapOptions {
 }
 
 /**
+ * Runs in the page. "network": no fetch in flight (counted in fixtures.ts)
+ * and the web fonts loaded. "rendering": no running animation and no Vue
+ * transition in progress. "all": both at once.
+ */
+const pageIdle = (what: "network" | "rendering" | "all"): boolean => {
+  const network =
+    !(window as unknown as { __e2eFetchesInFlight?: number }).__e2eFetchesInFlight &&
+    document.fonts.status === "loaded";
+  if (what === "network") return network;
+  const rendering =
+    !document.getAnimations().some((a) => a.playState === "running" || a.pending) &&
+    !document.querySelector('[class*="-enter-active"], [class*="-leave-active"]');
+  return what === "rendering" ? rendering : network && rendering;
+};
+
+/**
  * Helpers shared by the functional and visual specs: navigation that keeps
  * the frozen clock, waiting for the UI to settle, and screenshots.
  */
@@ -30,6 +46,8 @@ export class App {
   readonly pageErrors: Error[] = [];
   /** Set in a test that expects the page to throw. */
   allowPageErrors = false;
+  /** The page's timers are paused (freezeTimers) until the next snap(). */
+  private frozen = false;
 
   constructor(
     readonly page: Page,
@@ -67,20 +85,36 @@ export class App {
    */
   async settle(): Promise<void> {
     await this.api.waitForQuiet();
-    await this.page.waitForFunction(() => {
-      const fetches = (window as unknown as { __e2eFetchesInFlight?: number }).__e2eFetchesInFlight;
-      if (fetches) return false;
-      if (document.fonts.status !== "loaded") return false;
-      const busy = document
-        .getAnimations()
-        .some((a) => a.playState === "running" || a.pending);
-      if (busy) return false;
-      return !document.querySelector('[class*="-enter-active"], [class*="-leave-active"]');
-    });
-    await this.page.evaluate(
-      () => new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))),
-    );
+    if (this.frozen) {
+      // requestAnimationFrame is paused with the other timers, and Vue ends
+      // its transitions on animation frames: step the clock a frame at a
+      // time instead of waiting.
+      await this.page.waitForFunction(pageIdle, "network" as const);
+      for (let frames = 0; !(await this.page.evaluate(pageIdle, "rendering" as const)); frames++) {
+        if (frames === 60) throw new Error("the page kept changing for 60 frames while its timers were frozen");
+        await this.page.clock.runFor(17);
+      }
+      await this.page.clock.runFor(34);
+    } else {
+      await this.page.waitForFunction(pageIdle, "all" as const);
+      await this.page.evaluate(
+        () => new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))),
+      );
+    }
     await this.api.waitForQuiet();
+  }
+
+  /**
+   * Pause the page's timers now, before a screenshot of something that
+   * closes itself: a snackbar (3s) or a cluster-alert toast (5s). Timers
+   * otherwise run in real time, and on a loaded machine the element could
+   * close between the assertion that it is visible and the capture.
+   * snap() resumes them after the screenshot.
+   */
+  async freezeTimers(): Promise<void> {
+    await this.page.clock.pauseAt(FIXED_NOW);
+    this.frozen = true;
+    await this.settle();
   }
 
   /**
@@ -147,6 +181,7 @@ export class App {
       }
     } finally {
       await this.page.clock.resume();
+      this.frozen = false;
       if (restore) {
         await this.page.setViewportSize(restore);
         await this.settle();

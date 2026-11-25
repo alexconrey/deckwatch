@@ -59,6 +59,7 @@ eachTheme(() => {
     await page.getByRole("option", { name: "otel" }).click();
     await dialog.getByRole("button", { name: "Associate" }).click();
     await expect(page.getByText('Plugin "otel" associated')).toBeVisible();
+    await app.freezeTimers();
     await app.snap("shell/snackbar");
   });
 
@@ -94,6 +95,7 @@ eachTheme(() => {
     await app.goto("/applications");
     await app.runTimers(15_000);
     await expect(page.getByRole("alert").filter({ hasText: "Unhealthy" })).toBeVisible();
+    await app.freezeTimers();
     await app.snap("shell/cluster-alert-toast");
   });
 });

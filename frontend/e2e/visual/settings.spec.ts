@@ -179,6 +179,7 @@ eachTheme(() => {
       await app.goto("/settings");
       await page.getByRole("button", { name: "Save" }).first().click();
       await expect(page.getByText("Settings saved")).toBeVisible();
+      await app.freezeTimers();
       await app.snap("settings/saved-snackbar");
     });
 
@@ -208,6 +209,7 @@ eachTheme(() => {
       await app.goto("/settings/plugins/otel");
       await page.getByRole("button", { name: "Save configuration" }).click();
       await expect(page.getByText("Plugin configuration saved")).toBeVisible();
+      await app.freezeTimers();
       await app.snap("plugin-settings/saved-snackbar");
     });
 

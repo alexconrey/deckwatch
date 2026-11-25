@@ -237,6 +237,16 @@ Bump `@playwright/test` and the `e2e` job's container image in
 if they differ. Then regenerate the baselines with the new image and
 check that the diffs are only rendering noise.
 
+**Bumping Vite** can change rendering too. Vite 8 minifies CSS with
+Lightning CSS, which shortens numbers to six significant digits
+(`33.3333333333%` becomes `33.3333%`, `.0892857143em` becomes
+`.0892857em`). Those values move some columns and labels by a fraction of
+a pixel. When the suite had 328 screenshots, building with Vite 6.4.6
+instead of 8.3.8 changed 190 of them, each by glyphs shifted less than a
+pixel (at most 409 changed pixels). The baselines come from the Vite 8
+build, so treat a build-tool upgrade like a Playwright bump: regenerate
+the baselines in that PR and check that each diff is only rendering.
+
 ### Why a Docker image
 
 Screenshots depend on fonts, font hinting and the browser build.
@@ -260,7 +270,10 @@ version matches the installed one.
   change. Timers still run; specs that need polling to happen (e.g. two
   metric samples for a sparkline) advance them with
   `app.runTimers(ms)`. While a screenshot is taken the timers are paused,
-  so a poll cannot flash a progress bar into it.
+  so a poll cannot flash a progress bar into it. A spec that captures
+  something that closes itself (a snackbar, a cluster-alert toast) calls
+  `app.freezeTimers()` as soon as it is visible, so a slow machine can't
+  let it time out before the capture.
 - **Environment:**
   - viewport 1440x900 (1200 and 900 for the responsive shots);
   - `deviceScaleFactor` 1;
