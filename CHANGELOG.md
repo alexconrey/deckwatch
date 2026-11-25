@@ -195,6 +195,17 @@ first.
   `POST /mcp`), make state-changing requests, and open pod exec and
   port-forward sockets. See Upgrade notes. This doesn't add authentication:
   anyone who can reach deckwatch directly can still use the API. (#205)
+- **Security headers on every response, and registry manifests can't be
+  served as web pages.** Every response, pages opened through the pod proxy
+  included, now carries `X-Content-Type-Options: nosniff`,
+  `X-Frame-Options: SAMEORIGIN`, `Content-Security-Policy: frame-ancestors
+  'self'` and `Referrer-Policy: same-origin`: other sites can't frame
+  deckwatch, and browsers don't guess a response's type. The registry served
+  a pushed manifest with whatever media type the manifest declared, from
+  deckwatch's origin. Manifests are now served only as OCI or Docker
+  manifest and index media types, anything else as
+  `application/octet-stream`, and every `/v2` response carries a sandboxing
+  Content-Security-Policy. (#344)
 - **Secrets leaked from the public `GET /api/settings`:** plugin credentials
   in `plugins[].config`, notification webhook URLs and git-token ciphertext
   were returned in clear to any caller. MCP `get_plugin_config` returned

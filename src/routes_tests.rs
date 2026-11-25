@@ -5,21 +5,8 @@ use axum::body::Body;
 use axum::http::{Method, Request};
 use tower::ServiceExt;
 
-/// The `/v2/{*rest}` router exactly as `build_router` mounts it, minus the
-/// rest of the app (which needs a kube client).
-fn oci_router(store: RegistryStore) -> Router {
-    Router::new()
-        .route(
-            "/v2/{*rest}",
-            get(oci_dispatch_get)
-                .head(oci_dispatch_head)
-                .post(oci_dispatch_post)
-                .patch(oci_dispatch_patch)
-                .put(oci_dispatch_put)
-                .delete(oci_dispatch_delete),
-        )
-        .with_state(store)
-}
+// `oci_router` is the `/v2` router exactly as `build_router` mounts it; the
+// rest of the app needs a kube client.
 
 async fn fs_store(root: &std::path::Path) -> RegistryStore {
     let store = RegistryStore::filesystem(root);
@@ -119,5 +106,163 @@ async fn oci_put_and_get_manifest_for_valid_name_still_works() {
             StatusCode::OK,
             "GET {uri}"
         );
+    }
+}
+
+/// The whole app as `run()` serves it, with a test database, a registry in
+/// `dir` and a frontend holding only `index.html`.
+async fn app(dir: &std::path::Path) -> Router {
+    let state = crate::plugin_fixture::test_state(dir, vec![], None).await;
+    let store = fs_store(&dir.join("registry")).await;
+    let frontend = dir.join("frontend");
+    std::fs::create_dir_all(&frontend).unwrap();
+    std::fs::write(
+        frontend.join("index.html"),
+        "<!doctype html><title>deckwatch</title>",
+    )
+    .unwrap();
+    build_router(
+        state,
+        Some(store),
+        frontend.to_str().unwrap(),
+        dir.join("no-book").to_str().unwrap(),
+        AuthConfig::from_settings(None),
+    )
+}
+
+async fn call(app: &Router, request: Request<Body>) -> axum::response::Response {
+    app.clone().oneshot(request).await.expect("oneshot")
+}
+
+fn header_values(response: &axum::response::Response, name: &str) -> Vec<String> {
+    response
+        .headers()
+        .get_all(name)
+        .iter()
+        .map(|v| v.to_str().unwrap().to_string())
+        .collect()
+}
+
+fn assert_security_headers(response: &axum::response::Response, what: &str) {
+    assert_eq!(
+        header_values(response, "x-content-type-options"),
+        ["nosniff"],
+        "{what}"
+    );
+    assert_eq!(
+        header_values(response, "x-frame-options"),
+        ["SAMEORIGIN"],
+        "{what}"
+    );
+    assert_eq!(
+        header_values(response, "referrer-policy"),
+        ["same-origin"],
+        "{what}"
+    );
+    assert!(
+        header_values(response, "content-security-policy")
+            .contains(&"frame-ancestors 'self'".to_string()),
+        "{what}"
+    );
+}
+
+#[tokio::test]
+async fn every_kind_of_response_carries_the_security_headers() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let app = app(tmp.path()).await;
+
+    let api = call(
+        &app,
+        Request::get("/api/healthz").body(Body::empty()).unwrap(),
+    )
+    .await;
+    assert_eq!(api.status(), StatusCode::OK);
+    assert_security_headers(&api, "API");
+
+    let asset = call(
+        &app,
+        Request::get("/index.html").body(Body::empty()).unwrap(),
+    )
+    .await;
+    assert_eq!(asset.status(), StatusCode::OK);
+    assert_security_headers(&asset, "static file");
+
+    // A client-side route: the SPA's index.html, from the fallback.
+    let spa = call(
+        &app,
+        Request::get("/deployments/web")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_security_headers(&spa, "SPA fallback");
+
+    // Refused by the cross-site guard before any handler runs.
+    let refused = call(
+        &app,
+        Request::post("/api/namespaces")
+            .header("sec-fetch-site", "cross-site")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(refused.status(), StatusCode::FORBIDDEN);
+    assert_security_headers(&refused, "cross-site refusal");
+
+    let v2 = call(&app, Request::get("/v2/").body(Body::empty()).unwrap()).await;
+    assert_eq!(v2.status(), StatusCode::OK);
+    assert_security_headers(&v2, "registry");
+}
+
+/// A pushed manifest names its own media type; only manifest types may come
+/// back as `Content-Type`, so a manifest can't be served as a web page.
+#[tokio::test]
+async fn manifests_are_served_only_as_manifest_media_types() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let app = app(tmp.path()).await;
+
+    let html = r#"{"schemaVersion":2,"mediaType":"text/html","config":{},"layers":[],"annotations":{"x":"<b>not a page</b>"}}"#;
+    let oci = r#"{"schemaVersion":2,"mediaType":"application/vnd.oci.image.manifest.v1+json","config":{},"layers":[]}"#;
+    let docker = r#"{"schemaVersion":2,"mediaType":"application/vnd.docker.distribution.manifest.v2+json","config":{},"layers":[]}"#;
+    for (tag, body, served) in [
+        ("html", html, "application/octet-stream"),
+        ("oci", oci, "application/vnd.oci.image.manifest.v1+json"),
+        (
+            "docker",
+            docker,
+            "application/vnd.docker.distribution.manifest.v2+json",
+        ),
+    ] {
+        let uri = format!("/v2/team/web/manifests/{tag}");
+        let put = call(
+            &app,
+            Request::put(uri.as_str()).body(Body::from(body)).unwrap(),
+        )
+        .await;
+        assert_eq!(put.status(), StatusCode::CREATED, "PUT {tag}");
+
+        for method in [Method::GET, Method::HEAD] {
+            let response = call(
+                &app,
+                Request::builder()
+                    .method(method.clone())
+                    .uri(uri.as_str())
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::OK, "{method} {tag}");
+            assert_eq!(
+                header_values(&response, "content-type"),
+                [served],
+                "{method} {tag}"
+            );
+            assert_security_headers(&response, tag);
+            assert!(
+                header_values(&response, "content-security-policy")
+                    .contains(&crate::security_headers::REGISTRY_POLICY.to_string()),
+                "{method} {tag}"
+            );
+        }
     }
 }
