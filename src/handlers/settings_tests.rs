@@ -517,41 +517,6 @@ async fn put_without_credentials_does_not_wipe_them() {
     assert_eq!(creds.gcp_sa_key.as_deref(), Some("ciphertext-gcp"));
 }
 
-/// The UI removes a plugin by saving the document without it. Removing the
-/// last one used to start no reload at all, so it kept running.
-#[tokio::test]
-async fn removing_the_last_plugin_unloads_it() {
-    let tmp = tempfile::tempdir().expect("tempdir");
-    let (state, _) = seeded_state(tmp.path()).await;
-    *state.plugins.write().await = vec![crate::plugin_fixture::FixturePlugin::new().loaded("aws")];
-
-    let Json(mut payload) = get_settings(State(state.clone())).await.expect("get");
-    payload.plugins.clear();
-    let _ = put_settings(State(state.clone()), Json(payload))
-        .await
-        .expect("put");
-    assert!(
-        state.plugins.read().await.is_empty(),
-        "the removed plugin is still loaded"
-    );
-}
-
-/// Disabling unloads before the response, without waiting for a reload.
-#[tokio::test]
-async fn disabling_a_plugin_in_settings_unloads_it_right_away() {
-    let tmp = tempfile::tempdir().expect("tempdir");
-    let (state, _) = seeded_state(tmp.path()).await;
-    *state.plugins.write().await = vec![crate::plugin_fixture::FixturePlugin::new().loaded("aws")];
-
-    // The seeded `aws` is configured disabled.
-    let Json(payload) = get_settings(State(state.clone())).await.expect("get");
-    assert!(!payload.plugins[0].enabled);
-    let _ = put_settings(State(state.clone()), Json(payload))
-        .await
-        .expect("put");
-    assert!(state.plugins.read().await.is_empty());
-}
-
 // ── endpoints and credential bindings ───────────────────────────────────────
 
 fn ghe_endpoints() -> EndpointSettings {
@@ -1011,4 +976,41 @@ async fn put_rejects_a_region_that_would_change_the_host() {
     let _ = put_settings(State(state.clone()), Json(payload))
         .await
         .expect("a real region is fine");
+}
+
+// ── removing and disabling plugins ─────────────────────────────────────────
+
+/// The UI removes a plugin by saving the document without it. Removing the
+/// last one used to start no reload at all, so it kept running.
+#[tokio::test]
+async fn removing_the_last_plugin_unloads_it() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let (state, _) = seeded_state(tmp.path()).await;
+    *state.plugins.write().await = vec![crate::plugin_fixture::FixturePlugin::new().loaded("aws")];
+
+    let Json(mut payload) = get_settings(State(state.clone())).await.expect("get");
+    payload.plugins.clear();
+    let _ = put_settings(State(state.clone()), Json(payload))
+        .await
+        .expect("put");
+    assert!(
+        state.plugins.read().await.is_empty(),
+        "the removed plugin is still loaded"
+    );
+}
+
+/// Disabling unloads before the response, without waiting for a reload.
+#[tokio::test]
+async fn disabling_a_plugin_in_settings_unloads_it_right_away() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let (state, _) = seeded_state(tmp.path()).await;
+    *state.plugins.write().await = vec![crate::plugin_fixture::FixturePlugin::new().loaded("aws")];
+
+    // The seeded `aws` is configured disabled.
+    let Json(payload) = get_settings(State(state.clone())).await.expect("get");
+    assert!(!payload.plugins[0].enabled);
+    let _ = put_settings(State(state.clone()), Json(payload))
+        .await
+        .expect("put");
+    assert!(state.plugins.read().await.is_empty());
 }
