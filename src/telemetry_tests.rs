@@ -369,6 +369,7 @@ users:
         encryption_key: String::new(),
         plugins: Arc::new(tokio::sync::RwLock::new(vec![])),
         plugin_patch_fingerprints: Arc::new(tokio::sync::Mutex::new(Default::default())),
+        plugin_telemetry: Default::default(),
     }
 }
 
