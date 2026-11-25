@@ -1,5 +1,6 @@
 import type { Locator, Page } from "@playwright/test";
 import type { App } from "../support/app";
+import { POD_METRICS, WEB, openDeployment } from "./deployment-page";
 import { eachTheme, expect, test } from "./visual-test";
 import { apiError, ok } from "../support/mock-api";
 import { card, field, openMenu } from "../support/ui";
@@ -10,40 +11,6 @@ import { card, field, openMenu } from "../support/ui";
  * logs selects, and the dialogs it opens, including the GitOps dialog whose
  * select `#item` slots changed shape in Vuetify 4.
  */
-
-const WEB = "/deployments/default/web";
-
-const POD_METRICS = "/namespaces/:ns/pods/metrics";
-
-/** Requests every deployment page makes on load. */
-const ON_LOAD = [
-  "/namespaces/:ns/deployments/:name",
-  "/namespaces/:ns/deployments/:name/hpa",
-  "/namespaces/:ns/deployments/:name/gitops",
-  "/namespaces/:ns/deployments/:name/monitor",
-  "/namespaces/:ns/deployments/:name/history",
-  "/namespaces/:ns/events",
-  "/namespaces/:ns/pods/:pod/logs/history",
-  POD_METRICS,
-];
-
-/**
- * Open a deployment, wait for every request it makes on load (a quiet
- * network alone is not proof under load), then fire the 10 s metrics poll
- * once so the CPU/memory sparklines hold two identical samples and draw a
- * flat line instead of a ramp from zero. The poll's fetch can leave the page
- * after `runFor` returns, so wait for the request itself. The next real-time
- * poll is then about 10 s away, well after the screenshot.
- */
-async function openDeployment(app: App, path = WEB): Promise<void> {
-  await app.goto(path);
-  for (const p of ON_LOAD) await app.api.waitForRequest("GET", p);
-  await app.settle();
-  const polls = app.api.requests("GET", POD_METRICS).length;
-  await app.page.clock.runFor(10_000);
-  await expect.poll(() => app.api.requests("GET", POD_METRICS).length).toBeGreaterThan(polls);
-  await app.settle();
-}
 
 async function openGitOpsDialog(app: App, page: Page): Promise<Locator> {
   await card(page, "GitOps").getByRole("button", { name: "Edit" }).click();

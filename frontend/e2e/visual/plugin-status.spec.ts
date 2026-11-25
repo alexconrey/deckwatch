@@ -1,6 +1,7 @@
 import { deprovisionReport, pluginProblems, writePluginEvents } from "../support/data";
 import { apiError, ok } from "../support/mock-api";
 import { card } from "../support/ui";
+import { openDeployment } from "./deployment-page";
 import { eachTheme, expect, test } from "./visual-test";
 
 /**
@@ -142,7 +143,7 @@ eachTheme(() => {
 
   test("deployment saved with plugin events", async ({ app, page, mockState }) => {
     mockState.writePluginEvents = writePluginEvents();
-    await app.goto("/deployments/default/web");
+    await openDeployment(app);
     const labels = card(page, "Labels & Annotations");
     await labels.getByRole("button", { name: "Edit" }).click();
     await labels.getByRole("button", { name: "Save" }).click();
