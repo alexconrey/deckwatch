@@ -7,7 +7,8 @@ info:
     - `/api/*` — application, deployment, namespace, and cluster management
     - `/v2/*`  — OCI Distribution Spec v1.1 (only when the embedded registry is enabled)
     - `/metrics` — Prometheus exposition
-  version: "0.2.1"
+  # Served with the running deckwatch version (src/handlers/docs.rs).
+  version: "0.7.0"
   contact:
     name: Deckwatch
     url: https://github.com/alexconrey/deckwatch

@@ -30,6 +30,8 @@ Changes merged since the last release are listed under `[Unreleased]`.
   have no time limit (#301), but deckwatch now stops waiting for one after 2
   minutes and reports `plugin.timeout`; the call may still finish in the
   background. (#385, #395)
+- The API docs (`/api/docs`) and `/api/openapi.yaml` report the running
+  deckwatch version. The spec said 0.2.1 since that release.
 
 ## [0.7.0] - 2026-11-25
 

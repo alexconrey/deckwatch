@@ -46,8 +46,7 @@ auto-deploys on push.
 
 - A Kubernetes cluster running **1.33 or newer** (k3d, kind, minikube, EKS,
   etc.). Deckwatch is built against the Kubernetes 1.33 API (k8s-openapi
-  `v1_33`), and the Helm chart requires `>=1.33`. Production (Zeus, EKS) runs
-  1.35.
+  `v1_33`), and the Helm chart requires `>=1.33`.
 - `helm` 3.x
 - `docker` (for building the image locally)
 

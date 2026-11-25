@@ -233,12 +233,12 @@ describe("pluginsApi.saveConfig", () => {
     const fetchMock = mockFetchOnce({ status: 204 });
 
     await pluginsApi.saveConfig("aws", {
-      AWS_REGION: "us-gov-west-1",
+      AWS_REGION: "us-west-2",
       BUCKET_PREFIX: "myorg-",
     });
 
     const body = JSON.parse(fetchMock.mock.calls[0][1]?.body as string);
-    expect(body.AWS_REGION).toBe("us-gov-west-1");
+    expect(body.AWS_REGION).toBe("us-west-2");
     expect(body.BUCKET_PREFIX).toBe("myorg-");
   });
 });
