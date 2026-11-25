@@ -443,8 +443,10 @@ which one it used.
    | Errors | `error_type!=""`, except denials (their `error_type` is `permission_denied`) |
    | p95 duration | `histogram_quantile(0.95, sum by (le) (rate(mcp_server_operation_duration_seconds_bucket{mcp_method_name="tools/call"}[5m])))` |
 
-   A call naming a tool deckwatch doesn't have carries no `gen_ai_tool_name`,
-   and the page leaves it out.
+   The time series use `rate()` over 5 minutes (last hour), 15 minutes (24
+   hours) or 1 hour (7 days), and the per-tool figures `increase()` over the
+   whole window. A call naming a tool deckwatch doesn't have carries no
+   `gen_ai_tool_name`, and the page leaves it out.
 
 2. **deckwatch's `/metrics`, the fallback, for one release.** With no OTLP
    series in the window, the page reads deckwatch's own counters, which a
