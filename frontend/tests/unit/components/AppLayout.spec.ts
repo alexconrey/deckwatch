@@ -58,7 +58,16 @@ const Blank = defineComponent({ render: () => h("div") });
 async function mountLayout() {
   const router = createRouter({
     history: createMemoryHistory(),
-    routes: ["Applications", "Deployments", "Registry", "ClusterOverview", "Settings"].map((name) => ({
+    // Every route the app bar links to.
+    routes: [
+      "Applications",
+      "Deployments",
+      "Registry",
+      "ClusterOverview",
+      "McpActivity",
+      "PluginProblems",
+      "Settings",
+    ].map((name) => ({
       path: `/${name.toLowerCase()}`,
       name,
       component: Blank,
