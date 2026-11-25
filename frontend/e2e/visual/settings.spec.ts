@@ -1,4 +1,5 @@
 import type { Page } from "@playwright/test";
+import { GATEWAY_URL, type MockState, movedOutbound } from "../support/data";
 import { apiError } from "../support/mock-api";
 import { openMenu, openSelect, row } from "../support/ui";
 import { eachTheme, expect, test } from "./visual-test";
@@ -11,6 +12,20 @@ import { eachTheme, expect, test } from "./visual-test";
 /** Open a Settings section from the sidebar. */
 async function section(page: Page, title: string): Promise<void> {
   await page.locator(".v-list--nav .v-list-item").filter({ has: page.getByText(title, { exact: true }) }).click();
+}
+
+/** The Anthropic endpoint moved to a gateway after the API key was saved. */
+function movedEndpoint(state: MockState): void {
+  state.settings.endpoints = {
+    anthropic_api_base: GATEWAY_URL,
+    vertex_token_url: "",
+    vertex_api_base: "",
+    bedrock_endpoint: "",
+    github_api_base: "",
+    github_web_base: "",
+    github_raw_base: "",
+  };
+  state.outbound = movedOutbound();
 }
 
 const SECTIONS: [title: string, heading: string][] = [
@@ -91,6 +106,24 @@ eachTheme(() => {
       await dialog.getByLabel("Configure parameters reference").check();
       await expect(dialog.getByLabel("Kind")).toBeVisible();
       await app.snap("settings/ingress-class-dialog");
+    });
+
+    test("endpoints after the Anthropic endpoint moved", async ({ app, page, mockState }) => {
+      movedEndpoint(mockState);
+      await app.goto("/settings");
+      await section(page, "Advanced");
+      await expect(page.getByTestId("binding-anthropic_api_key")).toContainText("The endpoint now points to");
+      await page.getByRole("textbox", { name: "GitHub API base URL" }).fill("https://github.acme.test/api/v3?per_page=100");
+      await expect(page.getByText("Must not contain a query string or fragment.")).toBeVisible();
+      await app.snap("settings/advanced-endpoints-moved", { fullPage: true });
+    });
+
+    test("AI providers with the key bound to the old endpoint", async ({ app, page, mockState }) => {
+      movedEndpoint(mockState);
+      await app.goto("/settings");
+      await section(page, "AI Providers");
+      await expect(page.getByTestId("anthropic-key-binding")).toContainText("but the Anthropic API endpoint is now");
+      await app.snap("settings/ai-providers-key-moved", { fullPage: true });
     });
 
     test("ai provider menu", async ({ app, page }) => {
