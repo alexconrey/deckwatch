@@ -299,16 +299,20 @@ async fn schema_checks_see_columns_and_indexes() {
 /// only those records leaves the same state.
 #[tokio::test]
 async fn the_0_7_0_migrations_run_again_when_their_records_are_lost() {
+    let dir = tempfile::tempdir().unwrap();
+    records_lost(&file_db(dir.path()).await).await;
+}
+
+/// The scenario of the test above, on an empty database `db`.
+async fn records_lost(db: &sea_orm::DatabaseConnection) {
     use sea_orm::{ConnectionTrait, Statement};
     use sea_orm_migration::MigratorTrait;
 
-    let dir = tempfile::tempdir().unwrap();
-    let db = file_db(dir.path()).await;
-    Migrator::up(&db, None).await.expect("migrate");
+    Migrator::up(db, None).await.expect("migrate");
     let backend = db.get_database_backend();
 
     // A token saved under 0.7.0 with its own binding, and one without.
-    crate::db::ensure_application(&db, "prod", "api")
+    crate::db::ensure_application(db, "prod", "api")
         .await
         .unwrap();
     for (id, token, binding) in [
@@ -343,16 +347,16 @@ async fn the_0_7_0_migrations_run_again_when_their_records_are_lost() {
     ))
     .await
     .expect("forget the 0.7.0 records");
-    assert_eq!(recorded_0_7_0(&db).await, 0);
+    assert_eq!(recorded_0_7_0(db).await, 0);
 
-    Migrator::up(&db, None)
+    Migrator::up(db, None)
         .await
         .expect("the 0.7.0 migrations run again");
-    assert_eq!(recorded_0_7_0(&db).await, 3);
-    assert_0_7_0_schema(&db).await;
+    assert_eq!(recorded_0_7_0(db).await, 3);
+    assert_0_7_0_schema(db).await;
 
     let rows = crate::entities::gitops_configs::Entity::find()
-        .all(&db)
+        .all(db)
         .await
         .unwrap();
     let binding = |id: &str| {
@@ -377,13 +381,17 @@ async fn the_0_7_0_migrations_run_again_when_their_records_are_lost() {
 /// was recorded.
 #[tokio::test]
 async fn the_0_7_0_migrations_finish_after_a_crash_halfway_through() {
+    let dir = tempfile::tempdir().unwrap();
+    crash_halfway(&file_db(dir.path()).await).await;
+}
+
+/// The scenario of the test above, on an empty database `db`.
+async fn crash_halfway(db: &sea_orm::DatabaseConnection) {
     use sea_orm_migration::prelude::*;
     use sea_orm_migration::MigratorTrait;
 
-    let dir = tempfile::tempdir().unwrap();
-    let db = file_db(dir.path()).await;
-    migrate_to_0_6(&db).await;
-    let manager = SchemaManager::new(&db);
+    migrate_to_0_6(db).await;
+    let manager = SchemaManager::new(db);
 
     // m20261124_000001: the column, but not the bindings.
     manager
@@ -398,7 +406,7 @@ async fn the_0_7_0_migrations_finish_after_a_crash_halfway_through() {
     // m20261124_000002: the table and its first index, then the crash. The
     // migration really ran, so take its table from the migrator and drop the
     // second index again.
-    Migrator::up(&db, Some(2)).await.expect("000001 and 000002");
+    Migrator::up(db, Some(2)).await.expect("000001 and 000002");
     manager
         .drop_index(
             Index::drop()
@@ -449,9 +457,9 @@ async fn the_0_7_0_migrations_finish_after_a_crash_halfway_through() {
         .unwrap();
     }
 
-    Migrator::up(&db, None)
+    Migrator::up(db, None)
         .await
         .expect("the migrations finish what the crash left");
-    assert_eq!(recorded_0_7_0(&db).await, 3);
-    assert_0_7_0_schema(&db).await;
+    assert_eq!(recorded_0_7_0(db).await, 3);
+    assert_0_7_0_schema(db).await;
 }
