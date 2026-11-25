@@ -27,6 +27,8 @@ Changes merged since the last release are listed under `[Unreleased]`.
   `DECKWATCH_CACHE_DIR` is set. The Helm chart sets it (see Added). If you run
   deckwatch without the chart, set `DECKWATCH_CACHE_DIR` to a writable
   directory, or plugins are compiled on every call. (#399)
+- **Plugin calls are stopped after 60 seconds.** If a plugin's calls take
+  longer, set `DECKWATCH_PLUGIN_CALL_TIMEOUT` (see Fixed). (#301, #402)
 
 ### Added
 
@@ -64,10 +66,21 @@ Changes merged since the last release are listed under `[Unreleased]`.
   every 10 seconds), nothing else did: `/api/healthz` and `/api/readyz` timed
   out and the kubelet restarted the pod. Plugin calls now run on a separate
   thread pool, at most 4 at a time, and the runtime starts at least 2 worker
-  threads (`TOKIO_WORKER_THREADS` still sets the number). Plugin calls still
-  have no time limit (#301), but deckwatch now stops waiting for one after 2
-  minutes and reports `plugin.timeout`; the call may still finish in the
-  background. (#385, #395)
+  threads (`TOKIO_WORKER_THREADS` still sets the number). deckwatch stops
+  waiting for a call 5 seconds after its time limit (see the next entry) and
+  reports `plugin.timeout`; the call may still finish in the background.
+  (#385, #395)
+- **Plugin calls have a time limit, so `plugin.timeout` happens.** A plugin
+  call could run as long as the plugin liked: one that hung, or whose HTTP
+  request never got an answer, held up the deployment save, provision or
+  reconcile pass that called it, and the documented `plugin.timeout` event
+  never occurred. Now every call may run for `DECKWATCH_PLUGIN_CALL_TIMEOUT`
+  seconds, 60 by default (calls normally take well under a second). extism
+  stops a call that runs longer, and the call fails with `plugin.timeout`.
+  The plugin's HTTP requests count toward the limit. Set it with Helm's
+  `extraEnv` to a whole number of seconds from 1 to 3600; deckwatch doesn't
+  start with `0`, an empty value or anything else outside that range. See
+  [docs/PLUGINS.md](docs/PLUGINS.md#time-limit). (#301, #402)
 - **The chart's probes give deckwatch time to start, and to answer when
   busy.** deckwatch loads every enabled plugin before it serves HTTP, and the
   liveness probe restarted it after about 30 seconds, so slow plugin
