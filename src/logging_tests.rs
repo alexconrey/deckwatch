@@ -127,3 +127,27 @@ fn metric_events_stay_out_of_the_console_but_reach_other_layers() {
         ["mcp_k8s::telemetry::metrics", "mcp_k8s::telemetry"]
     );
 }
+
+/// mcp-k8s's `audit` events duplicate deckwatch's own MCP audit rows, so no
+/// log output writes them, even when `RUST_LOG` asks for them.
+#[test]
+fn mcp_k8s_audit_events_are_never_written() {
+    let console = Buffer::default();
+    let subscriber = tracing_subscriber::registry()
+        .with(EnvFilter::new("info,mcp_k8s::audit=trace"))
+        .with(json_layer(console.clone()));
+    tracing::subscriber::with_default(subscriber, || {
+        tracing::info!(target: "mcp_k8s::audit", tool = "delete_pod", "audit");
+        tracing::info!(target: "mcp_k8s::telemetry", "tool call finished");
+    });
+
+    let console = String::from_utf8(console.0.lock().unwrap().clone()).unwrap();
+    let lines: Vec<&str> = console.lines().collect();
+    assert_eq!(lines.len(), 1, "{console}");
+    assert!(lines[0].contains("tool call finished"), "{console}");
+    assert_eq!(
+        SUPPRESSED_TARGETS,
+        [mcp_k8s::telemetry::semconv::AUDIT_TARGET]
+    );
+    assert_eq!(mcp_k8s::telemetry::semconv::AUDIT_TARGET, "mcp_k8s::audit");
+}
