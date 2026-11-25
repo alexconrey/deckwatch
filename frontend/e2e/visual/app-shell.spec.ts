@@ -34,6 +34,7 @@ eachTheme(() => {
     await app.namespaceSwitcher().click();
     await page.getByRole("option", { name: "Create Namespace…" }).click();
     await expect(app.dialog("Create Namespace")).toBeVisible();
+    await app.autofocused(app.dialog("Create Namespace").getByLabel("Name"));
     await app.snap("shell/create-namespace-dialog");
   });
 
@@ -42,9 +43,7 @@ eachTheme(() => {
     await app.namespaceSwitcher().click();
     await page.getByRole("option", { name: "Create Namespace…" }).click();
     const dialog = app.dialog("Create Namespace");
-    // Let the dialog finish opening: its autofocus would otherwise move the
-    // focus back to Name after Create is clicked (Vuetify 4 defers it).
-    await expect(dialog.getByLabel("Name")).toBeFocused();
+    await app.autofocused(dialog.getByLabel("Name"));
     await dialog.getByLabel("Name").fill("Bad_Name");
     await dialog.getByRole("button", { name: "Create" }).click();
     await expect(dialog.getByText("Invalid namespace name")).toBeVisible();

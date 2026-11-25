@@ -44,6 +44,7 @@ eachTheme(() => {
       await openRowMenu(page, "web");
       await menuItem(page, "Scale").click();
       await expect(app.dialog("Scale Deployment")).toBeVisible();
+      await app.autofocused(app.dialog("Scale Deployment").getByLabel("Replicas"));
       await app.snap("resources/deployments-scale-dialog");
     });
 
@@ -60,6 +61,7 @@ eachTheme(() => {
       await openRowMenu(page, "worker");
       await menuItem(page, "Delete").click();
       const dialog = app.dialog("Delete Deployment");
+      await app.autofocused(dialog.getByRole("textbox"));
       await dialog.getByRole("textbox").fill("worker");
       await expect(dialog.getByRole("button", { name: "Delete" })).toBeEnabled();
       await app.snap("resources/deployments-delete-dialog");
@@ -77,6 +79,7 @@ eachTheme(() => {
       await app.goto("/deployments?tab=cronjobs");
       await page.getByRole("button", { name: "New CronJob" }).click();
       await expect(app.dialog("New CronJob")).toBeVisible();
+      await app.autofocused(app.dialog("New CronJob").getByLabel("Name"));
       await app.snap("resources/cronjob-create-dialog");
     });
 
@@ -84,9 +87,7 @@ eachTheme(() => {
       await app.goto("/deployments?tab=cronjobs");
       await page.getByRole("button", { name: "New CronJob" }).click();
       const dialog = app.dialog("New CronJob");
-      // Let the dialog finish opening: its autofocus would otherwise move the
-      // focus back to Name after the fields are filled (Vuetify 4 defers it).
-      await expect(dialog.getByLabel("Name")).toBeFocused();
+      await app.autofocused(dialog.getByLabel("Name"));
       await dialog.getByLabel("Name").fill("Nightly_Backup");
       await dialog.getByLabel("Schedule").fill("0 3 * * *");
       await expect(dialog.getByText("Lowercase alphanumeric or '-', start/end alphanumeric")).toBeVisible();
@@ -120,6 +121,7 @@ eachTheme(() => {
       await app.goto("/deployments?tab=secrets");
       await page.getByRole("button", { name: "Create Secret" }).click();
       const dialog = app.dialog("Create Secret");
+      await app.autofocused(dialog.getByLabel("Name"));
       await dialog.getByLabel("Name").fill("smtp-credentials");
       await dialog.getByLabel("Key").fill("SMTP_PASSWORD");
       await dialog.getByRole("textbox", { name: "Value" }).fill("hunter2");
@@ -150,6 +152,7 @@ eachTheme(() => {
       await row(page, "app-config").locator("button:has(.mdi-pencil)").click();
       const dialog = app.dialog("Edit app-config");
       await expect(dialog.getByLabel("Key").first()).toHaveValue("LOG_LEVEL");
+      await app.autofocused(dialog.getByLabel("Name"));
       await app.snap("resources/configmap-edit-dialog");
     });
   });
@@ -165,6 +168,7 @@ eachTheme(() => {
       await app.goto("/deployments?tab=serviceaccounts");
       await page.getByRole("button", { name: "Create ServiceAccount" }).click();
       const dialog = app.dialog("Create ServiceAccount");
+      await app.autofocused(dialog.getByLabel("Name"));
       await dialog.getByLabel("Name").fill("billing-worker");
       await app.snap("resources/serviceaccount-create-dialog");
     });
