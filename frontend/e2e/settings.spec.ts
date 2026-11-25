@@ -1,5 +1,6 @@
 import type { Page } from "@playwright/test";
 import { expect, test } from "./fixtures";
+import { GATEWAY_URL, movedOutbound } from "./support/data";
 import { choose, row } from "./support/ui";
 
 /**
@@ -175,6 +176,75 @@ test.describe("Settings", () => {
     await section(page, "Observability");
     await page.getByLabel("Enable Agent Feedback").uncheck();
     await expect(nav.getByText("Agent Feedback", { exact: true })).toBeHidden();
+  });
+});
+
+test.describe("Settings: endpoints", () => {
+  test("endpoint overrides are checked while typing and saved with the advanced settings", async ({
+    app,
+    page,
+    mockApi,
+  }) => {
+    await app.goto("/settings");
+    await section(page, "Advanced");
+    await mockApi.waitForRequest("GET", "/settings/outbound");
+
+    const anthropic = page.getByRole("textbox", { name: "Anthropic API base URL" });
+    await expect(anthropic).toHaveAttribute("placeholder", "https://api.anthropic.com");
+    await anthropic.fill("http://llm-gateway.platform.internal");
+    await expect(page.getByText("http:// is only allowed for localhost.", { exact: false })).toBeVisible();
+    await anthropic.fill("https://llm-gateway.platform.internal");
+    await expect(page.getByText("http:// is only allowed for localhost.", { exact: false })).toHaveCount(0);
+    await page.getByRole("textbox", { name: "GitHub API base URL" }).fill("https://github.acme.test/api/v3");
+    await page.getByRole("textbox", { name: "Vertex AI token URL" }).fill("https://oauth2.googleapis.com/token?x=1");
+    await expect(page.getByText("Must not contain a query string or fragment.")).toBeVisible();
+    await page.getByRole("textbox", { name: "Vertex AI token URL" }).fill("");
+
+    await page.getByTestId("advanced-save").click();
+    const put = await mockApi.waitForRequest("PUT", "/settings");
+    expect((put.body as { endpoints: unknown }).endpoints).toEqual({
+      anthropic_api_base: "https://llm-gateway.platform.internal",
+      vertex_token_url: "",
+      vertex_api_base: "",
+      bedrock_endpoint: "",
+      github_api_base: "https://github.acme.test/api/v3",
+      github_web_base: "",
+      github_raw_base: "",
+    });
+    await expect(page.getByText("Advanced settings saved")).toBeVisible();
+    // The binding state is reloaded after the save.
+    await expect.poll(() => mockApi.requests("GET", "/settings/outbound").length).toBe(2);
+  });
+
+  test("a stored key whose endpoint moved is flagged in both sections", async ({ app, page, mockState }) => {
+    mockState.settings.endpoints = {
+      anthropic_api_base: GATEWAY_URL,
+      vertex_token_url: "",
+      vertex_api_base: "",
+      bedrock_endpoint: "",
+      github_api_base: "",
+      github_web_base: "",
+      github_raw_base: "",
+    };
+    mockState.outbound = movedOutbound();
+    await app.goto("/settings");
+
+    await section(page, "AI Providers");
+    await expect(page.getByTestId("anthropic-key-binding")).toHaveText(
+      "Saved for api.anthropic.com, but the Anthropic API endpoint is now llm-gateway.platform.internal. " +
+        "The key is not sent there; enter it again to use it with the new host.",
+    );
+
+    await section(page, "Advanced");
+    await expect(page.getByTestId("binding-anthropic_api_key")).toContainText(
+      "The endpoint now points to llm-gateway.platform.internal.",
+    );
+    await expect(page.getByTestId("outbound-policy")).toHaveText(
+      "http:// allowed for any host (DECKWATCH_ALLOW_INSECURE_ENDPOINTS)",
+    );
+    await expect(page.getByTestId("outbound-extra-ca")).toHaveText(
+      "System roots + 2 extra CA certificates (/etc/deckwatch/ca/corp-root.pem)",
+    );
   });
 });
 

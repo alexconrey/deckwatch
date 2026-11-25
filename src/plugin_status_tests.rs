@@ -401,3 +401,85 @@ async fn transitions_notify_once_and_flapping_is_quiet() {
     assert_eq!(failing["code"], "aws.x");
     assert_eq!(failing["message"], "db unreachable");
 }
+
+/// Notifications reach the webhook in the order the transitions happened:
+/// one sender delivers them one at a time. Each `plugin_recovered` comes
+/// after its target's `plugin_failing`, across interleaved targets.
+#[tokio::test]
+async fn notifications_arrive_in_the_order_of_their_transitions() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = crate::plugin_fixture::test_state(dir.path(), vec![], None).await;
+    let (url, received) = crate::plugin_fixture::serve_webhook().await;
+    crate::plugin_fixture::enable_notifications(&state, &url).await;
+    spawn_worker(&state);
+
+    let target = |i: usize, health: Health| {
+        let mut u = update(health, vec![report("down", EventSeverity::Error)]);
+        u.key = StatusKey::resource("shop/web", "aws", &format!("db-{i}"));
+        u
+    };
+    let mut expected = Vec::new();
+    for i in 0..10 {
+        state.plugin_telemetry.report(target(i, Health::Failing));
+        expected.push(format!("plugin_failing db-{i}"));
+        if i % 2 == 1 {
+            // Recover the previous target while others are still failing.
+            state
+                .plugin_telemetry
+                .report(target(i - 1, Health::Healthy));
+            expected.push(format!("plugin_recovered db-{}", i - 1));
+        }
+    }
+    state.plugin_telemetry.flush().await;
+
+    let got: Vec<String> = received
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|b| {
+            format!(
+                "{} {}",
+                b["event_type"].as_str().unwrap(),
+                b["event"]["resource_id"].as_str().unwrap()
+            )
+        })
+        .collect();
+    assert_eq!(got, expected);
+}
+
+/// A webhook that never answers keeps the single sender busy; queueing more
+/// never waits, and what doesn't fit is dropped.
+#[tokio::test]
+async fn a_full_notification_queue_drops_instead_of_waiting() {
+    // Accept connections and never answer.
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}/hook", listener.local_addr().unwrap());
+    tokio::spawn(async move {
+        let mut held = Vec::new();
+        while let Ok((stream, _)) = listener.accept().await {
+            held.push(stream);
+        }
+    });
+    let dir = tempfile::tempdir().unwrap();
+    let state = crate::plugin_fixture::test_state(dir.path(), vec![], None).await;
+    crate::plugin_fixture::enable_notifications(&state, &url).await;
+    let notifier = TransitionNotifier::with_capacity(&state, 1);
+
+    let event = |i: usize| crate::notifications::NotificationEvent::PluginRecovered {
+        namespace: "shop".into(),
+        application: "web".into(),
+        plugin: "aws".into(),
+        resource_id: format!("db-{i}"),
+        export: "provision".into(),
+    };
+    let started = std::time::Instant::now();
+    let queued: Vec<bool> = (0..4).map(|i| notifier.enqueue("aws", event(i))).collect();
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(1),
+        "never waits"
+    );
+    assert!(queued[0], "the first one always fits");
+    // At most one in flight plus one queued; the rest are dropped.
+    assert!(queued.iter().filter(|q| **q).count() <= 2, "{queued:?}");
+    assert!(!queued[3], "{queued:?}");
+}

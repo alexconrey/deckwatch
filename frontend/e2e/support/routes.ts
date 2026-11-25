@@ -1,4 +1,4 @@
-import type { ApplicationDetail, DeploymentDetailResponse } from "@/types/api";
+import type { ApplicationDetail, DeploymentDetailResponse, PluginStatus } from "@/types/api";
 import { FIXED_NOW, ago, deploymentYaml, manifestFor, type MockState } from "./data";
 import { HOLD, type MockApi, apiError, created, noContent, ok } from "./mock-api";
 
@@ -15,6 +15,7 @@ export function installDefaultRoutes(api: MockApi, state: MockState): void {
     state.deployments.find((d) => d.namespace === ns && d.name === name);
   const findApp = (ns: string, name: string): ApplicationDetail | undefined =>
     state.applications.find((a) => a.namespace === ns && a.name === name);
+  const withPluginEvents = () => (state.writePluginEvents.length ? { plugin_events: state.writePluginEvents } : {});
   const summary = (d: DeploymentDetailResponse) => ({
     name: d.name,
     namespace: d.namespace,
@@ -41,6 +42,7 @@ export function installDefaultRoutes(api: MockApi, state: MockState): void {
     state.settings.credentials = creds;
     return ok(creds);
   });
+  api.on("GET", "/settings/outbound", () => ok(state.outbound));
   api.on("POST", "/notifications/test", noContent());
   api.on("GET", "/features", () => ok(state.features));
   api.on("POST", "/frontend-metrics", noContent());
@@ -164,8 +166,25 @@ export function installDefaultRoutes(api: MockApi, state: MockState): void {
     state.provisioned[req.params.name] = (state.provisioned[req.params.name] ?? []).filter(
       (r) => !(r.plugin_name === req.params.plugin && r.resource_id === req.params.resource),
     );
-    return noContent();
+    return ok({ message: "", plugin_events: [], kubernetes_resource_deletions: [] });
   });
+
+  // ---- plugin status (most severe first, like the backend) ---------------
+  const HEALTH_RANK: Record<PluginStatus["health"], number> = { failing: 0, degraded: 1, healthy: 2 };
+  const statusRows = (keep: (s: PluginStatus) => boolean) =>
+    ok(state.pluginStatus.filter(keep).sort((a, b) => HEALTH_RANK[a.health] - HEALTH_RANK[b.health]));
+  api.on("GET", "/plugin-status", (req) => {
+    const health = req.query.get("health")?.split(",");
+    const plugin = req.query.get("plugin");
+    const ns = req.query.get("namespace");
+    return statusRows(
+      (s) => (!health || health.includes(s.health)) && (!plugin || s.plugin === plugin) && (!ns || s.namespace === ns),
+    );
+  });
+  api.on("GET", "/namespaces/:ns/applications/:name/plugin-status", (req) =>
+    statusRows((s) => s.namespace === req.params.ns && s.application === req.params.name),
+  );
+  api.on("GET", "/plugins/:name/status", (req) => statusRows((s) => s.plugin === req.params.name));
 
   // ---- deployments -------------------------------------------------------
   api.on("GET", "/namespaces/:ns/deployments", (req) =>
@@ -182,6 +201,7 @@ export function installDefaultRoutes(api: MockApi, state: MockState): void {
       replicas: { desired: replicas, ready: 0, available: 0, updated: 0 },
       status: "progressing",
       created_at: FIXED_NOW.toISOString(),
+      ...withPluginEvents(),
     });
   });
   api.on("POST", "/namespaces/:ns/deployments/validate", () => ok({ ok: true, errors: [] }));
@@ -193,7 +213,7 @@ export function installDefaultRoutes(api: MockApi, state: MockState): void {
     const dep = findDeployment(req.params.ns, req.params.name);
     if (!dep) return notFound(`deployment/${req.params.name}`);
     Object.assign(dep, req.body as object);
-    return ok(dep);
+    return ok({ ...dep, ...withPluginEvents() });
   });
   api.on("DELETE", "/namespaces/:ns/deployments/:name", (req) => {
     state.deployments = state.deployments.filter((d) => !(d.namespace === req.params.ns && d.name === req.params.name));

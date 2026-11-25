@@ -393,8 +393,9 @@ pub fn record_plugin_k8s_event(result: &'static str) {
 /// Count plugin events that were dropped instead of being logged or
 /// exported.
 /// - `reason`: `rate_limited` (per-plugin rate limit), `over_cap` (more than
-///   the per-call maximum), or `queue_full` (the background sinks fell
-///   behind)
+///   the per-call maximum), `queue_full` (the background sinks fell
+///   behind), or `notify_queue_full` (a transition notification dropped
+///   because notifications waiting to be sent filled their queue)
 pub fn record_plugin_events_dropped(plugin: &str, reason: &'static str, count: u64) {
     counter!(
         "deckwatch_plugin_events_dropped_total",
