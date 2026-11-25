@@ -43,6 +43,15 @@ const defaultTheme = savedTheme || (prefersDark ? "deckwatchDark" : "deckwatchLi
 export const vuetify = createVuetify({
   components,
   directives,
+  // Vuetify 4 lowered the slider thumb's default elevation from 2 to 1; the
+  // compat stylesheet restores the MD2 shadows, this the level.
+  defaults: {
+    VSlider: { elevation: 2 },
+  },
+  // Vuetify 3's breakpoints, matching the CSS rewrite in vite.config.ts.
+  display: {
+    thresholds: { md: 960, lg: 1280, xl: 1920, xxl: 2560 },
+  },
   theme: {
     defaultTheme,
     themes: {

@@ -28,11 +28,47 @@ function vuetifyLayerOrder(): Plugin {
   };
 }
 
+/**
+ * Keep Vuetify 3's breakpoints in Vuetify 4's CSS.
+ *
+ * Vuetify 4 lowered md 960 -> 840px, lg 1280 -> 1145px, xl 1920 -> 1545px and
+ * xxl 2560 -> 2138px, so at e.g. 900px wide every `md=` column sits side by
+ * side and the forms reflow. The upgrade guide restores the v3 values with a
+ * Sass `$grid-breakpoints` setting; deckwatch doesn't compile Vuetify's Sass,
+ * so this rewrites the same media queries in Vuetify's precompiled CSS
+ * instead. src/plugins/vuetify.ts sets the matching JS `display.thresholds`,
+ * and src/styles/vuetify-v3-compat.css the v3 container widths.
+ * https://vuetifyjs.com/en/getting-started/upgrade-guide/#breakpoints
+ */
+const V3_BREAKPOINTS: Record<string, string> = {
+  "840": "960",
+  "1145": "1280",
+  "1545": "1920",
+  "2138": "2560",
+  "839.98": "959.98",
+  "1144.98": "1279.98",
+  "1544.98": "1919.98",
+  "2137.98": "2559.98",
+};
+
+function vuetifyV3Breakpoints(): Plugin {
+  return {
+    name: "deckwatch:vuetify-v3-breakpoints",
+    transform(code, id) {
+      if (!/[\\/]node_modules[\\/]vuetify[\\/].*\.css($|\?)/.test(id)) return null;
+      return code.replace(
+        /\((min|max)-width:\s*([\d.]+)px\)/g,
+        (match, kind: string, px: string) => (V3_BREAKPOINTS[px] ? `(${kind}-width: ${V3_BREAKPOINTS[px]}px)` : match),
+      );
+    },
+  };
+}
+
 export default defineConfig({
   define: {
     __APP_VERSION__: JSON.stringify(pkg.version),
   },
-  plugins: [vuetifyLayerOrder(), vue(), vuetify({ autoImport: true })],
+  plugins: [vuetifyLayerOrder(), vuetifyV3Breakpoints(), vue(), vuetify({ autoImport: true })],
   // Dev-server only. Vuetify 4 stacks overlays (a select menu opened inside a
   // dialog) through a shared singleton. If Vite serves some Vuetify modules
   // from its pre-bundle cache and others as raw ESM, two copies exist and
