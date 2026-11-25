@@ -19,6 +19,80 @@ Changes merged since the last release are listed under `[Unreleased]`.
 
 ### Upgrade notes
 
+- **The MCP endpoint's Kubernetes tools now have guardrails, on by
+  default.** The embedded mcp-k8s moves from v0.5.2 to v0.7.0, and deckwatch
+  turns on its secure defaults, except that `apply_manifest` stays available.
+  Each switch is in **Settings → MCP Tuning → Kubernetes tool guardrails**
+  (`mcp_tuning.guardrails`) and applies from the next MCP request, without a
+  restart (clients pick up a changed tool list when they reconnect). What
+  agents notice:
+  - **Workload guardrails (restrictive).** The typed create and update tools
+    (`create_pod`, `create_deployment`, `update_deployment`, `create_service`,
+    the RBAC tools, ...) and the custom resource tools refuse privileged
+    containers, privilege escalation, host namespaces, `hostPath` volumes,
+    host ports, capabilities beyond the runtime's defaults, risky volume
+    types, Unconfined profiles, NodePort, LoadBalancer and ExternalName
+    Services, ingress snippet annotations, RBAC escalation (escalate, bind,
+    impersonate, wildcards, binding cluster-admin) and pod-security labels set
+    to `privileged`. The error names the rule and the deckwatch setting. Let a
+    rule through with an exception, or switch the policy to permissive (every
+    workload guardrail off, as before). Updates are checked with a server-side
+    dry run, so an update to a workload that already breaks a rule is refused
+    too.
+  - **Custom resource writes are refused** (`create_custom_resource`,
+    `update_custom_resource`) until their API group is listed under allowed
+    custom resource API groups. Cluster-scoped custom resource kinds stay
+    refused in restrictive mode (apply them with `apply_manifest`, or use the
+    permissive policy). Reads are unaffected.
+  - **Secret values are off.** `get_secret` refuses `decode: true` (it used to
+    return the values), and `get_resource_json` returns a Secret without its
+    `data` and `stringData` and without the
+    `kubectl.kubernetes.io/last-applied-configuration` annotation. Turn on
+    **Return Secret values** to allow them.
+  - **New workloads run as non-root.** The typed create tools fill in
+    `runAsNonRoot: true`, the RuntimeDefault seccomp profile, no privilege
+    escalation, all capabilities dropped and no service account token (unless
+    `service_account_name` is set) when the call doesn't set them. An image
+    that runs as root, such as `nginx` or `busybox`, then fails to start
+    (`container has runAsNonRoot and image will run as root`) unless the call
+    passes `security_context: {"run_as_non_root": false}` or **Secure defaults
+    for new workloads** is off.
+  - **`approve_csr` refuses privileged identities:** `system:masters`, any
+    other `system:` user or group, and requests it can't parse. A node's
+    request for its own serving certificate is still approved. Turn on
+    **Approve privileged certificate requests** to allow the others.
+  - **`apply_manifest` is still on, and now asks first.** It is marked
+    destructive, so MCP clients such as Claude Code ask the user before each
+    call, and its description tells agents to use it only when asked. It
+    still bypasses the workload guardrails. Its `namespace` argument is now
+    used: it fills `metadata.namespace` when the manifest has none, and a
+    manifest naming another namespace is refused. Turn it off to remove it
+    from `tools/list`.
+  - **`DECKWATCH_NAMESPACES` reaches more tools.** With an allowlist,
+    `create_namespace`, `update_namespace` and `delete_namespace` refuse
+    namespaces outside it; `watch_resource` and `list_custom_resources` on a
+    namespaced kind, and `list_csistoragecapacities`, refuse to run without
+    a namespace; `drain_node` refuses, before cordoning, when it would evict
+    pods outside the allowlist; `can_i` and `list_my_permissions` refuse other
+    namespaces. `get_custom_resource`, `update_custom_resource` and
+    `delete_custom_resource` require `namespace` for namespaced kinds.
+  - **Removed and changed tools.** `get_resource_yaml` is gone: use
+    `get_resource_json` (same arguments). `list_clusters`, `switch_cluster`
+    and `get_active_cluster` are no longer listed; they always answered
+    "Unknown tool". `port_forward_check` counts as a write on the pod, so it
+    is audited now, and it gives up after 10 seconds. The typed workload,
+    Service and Ingress tools refuse unknown arguments (they used to ignore
+    them) and accept camelCase spellings. Deckwatch no longer replaces
+    `create_pod`: mcp-k8s's takes the whole pod template, and
+    `service_account` still works (as an alias of `service_account_name`). A
+    pod created with a service account used to skip the guardrails and secure
+    defaults, and was labelled `app.kubernetes.io/managed-by: deckwatch`; it
+    is now `mcp-k8s`.
+
+  Tool errors are still JSON-RPC errors, as before. The guardrails cover the
+  mcp-k8s tools; deckwatch's own tools (`create_ingress`, `update_ingress`,
+  ingress templates, `create_application`, plugins) and its `exec_pod` aren't
+  checked against them yet. See [docs/MCP.md](docs/MCP.md#guardrails). (#403)
 - **Compiled plugins are cached only if `DECKWATCH_CACHE_DIR` is set.**
   extism used to cache them in wasmtime's default directory under `$HOME`
   (`$HOME/.cache/wasmtime`, or `$XDG_CACHE_HOME/wasmtime`), and when it
@@ -37,8 +111,38 @@ Changes merged since the last release are listed under `[Unreleased]`.
   Settings page asks for it. `tracing.query_url`, `ui_url` and
   `backend_kind` are unchanged. (#401, #398)
 
+### Security
+
+- **MCP: `DECKWATCH_NAMESPACES` could be bypassed through mcp-k8s tools.**
+  With an allowlist set, `delete_namespace` deleted any namespace (for
+  example `kube-system`), `drain_node` evicted pods in every namespace on the
+  node, and `watch_resource` or `list_custom_resources` without a namespace
+  read every namespace. mcp-k8s v0.7.0 refuses them (see Upgrade notes).
+  (#403)
+- **MCP: Secret values leaked with decoding off.** `get_resource_json`
+  returned a Secret's base64 `data`. Secret values are now off by default and
+  redacted everywhere unless **Return Secret values** is on. (#403)
+- **MCP: `apply_manifest` didn't ask before running.** deckwatch replaced
+  mcp-k8s's definition with one that had no `destructiveHint` and no warning,
+  so clients ran raw manifests without asking the user. It now carries both.
+  (#403)
+- kube 5.1.0 → 5.2.0 (RUSTSEC-2026-0600: kube-client's OpenSSL connector also
+  trusted the system certificate store). deckwatch uses the rustls connector,
+  so it wasn't affected, but the advisory was flagged on every build. (#403)
+
 ### Added
 
+- **Settings → MCP Tuning → Kubernetes tool guardrails**
+  (`mcp_tuning.guardrails`): the workload policy (`workload_policy`:
+  `restrictive` or `permissive`), the rules to let through in restrictive
+  mode (`exceptions`, for example `allow_load_balancer`), the custom resource
+  API groups agents may write (`allowed_custom_resource_groups`),
+  `allow_privileged_csr`, `apply_manifest_enabled`, `secret_decode_enabled`
+  and `secure_defaults`. `GET /api/settings` always returns the block, and a
+  `PUT` that omits it keeps the stored one. Every change is audit-logged as
+  `mcp_tuning.guardrails.<field>`. A refusal by mcp-k8s names the deckwatch
+  setting next to the mcp-k8s flag. See
+  [docs/MCP.md](docs/MCP.md#guardrails). (#403)
 - **OTLP endpoints for deckwatch's own telemetry in Settings →
   Observability:** `observability.otlp_endpoint`, an OpenTelemetry
   Collector's OTLP/HTTP base URL for traces and logs, and
@@ -77,6 +181,18 @@ Changes merged since the last release are listed under `[Unreleased]`.
   deckwatch's own OTLP export (Helm `telemetry.otlp`) works as before, and its
   endpoints can now also be set in **Settings → Observability** (see Added).
   (#396)
+- MCP `tools/list` is built from the guardrail settings, so it offers only
+  the tools deckwatch serves under them, each once. The `initialize`
+  instructions now include mcp-k8s's guidance: prefer the typed tools, report
+  a guardrail rejection instead of working around it, and use
+  `apply_manifest` only on the user's explicit request. (#403)
+- mcp-k8s's `audit` events (target `mcp_k8s::audit`) are never logged or
+  exported: deckwatch writes its own audit row for each of those calls. The
+  `tool call finished` log line still records every call with its decision.
+  A refusal inside mcp-k8s (workload policy, privileged CSR, the namespace
+  allowlist cases above) is an `error` row in deckwatch's audit log for now;
+  the log line and span say `denied` with the rule. See
+  [docs/MCP.md](docs/MCP.md#audit-log). (#403)
 
 ### Fixed
 
@@ -108,6 +224,17 @@ Changes merged since the last release are listed under `[Unreleased]`.
   5 minutes. See [README.md](README.md#helm-chart-probes). (#391)
 - The API docs (`/api/docs`) and `/api/openapi.yaml` report the running
   deckwatch version. The spec said 0.2.1 since that release. (#384)
+- MCP `tools/list` listed every mcp-k8s resource tool twice, and listed
+  `list_clusters`, `switch_cluster` and `get_active_cluster`, which only the
+  standalone mcp-k8s server serves. (#403)
+
+### Dependencies
+
+- mcp-k8s v0.5.2 → v0.7.0, and kube 5.1.0 → 5.2.0. mcp-k8s 0.7 deprecates
+  the Prometheus metrics `mcp_k8s_tool_calls_total` and
+  `mcp_k8s_tool_call_duration_seconds`, which deckwatch's `/metrics` still
+  exposes; mcp-k8s 0.8 removes them. Dashboards should move to the
+  OpenTelemetry metric `mcp.server.operation.duration`. (#403)
 
 ## [0.7.0] - 2026-11-25
 

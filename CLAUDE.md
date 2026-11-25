@@ -67,6 +67,7 @@ src/                              # Rust backend (library + thin binary)
     gitops.rs                     # GitOps config CRUD (DB-backed)
     logs.rs                       # Log streaming (SSE) + bulk history
     mcp.rs                        # MCP server (JSON-RPC 2.0, 34 deckwatch tools + mcp-k8s)
+    mcp_guardrails.rs             # mcp_tuning.guardrails → mcp-k8s ActionPermissions
     monitoring.rs                 # PodMonitor CRD management
     diagnostics.rs                # AI diagnostic job creation
     ai_fix.rs                     # AI fix job creation
@@ -363,9 +364,14 @@ pods, services, ingresses, secrets, configmaps, RBAC, CRDs, etc.):
 
 `submit_agent_feedback` is listed only when agent feedback is enabled in
 settings. Deckwatch also replaces the upstream `update_deployment`,
-`create_pod`, `apply_manifest` and `exec_pod` with its own implementations, and
-intercepts `create_deployment`, `delete_deployment`, `scale_deployment` and
-`restart_deployment` to audit-log them.
+`apply_manifest` and `exec_pod` with its own implementations. Every call,
+deckwatch's or mcp-k8s's, is audit-logged at the MCP choke point.
+
+The mcp-k8s permissions (workload policy, `apply_manifest`, Secret values,
+privileged CSRs, secure defaults) come from the `mcp_tuning.guardrails`
+settings (`src/handlers/mcp_guardrails.rs`), read on every `tools/list` and
+`tools/call`; `tools/list` is built from them (`listed_tools()`), so it never
+lists a tool deckwatch doesn't serve. See "Guardrails" in `docs/MCP.md`.
 
 ## Plugins
 
@@ -418,7 +424,9 @@ Key files: `src/plugins.rs` (fetch, execute, merge), `src/handlers/plugins.rs`
 - Code logs with `tracing`; libraries in the process (mcp-k8s, extism plugin
   log lines under `extism::pdk`) do the same. `src/logging.rs` holds the
   default filter. With `RUST_LOG` unset, it keeps `deckwatch`, `tower_http`,
-  `mcp_k8s` and `extism::pdk` at info and `opentelemetry` at warn.
+  `mcp_k8s` and `extism::pdk` at info and `opentelemetry` at warn. mcp-k8s's
+  `mcp_k8s::audit` events are never written (`SUPPRESSED_TARGETS`): the MCP
+  audit rows (`src/handlers/mcp_audit.rs`) record those calls.
 - `src/telemetry.rs` builds the subscriber: JSON lines on stdout, plus
   OpenTelemetry layers, each off until its exporter is attached (endpoints
   from the environment at startup, from settings once the DB is read; a

@@ -30,11 +30,26 @@ pub fn env_filter() -> EnvFilter {
 /// events here, for an OpenTelemetry `MetricsLayer`.
 pub const METRIC_EVENT_TARGETS: &[&str] = &[mcp_k8s::telemetry::semconv::METRICS_TARGET];
 
-/// Whether `meta` is a log line rather than a metric event. Log outputs (the
-/// JSON console, and OTLP logs if exported) filter on this per layer; it must
-/// not be a global filter, because a metrics layer needs the metric events.
+/// Targets whose events deckwatch never writes out, whatever `RUST_LOG`
+/// says:
+///
+/// - `mcp_k8s::audit`: mcp-k8s's `audit` event for each MCP tool call that
+///   writes, deletes or execs, or that was refused. Deckwatch records every
+///   such call itself, as one row in its audit log (`handlers::mcp_audit`),
+///   at the same point and with more context (the client, session and trace
+///   ids, allowlisted argument values, `cancelled` calls). Writing the
+///   library's event too would put a second, differently shaped audit record
+///   of each call in the logs. The `tool call finished` line
+///   (`mcp_k8s::telemetry`) still logs every call with its decision.
+pub const SUPPRESSED_TARGETS: &[&str] = &[mcp_k8s::telemetry::semconv::AUDIT_TARGET];
+
+/// Whether `meta` is a log line rather than a metric event or a suppressed
+/// event ([`SUPPRESSED_TARGETS`]). Log outputs (the JSON console, OTLP logs
+/// if exported, span events) filter on this per layer; it must not be a
+/// global filter, because a metrics layer needs the metric events.
 pub fn is_log_line(meta: &Metadata<'_>) -> bool {
-    !METRIC_EVENT_TARGETS.contains(&meta.target())
+    let target = meta.target();
+    !METRIC_EVENT_TARGETS.contains(&target) && !SUPPRESSED_TARGETS.contains(&target)
 }
 
 /// The console log layer: one JSON line per log event to `writer` (stdout

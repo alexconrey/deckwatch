@@ -59,17 +59,19 @@ fn classes_agree_with_mcp_k8s_where_it_has_one() {
 fn intercepted_mcp_k8s_tools_are_known_to_mcp_k8s() {
     // create_, delete_, scale_ and restart_deployment used to be intercepted
     // only to write audit rows; the MCP choke point audits every call now.
+    // create_pod was intercepted to add a service account, which mcp-k8s's
+    // takes itself since 0.6.
     for name in [
         "create_deployment",
         "delete_deployment",
         "scale_deployment",
         "restart_deployment",
+        "create_pod",
     ] {
         assert!(deckwatch_tool(name).is_none(), "{name}");
     }
     for name in [
         "update_deployment",
-        "create_pod",
         "apply_manifest",
         "exec_pod",
         "create_ingress",

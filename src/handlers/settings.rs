@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::entities::settings as settings_entity;
 use crate::error::AppError;
+use crate::handlers::mcp_guardrails::{GuardrailChange, McpGuardrails};
 use crate::metrics::K8sTimer;
 use crate::notifications::{NotificationClient, NotificationEvent};
 use crate::outbound::{
@@ -175,6 +176,9 @@ fn default_marketplace_url() -> String {
 /// - `nodes`       → tools containing "node"
 /// - `storage`     → tools containing "pvc", "pv", or "storageclass"
 /// - `plugins`     → tools containing "plugin"
+///
+/// `guardrails` is different: the switches of the embedded mcp-k8s tools
+/// (workload policy, `apply_manifest`, Secret values, ...).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct McpTuning {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -199,6 +203,19 @@ pub struct McpTuning {
     pub storage: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plugins: Option<String>,
+    /// The guardrails of the embedded mcp-k8s tools
+    /// (`crate::handlers::mcp_guardrails`); `None` means the defaults. GET
+    /// always returns the object; a PUT that omits it keeps the stored
+    /// value. Validated on PUT, and every change is audit-logged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub guardrails: Option<McpGuardrails>,
+}
+
+impl McpTuning {
+    /// The guardrail settings in effect: the stored ones, or the defaults.
+    pub fn effective_guardrails(&self) -> McpGuardrails {
+        self.guardrails.clone().unwrap_or_default()
+    }
 }
 
 /// Encrypted credential storage. Each field holds an AES-256-GCM ciphertext
@@ -609,6 +626,10 @@ pub async fn get_settings(
     settings
         .observability
         .get_or_insert_with(ObservabilitySettings::default);
+    settings
+        .mcp_tuning
+        .guardrails
+        .get_or_insert_with(McpGuardrails::default);
     // This route is public (the SPA reads `auth` from it before login), so
     // it must never return secrets: replace them with MASKED_VALUE.
     mask_secrets(&mut settings, &public_plugin_config_keys(&state).await);
@@ -842,6 +863,23 @@ pub async fn load_settings_from_db(state: &AppState) -> DeckwatchSettings {
     default_settings(state)
 }
 
+/// The settings row from the database alone: `Ok(None)` when none has been
+/// saved. Unlike [`load_settings_from_db`] it never falls back to the legacy
+/// ConfigMap, so it never calls the Kubernetes API, and a row that can't be
+/// read or parsed is an error rather than the defaults. For settings that
+/// postdate that migration and are read on hot paths, such as the MCP
+/// guardrails on every tool call.
+pub async fn load_stored_settings(
+    db: &sea_orm::DatabaseConnection,
+) -> Result<Option<DeckwatchSettings>, String> {
+    let row = settings_entity::Entity::find_by_id(DB_SETTINGS_KEY)
+        .one(db)
+        .await
+        .map_err(|e| e.to_string())?;
+    row.map(|row| serde_json::from_str(&row.value).map_err(|e| e.to_string()))
+        .transpose()
+}
+
 /// One-time migration: read the settings ConfigMap and persist it into the
 /// database so subsequent reads go straight to the DB. Returns the migrated
 /// settings on success, or `None` if no ConfigMap exists.
@@ -887,6 +925,7 @@ pub async fn put_settings(
     let policy = crate::outbound::global().policy();
     let endpoint_changes = apply_endpoint_update(&mut settings, &stored, &policy)?;
     let observability_changes = apply_observability_update(&mut settings, &stored)?;
+    let guardrail_changes = apply_guardrail_update(&mut settings, &stored)?;
     // The Settings page doesn't edit (or send) the trace viewer's settings.
     if settings.tracing.is_none() {
         settings.tracing.clone_from(&stored.tracing);
@@ -964,6 +1003,22 @@ pub async fn put_settings(
         }
     }
 
+    for change in &guardrail_changes {
+        if let Err(e) = crate::audit::log_action(
+            &state.db,
+            "update",
+            "settings",
+            &change.setting(),
+            "",
+            &change.describe(),
+            "",
+        )
+        .await
+        {
+            tracing::warn!(error = %e, "failed to write audit log for MCP guardrail change");
+        }
+    }
+
     // A removed or disabled plugin stops running now, even the last one.
     crate::plugins::unload_disabled(&state, &settings).await;
 
@@ -1008,9 +1063,30 @@ pub async fn put_settings(
     result
         .observability
         .get_or_insert_with(ObservabilitySettings::default);
+    result
+        .mcp_tuning
+        .guardrails
+        .get_or_insert_with(McpGuardrails::default);
     mask_secrets(&mut result, &public_plugin_config_keys(&state).await);
 
     Ok(Json(result))
+}
+
+/// Validate and normalize `incoming.mcp_tuning.guardrails` against
+/// `stored`. A missing block keeps the stored one; the defaults are stored
+/// as no block. Returns the settings that changed.
+pub fn apply_guardrail_update(
+    incoming: &mut DeckwatchSettings,
+    stored: &DeckwatchSettings,
+) -> Result<Vec<GuardrailChange>, AppError> {
+    let before = stored.mcp_tuning.effective_guardrails();
+    let after = match incoming.mcp_tuning.guardrails.take() {
+        None => before.clone(),
+        Some(requested) => requested.validated().map_err(AppError::BadRequest)?,
+    };
+    let changes = McpGuardrails::changes(&before, &after);
+    incoming.mcp_tuning.guardrails = (after != McpGuardrails::default()).then_some(after);
+    Ok(changes)
 }
 
 /// One OTLP endpoint changed by a settings PUT.

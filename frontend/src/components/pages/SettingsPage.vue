@@ -15,8 +15,10 @@ import MarketplacePage from "@/components/pages/MarketplacePage.vue";
 import ConfirmDialog from "@/components/common/ConfirmDialog.vue";
 import OutboundEndpointsSection from "@/components/settings/OutboundEndpointsSection.vue";
 import OtlpExportSection from "@/components/settings/OtlpExportSection.vue";
+import McpGuardrailsSection from "@/components/settings/McpGuardrailsSection.vue";
 import { bindingState, emptyEndpoints, fieldFor } from "@/utils/endpoints";
 import { emptyObservability, validateObservability } from "@/utils/observability";
+import { defaultGuardrails, validateGuardrails, withGuardrailDefaults } from "@/utils/mcpGuardrails";
 import type {
   AiProviderConfig,
   AiProviderType,
@@ -33,6 +35,7 @@ import type {
   GitTokenSecretRequest,
   IngressClassSummary,
   IngressTemplate,
+  McpGuardrails,
   McpTuning,
   McpTuningField,
   NotificationEventType,
@@ -446,6 +449,7 @@ const plugins = ref<PluginConfig[]>([]);
 const loadedPlugins = ref<PluginSummary[]>([]);
 const loadedPluginsError = ref<string | null>(null);
 const mcpTuning = ref<McpTuning>({});
+const mcpGuardrails = ref<McpGuardrails>(defaultGuardrails());
 const marketplaceUrl = ref('http://market.deckwatch.io/catalog.json');
 const marketplaceOpen = ref<string | null>(null);
 
@@ -570,6 +574,7 @@ function applySettings(s: DeckwatchSettings) {
   gitRepositories.value = s.git_repositories ?? [];
   plugins.value = s.plugins ?? [];
   mcpTuning.value = s.mcp_tuning ?? {};
+  mcpGuardrails.value = withGuardrailDefaults(s.mcp_tuning?.guardrails);
   marketplaceUrl.value = s.marketplace_url ?? 'http://market.deckwatch.io/catalog.json';
   ociRegistries.value = s.oci_registries ?? [];
   gitTokenSecrets.value = s.git_token_secrets ?? [];
@@ -669,7 +674,7 @@ function buildPayload(): DeckwatchSettings {
     default_storage_class: defaultStorageClass.value || null,
     ingress_templates: ingressTemplates.value,
     plugins: plugins.value,
-    mcp_tuning: mcpTuning.value,
+    mcp_tuning: { ...mcpTuning.value, guardrails: mcpGuardrails.value },
     marketplace_url: marketplaceUrl.value,
     endpoints: endpoints.value,
     observability: observability.value,
@@ -721,7 +726,10 @@ function validateManagedLists(): string | null {
 
 async function save() {
   const validationError =
-    validateManagedLists() ?? validateTemplates() ?? validateObservability(observability.value);
+    validateManagedLists() ??
+    validateTemplates() ??
+    validateObservability(observability.value) ??
+    validateGuardrails(mcpGuardrails.value);
   if (validationError) {
     error.value = validationError;
     snackbarMessage.value = validationError;
@@ -3267,6 +3275,16 @@ onMounted(load);
         <div v-else-if="section === 'mcp_tuning'">
           <div class="mb-4">
             <div class="text-h6">MCP Tuning</div>
+            <div class="text-caption text-medium-emphasis">
+              Guardrails for the Kubernetes tools agents call through deckwatch's MCP endpoint,
+              and org-specific guidance for the agents.
+            </div>
+          </div>
+
+          <McpGuardrailsSection v-model="mcpGuardrails" />
+
+          <div class="mb-4 mt-6">
+            <div class="text-subtitle-1 font-weight-medium">Guidance</div>
             <div class="text-caption text-medium-emphasis">
               Org-specific guidance injected into MCP tool descriptions. Each hint is appended
               only to tools in that resource group — the AI sees namespace guidance when working

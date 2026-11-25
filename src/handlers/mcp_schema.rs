@@ -30,12 +30,7 @@ use serde_json::{Map, Value};
 /// mcp-k8s tools deckwatch serves with its own handler but whose arguments
 /// mcp-k8s also reads: `update_deployment` forwards fields deckwatch's schema
 /// doesn't list, `exec_pod` takes `name` for `pod_name`, and so on.
-pub const UNCHECKED: &[&str] = &[
-    "update_deployment",
-    "create_pod",
-    "apply_manifest",
-    "exec_pod",
-];
+pub const UNCHECKED: &[&str] = &["update_deployment", "apply_manifest", "exec_pod"];
 
 /// Arguments a tool refuses on purpose, and why: the error says so. None of
 /// them are in the tool's schema, so [`check`] is what refuses them; the

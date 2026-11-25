@@ -424,6 +424,10 @@ OpenTelemetry GenAI MCP conventions (status *Development*), implemented in
   attributes.
 - mcp-k8s reports the metric as log events on the target `mcp_k8s::telemetry::metrics`. deckwatch
   keeps them out of stdout and OTLP logs; only the metrics pipeline reads them.
+- mcp-k8s also emits an `audit` event (target `mcp_k8s::audit`) for each call that writes,
+  deletes or execs, or was refused. deckwatch never writes it to stdout, OTLP logs or span events,
+  whatever the log filter says: its audit log records those calls already (see
+  [MCP.md](MCP.md#audit-log)).
 
 ## 11. Known limitations (deckwatch 0.6.x)
 
