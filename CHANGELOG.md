@@ -168,6 +168,15 @@ first.
   `service_account`.** An update that set only `service_account` could point
   a Deployment in any namespace at any ServiceAccount. Only deployments that
   set `DECKWATCH_NAMESPACES` were affected. (#208)
+- **MCP `generate_local_build` quotes the command it returns.** The
+  `docker run` command that reproduces a GitOps build on a workstation put
+  the stored Dockerfile path, build context and OCI repository (written by
+  whoever configures GitOps for the deployment), build settings and the
+  caller's arguments into the command line unquoted, so a crafted value
+  could run commands on the machine that ran it. Every argument is now
+  quoted for a POSIX shell (a leading `~/` in `local_context` still
+  expands), and the result also lists the arguments as `argv`, for running
+  the command without a shell. Ordinary commands look the same as before.
 - **Bounded label cardinality on the public `/api/frontend-metrics`.**
   Free-form labels (`route`, `path`, `kind`) take at most 128 bytes of
   visible ASCII and 512 values each; new values after that are recorded as
