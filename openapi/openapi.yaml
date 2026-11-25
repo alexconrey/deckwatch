@@ -588,6 +588,54 @@ paths:
       tags: [Applications]
       summary: Add a member resource (deployment / cronjob) to the app
       responses: { "200": { description: OK } }
+  /api/namespaces/{ns}/applications/{name}/observability:
+    parameters:
+      - $ref: "#/components/parameters/Namespace"
+      - $ref: "#/components/parameters/Name"
+    get:
+      tags: [Applications]
+      summary: The application's Observability section
+      description: |
+        The PodMonitor of each of the application's Deployments (turned on,
+        changed and off per Deployment with
+        `/api/namespaces/{ns}/deployments/{name}/monitor`), and its
+        OpenTelemetry injection: the settings, where its workloads send each
+        signal (the endpoints in Settings → Observability, never deckwatch's
+        own `OTEL_*` variables), and the injection state of each of its
+        Deployments, StatefulSets and CronJobs. See docs/TRACING.md,
+        "Exporting from your workloads".
+      responses:
+        "200":
+          description: The section
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ApplicationObservability" }
+        "404": { description: Unknown application }
+    put:
+      tags: [Applications]
+      summary: Change the application's OpenTelemetry injection
+      description: |
+        Validates and stores the settings, then returns the section. A
+        missing `opentelemetry` keeps the stored settings. Saving only stores
+        them: the reconciler sets or removes the variables within its poll
+        interval (10 s), and the pods of Deployments and StatefulSets whose
+        variables change restart once. Every change is audit-logged.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                opentelemetry: { $ref: "#/components/schemas/OtelInjection" }
+      responses:
+        "200":
+          description: The section
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ApplicationObservability" }
+        "400": { description: Invalid settings; the message lists every problem }
+        "404": { description: Unknown application }
   /api/namespaces/{ns}/applications/{name}/members/{kind}/{resource_name}:
     parameters:
       - $ref: "#/components/parameters/Namespace"
@@ -1683,6 +1731,105 @@ components:
           properties:
             value:   { type: string, example: "deckwatch-tempo.deckwatch.svc:4317" }
             message: { type: string }
+
+    OtelInjection:
+      type: object
+      description: OpenTelemetry injection for one application. Off by default.
+      properties:
+        enabled: { type: boolean }
+        service_name:
+          type: string
+          nullable: true
+          description: |
+            `OTEL_SERVICE_NAME` for every workload, at most 255 characters,
+            no control characters; null or empty: each workload's own name.
+        resource_attributes:
+          type: array
+          description: |
+            Added to `OTEL_RESOURCE_ATTRIBUTES` after `k8s.namespace.name`,
+            `k8s.<kind>.name` and `deckwatch.application.name`, in this
+            order. Keys use letters, digits, `.`, `_` and `-`; values are
+            percent-encoded W3C baggage values. At most 32, no repeated key,
+            and none of the attributes deckwatch sets, nor `service.name`.
+          items:
+            type: object
+            required: [key, value]
+            properties:
+              key: { type: string, example: deployment.environment }
+              value: { type: string, example: prod }
+
+    ApplicationObservability:
+      type: object
+      required: [prometheus, opentelemetry]
+      properties:
+        prometheus:
+          type: object
+          required: [available, unavailable_reason, deployments]
+          properties:
+            available:
+              type: boolean
+              description: Prometheus monitoring is on in Settings and the PodMonitor CRD is installed.
+            unavailable_reason: { type: string, nullable: true }
+            deployments:
+              type: array
+              items:
+                type: object
+                required: [deployment, enabled, name, port, path, interval]
+                properties:
+                  deployment: { type: string }
+                  enabled: { type: boolean }
+                  name: { type: string, description: The PodMonitor's name. }
+                  port: { type: string }
+                  path: { type: string }
+                  interval: { type: string }
+        opentelemetry:
+          allOf:
+            - { $ref: "#/components/schemas/OtelInjection" }
+            - type: object
+              properties:
+                otlp_endpoint:
+                  type: string
+                  nullable: true
+                  description: The collector endpoint workloads get, from Settings → Observability.
+                otlp_metrics_endpoint: { type: string, nullable: true }
+                signals:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      signal: { type: string, enum: [traces, metrics, logs] }
+                      endpoint:
+                        type: string
+                        nullable: true
+                        description: Null when the signal is turned off (`OTEL_<SIGNAL>_EXPORTER=none`).
+                workloads:
+                  type: array
+                  items:
+                    type: object
+                    properties:
+                      kind: { type: string, enum: [Deployment, StatefulSet, CronJob] }
+                      name: { type: string }
+                      container: { type: string, nullable: true, description: The primary container. }
+                      state:
+                        type: string
+                        enum: [injected, pending, "off", foreign]
+                        description: |
+                          pending until the reconciler has applied the settings;
+                          foreign when another deckwatch database set the variables.
+                      injected:
+                        type: array
+                        items: { type: string }
+                        description: The variables deckwatch has set.
+                      kept:
+                        type: array
+                        items: { type: string }
+                        description: Variables deckwatch leaves to the workload, which sets them itself.
+                      exports_itself:
+                        type: boolean
+                        description: |
+                          The workload sets an OTLP endpoint itself, so deckwatch only
+                          sets its service name and resource attributes.
+                workloads_error: { type: string, nullable: true }
 
     EndpointId:
       type: string
