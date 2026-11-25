@@ -18,6 +18,11 @@ vi.mock("@/api/namespaces", () => ({
   namespacesApi: { list: mockList, create: vi.fn() },
 }));
 
+// The app bar polls plugin problems for its Problems button.
+vi.mock("@/api/pluginStatus", () => ({
+  pluginStatusApi: { problems: vi.fn().mockResolvedValue([]) },
+}));
+
 vi.mock("@/composables/useFeatures", async () => {
   const { ref } = await import("vue");
   return {
