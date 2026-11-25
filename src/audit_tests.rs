@@ -222,8 +222,22 @@ async fn query_state() -> (AppState, tempfile::TempDir) {
     let state = crate::plugin_fixture::test_state(dir.path(), vec![], None).await;
     let rows = [
         ("a", SOURCE_API, "create", "", "", ""),
-        ("b", SOURCE_MCP, "write", "apply_manifest", "ok", "claude-code"),
-        ("c", SOURCE_MCP, "delete", "delete_pod", "denied", "claude-code"),
+        (
+            "b",
+            SOURCE_MCP,
+            "write",
+            "apply_manifest",
+            "ok",
+            "claude-code",
+        ),
+        (
+            "c",
+            SOURCE_MCP,
+            "delete",
+            "delete_pod",
+            "denied",
+            "claude-code",
+        ),
         ("d", SOURCE_API, "update", "", "", ""),
         ("e", SOURCE_MCP, "exec", "exec_pod", "error", "cursor"),
         ("f", SOURCE_MCP, "read", "list_secrets", "denied", "cursor"),
@@ -287,7 +301,10 @@ async fn audit_rows_filter_by_source_action_client_outcome_and_tool() {
         q
     };
     let cases: Vec<(AuditQuery, Vec<&str>)> = vec![
-        (q(|q| q.source = Some("mcp".into())), vec!["f", "e", "c", "b"]),
+        (
+            q(|q| q.source = Some("mcp".into())),
+            vec!["f", "e", "c", "b"],
+        ),
         (q(|q| q.source = Some("api".into())), vec!["d", "a"]),
         (q(|q| q.outcome = Some("denied".into())), vec!["f", "c"]),
         (q(|q| q.client = Some("cursor".into())), vec!["f", "e"]),

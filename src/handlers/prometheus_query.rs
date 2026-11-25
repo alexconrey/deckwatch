@@ -323,14 +323,16 @@ pub async fn execute_range(
     end: i64,
     step: u32,
 ) -> Result<Vec<PodSeries>, String> {
-    Ok(execute_range_by(http, base_url, query, start, end, step, "pod")
-        .await?
-        .into_iter()
-        .map(|(pod, points)| PodSeries {
-            pod: pod.unwrap_or_else(|| "aggregate".to_string()),
-            points,
-        })
-        .collect())
+    Ok(
+        execute_range_by(http, base_url, query, start, end, step, "pod")
+            .await?
+            .into_iter()
+            .map(|(pod, points)| PodSeries {
+                pod: pod.unwrap_or_else(|| "aggregate".to_string()),
+                points,
+            })
+            .collect(),
+    )
 }
 
 /// A range query's series, each keyed by its `label` value (`None` when the
@@ -414,7 +416,14 @@ async fn post_query(
     result_type: &str,
 ) -> Result<PromData, String> {
     let url = format!("{base_url}/api/v1/{endpoint}");
-    let timer = K8sTimer::new("prom_query", if endpoint == "query" { "instant" } else { "range" });
+    let timer = K8sTimer::new(
+        "prom_query",
+        if endpoint == "query" {
+            "instant"
+        } else {
+            "range"
+        },
+    );
     let res = http.post(&url).form(form).send().await;
 
     let response = match res {
@@ -657,11 +666,12 @@ fn tool_activity(
             entry.p95_seconds = Some(value);
         }
     }
-    let mut tools: Vec<ToolActivity> = by_tool
-        .into_values()
-        .filter(|t| t.calls > 0.0)
-        .collect();
-    tools.sort_by(|a, b| b.calls.total_cmp(&a.calls).then_with(|| a.tool.cmp(&b.tool)));
+    let mut tools: Vec<ToolActivity> = by_tool.into_values().filter(|t| t.calls > 0.0).collect();
+    tools.sort_by(|a, b| {
+        b.calls
+            .total_cmp(&a.calls)
+            .then_with(|| a.tool.cmp(&b.tool))
+    });
     tools.truncate(MAX_TOOLS);
     tools
 }
@@ -722,7 +732,15 @@ async fn activity(
 
     let (calls, apply_manifest, p95, totals, tool_p95) = tokio::join!(
         execute_range_by(http, prom_url, &q.calls, start, now, step, "status"),
-        execute_range_by(http, prom_url, &q.apply_manifest, start, now, step, "status"),
+        execute_range_by(
+            http,
+            prom_url,
+            &q.apply_manifest,
+            start,
+            now,
+            step,
+            "status"
+        ),
         execute_range_by(http, prom_url, &q.p95, start, now, step, "le"),
         execute_instant(http, prom_url, &q.tool_totals, now),
         execute_instant(http, prom_url, &q.tool_p95, now),

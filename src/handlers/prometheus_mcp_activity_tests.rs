@@ -45,7 +45,11 @@ fn queries_cover_both_counter_families_and_use_the_window() {
 
 #[test]
 fn windows_stay_under_the_point_cap() {
-    for window in [ActivityWindow::Hour, ActivityWindow::Day, ActivityWindow::Week] {
+    for window in [
+        ActivityWindow::Hour,
+        ActivityWindow::Day,
+        ActivityWindow::Week,
+    ] {
         let points = window.seconds() / i64::from(window.step());
         assert!(points <= i64::from(MAX_POINTS), "{window:?}: {points}");
     }
@@ -62,7 +66,10 @@ fn tool_activity_adds_up_statuses_and_ranks_by_calls() {
         (labels(&[("tool", "list_pods"), ("status", "ok")]), 40.0),
         (labels(&[("tool", "list_pods"), ("status", "error")]), 2.0),
         (labels(&[("tool", "apply_manifest"), ("status", "ok")]), 3.0),
-        (labels(&[("tool", "apply_manifest"), ("status", "denied")]), 1.0),
+        (
+            labels(&[("tool", "apply_manifest"), ("status", "denied")]),
+            1.0,
+        ),
         (labels(&[("tool", "get_pod"), ("status", "ok")]), 0.0),
         // No tool label: ignored.
         (labels(&[("status", "ok")]), 9.0),
@@ -190,7 +197,11 @@ async fn a_round_trip_against_prometheus() {
     let r = activity(Some(&url), &http, ActivityWindow::Day, now).await;
     assert_eq!(r.unavailable_reason, None);
 
-    let labels: Vec<&str> = r.calls_per_minute.iter().map(|s| s.label.as_str()).collect();
+    let labels: Vec<&str> = r
+        .calls_per_minute
+        .iter()
+        .map(|s| s.label.as_str())
+        .collect();
     assert_eq!(labels, ["error", "ok"]);
     let ok = &r.calls_per_minute[1];
     assert_eq!(ok.points.len(), 2);
@@ -208,7 +219,11 @@ async fn a_round_trip_against_prometheus() {
     let asked = asked.lock().unwrap();
     assert_eq!(asked.len(), 5);
     for (path, form) in asked.iter() {
-        let get = |k: &str| form.iter().find(|(key, _)| key == k).map(|(_, v)| v.as_str());
+        let get = |k: &str| {
+            form.iter()
+                .find(|(key, _)| key == k)
+                .map(|(_, v)| v.as_str())
+        };
         if path == "query_range" {
             assert_eq!(get("start"), Some("1795000000"));
             assert_eq!(get("end"), Some("1795086400"));
@@ -222,9 +237,9 @@ async fn a_round_trip_against_prometheus() {
 #[tokio::test]
 async fn a_failing_prometheus_is_reported_not_raised() {
     let _ = rustls::crypto::ring::default_provider().install_default();
-    let (url, _) = fake_prometheus(|_, _| {
-        json!({"status": "error", "errorType": "bad_data", "error": "parse error"})
-    })
+    let (url, _) = fake_prometheus(
+        |_, _| json!({"status": "error", "errorType": "bad_data", "error": "parse error"}),
+    )
     .await;
     let http = reqwest::Client::new();
     let r = activity(Some(&url), &http, ActivityWindow::Hour, 1_795_000_000).await;
