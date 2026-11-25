@@ -68,6 +68,13 @@ deployment create or update (POST /api/:ns/deployments, PATCH /...)
       └─ apply merged Deployment to Kubernetes API
 ```
 
+Every call compiles the plugin's WebAssembly before instantiating it. With
+`DECKWATCH_CACHE_DIR` set, as the Helm chart does by default (its `cache`
+values), compiled code is cached on disk in that directory: each pod compiles
+a plugin binary once, and later calls load it from the cache. Without it,
+every call compiles. A cache directory deckwatch can't use is logged and the
+cache turned off; the cache never makes a plugin call fail.
+
 ---
 
 ## Configuring plugins
