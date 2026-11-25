@@ -36,7 +36,7 @@ first.
 - **Kubernetes 1.33 or newer is required.** deckwatch builds against kube 5
   and k8s-openapi 0.29 with the Kubernetes 1.33 API (`v1_33`), and the chart
   declares `kubeVersion: ">=1.33.0-0"`, so Helm refuses older clusters. The
-  embedded mcp-k8s (now v0.5.1) uses the same API types: its tools for alpha
+  embedded mcp-k8s (now v0.5.2) uses the same API types: its tools for alpha
   and beta APIs (DRA, VolumeAttributesClass, ClusterTrustBundle,
   LeaseCandidate, MutatingAdmissionPolicy, StorageVersion,
   StorageVersionMigration) return the API server's 404 on clusters that don't
@@ -226,9 +226,21 @@ first.
   credentials) and are only sent to AWS hosts. Responses don't stream: the
   reply arrives as one chunk. Not yet tested against real AWS. (#253, #254)
 - **Helm `logFilter`**, passed to deckwatch as `RUST_LOG`. (#256)
-- **One log line per MCP tool call:** `mcp tool call`, with `tool`, `status`
-  (`ok` or `error`) and `duration_ms`. Arguments and error text are never
-  logged. (#256)
+- **One log line per MCP tool call:** `tool call finished` (target
+  `mcp_k8s::telemetry`), with the tool, outcome, `duration_ms`, action
+  class, decision and target. Requests that reach no tool log
+  `request finished`. Argument values beyond mcp-k8s's allowlist and error
+  text are never logged. (#256, #266)
+- **MCP telemetry.** Every `/mcp` request is one OpenTelemetry server span
+  following the MCP conventions, one `mcp.server.operation.duration`
+  observation and one log line. This covers deckwatch's own tools and the
+  mcp-k8s ones; intercepted tools still count once. Requests join the
+  caller's trace (`params._meta.traceparent`, or the `traceparent` header)
+  when OTLP export is on. (#266)
+- **MCP sessions.** `initialize` returns an `Mcp-Session-Id`. Later requests
+  that send it back are labelled with the client's self-reported name and
+  version, on spans only and never on metrics. A missing, unknown or
+  expired id is never refused. (#266)
 - **MCP `get_resource_json`** (from mcp-k8s v0.4.0) returns any resource as
   JSON. `get_resource_yaml`, which always returned JSON too, remains as a
   deprecated alias. (#252)
@@ -316,6 +328,14 @@ first.
 
 ### Changed
 
+- **MCP metrics count each call once.** `deckwatch_mcp_tool_calls_total` no
+  longer counts intercepted tools that deckwatch hands on to mcp-k8s
+  (`create_deployment`, `delete_deployment`, `scale_deployment`,
+  `restart_deployment`, `apply_manifest`, and `create_pod`/`update_deployment`
+  when they delegate). `mcp_k8s_tool_calls_total` counts those, so
+  dashboards that add the two no longer count them twice.
+  `deckwatch_mcp_requests_total` labels methods outside the MCP spec
+  `_OTHER` instead of using the raw, client-chosen method. (#266)
 - **mcp-k8s and plugin log lines are kept.** The default log filter is now
   `deckwatch=info,tower_http=info,mcp_k8s=info,extism::pdk=info,opentelemetry=warn`;
   a valid `RUST_LOG` still replaces it. `opentelemetry=warn` shows failed
@@ -333,10 +353,10 @@ first.
   public repositories. (#253)
 - A `PUT /api/settings` without `endpoints` keeps the stored endpoints.
   (#253)
-- **mcp-k8s is pinned to the v0.5.1 tag** (it followed `main`) and is built
+- **mcp-k8s is pinned to the v0.5.2 tag** (it followed `main`) and is built
   without its standalone server's dependencies. Tool names, parameters and
   outputs are unchanged, apart from the API versions in the upgrade notes.
-  (#236, #252, #259)
+  (#236, #252, #259, #266)
 - **MCP `enable_plugin` loads the plugin before it returns** and reports
   fetch, checksum, metadata or version problems; it reloads only that plugin
   instead of all of them. (#261)
@@ -395,7 +415,7 @@ first.
 ### Dependencies
 
 - **Rust:** kube 4 → 5.1 and k8s-openapi 0.28 → 0.29 (#252), with kube's
-  `runtime` feature (#265); mcp-k8s v0.5.1 (#236, #252, #259); OpenTelemetry
+  `runtime` feature (#265); mcp-k8s v0.5.2 (#236, #252, #259, #266); OpenTelemetry
   0.33 and tracing-opentelemetry 0.34 (#260); extism 1.30 → 1.41 and
   jsonwebtoken 9 → 12 (#183); rand 0.8 → 0.10, aes-gcm 0.10 → 0.11 and
   ed25519-dalek 2 → 3 (#216); hmac 0.12 → 0.13 and sha2 0.10 → 0.11 (#227);
