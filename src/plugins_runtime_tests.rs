@@ -154,10 +154,10 @@ async fn no_more_than_the_limit_of_plugin_calls_run_at_once() {
     );
 }
 
-/// No call timeout is configured by default (#301), and then a plugin HTTP
-/// request that never gets an answer never returns. Calls like that must not
-/// hold their slots past the wait, or a few of them would stop every later
-/// plugin call.
+/// extism stops a call at its time limit, but not while it compiles the
+/// module, and Tokio can't stop a blocking task. A call that never returns
+/// must not hold its slot past the wait, or a few of them would stop every
+/// later plugin call.
 #[tokio::test]
 async fn calls_that_never_return_give_up_their_slots_when_the_wait_runs_out() {
     // Enough of them to take every slot. Each blocks until its sender is
@@ -202,6 +202,16 @@ fn callers_wait_a_little_longer_than_the_call_timeout_or_two_minutes() {
         Duration::from_secs(35)
     );
     assert_eq!(call_wait(Some(Duration::MAX)), Duration::MAX);
+}
+
+/// deckwatch always sets a call timeout (#301), so the two-minute wait isn't
+/// the normal path: with the default limit, callers wait 65 s.
+#[test]
+fn with_the_default_time_limit_callers_wait_65_seconds() {
+    use clap::Parser as _;
+    let config = crate::config::Config::try_parse_from(["deckwatch"]).unwrap();
+    let telemetry = PluginTelemetry::new("", config.plugin_call_timeout);
+    assert_eq!(call_wait(telemetry.call_timeout()), Duration::from_secs(65));
 }
 
 /// When deckwatch stops waiting, the call fails as a timeout that says the
