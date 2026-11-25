@@ -414,6 +414,101 @@ fn restore_secrets_rejects_masked_value_without_stored_original() {
     assert!(err.contains("AWS_SECRET_KEY"), "{err}");
 }
 
+// ── stored plugin secrets stay with the code they were entered for ──────────
+
+/// The keys `aws_public_keys` masks, as the masked document carries them.
+const MASKED_AWS_KEYS: [&str; 2] = ["API_TOKEN", "AWS_SECRET_ACCESS_KEY"];
+
+fn masked_settings() -> DeckwatchSettings {
+    let mut s = settings_with_secrets();
+    mask_secrets(&mut s, &aws_public_keys());
+    s
+}
+
+#[test]
+fn restore_secrets_refuses_to_hand_stored_values_to_a_new_source() {
+    let stored = settings_with_secrets();
+    let mut incoming = masked_settings();
+    incoming.plugins[0].source = PluginSource::Url {
+        url: "https://plugins.example.com/other.wasm".into(),
+    };
+
+    let err = restore_secrets(&mut incoming, &stored).expect_err("must reject");
+    assert!(err.contains("plugin 'aws' has a new source"), "{err}");
+    for key in MASKED_AWS_KEYS {
+        assert!(err.contains(key), "{key} not named: {err}");
+    }
+    for secret in SECRETS {
+        assert!(!err.contains(secret), "{secret} in {err}");
+    }
+}
+
+#[test]
+fn restore_secrets_refuses_for_a_changed_or_removed_pin() {
+    let mut pinned = settings_with_secrets();
+    pinned.plugins[0].sha256 = Some("a".repeat(64));
+
+    for pin in [Some("b".repeat(64)), None] {
+        let mut incoming = pinned.clone();
+        mask_secrets(&mut incoming, &aws_public_keys());
+        incoming.plugins[0].sha256 = pin.clone();
+        let err = restore_secrets(&mut incoming, &pinned).expect_err("pin changed");
+        assert!(err.contains("has a new sha256 pin"), "{pin:?}: {err}");
+    }
+}
+
+/// Same code: adding a pin only narrows what runs, and the other fields
+/// don't change the code.
+#[test]
+fn restore_secrets_keeps_values_while_the_code_stays_the_same() {
+    let stored = settings_with_secrets();
+    let mut incoming = stored.clone();
+    mask_secrets(&mut incoming, &aws_public_keys());
+    incoming.plugins[0].sha256 = Some("a".repeat(64));
+    incoming.plugins[0].enabled = false;
+    incoming.plugins[0].inherit_env_keys = vec!["AWS_REGION".into()];
+
+    restore_secrets(&mut incoming, &stored).expect("restore");
+    assert_eq!(incoming.plugins[0].config, stored.plugins[0].config);
+}
+
+#[test]
+fn restore_secrets_accepts_values_entered_again_for_a_new_source() {
+    let stored = settings_with_secrets();
+    let mut incoming = masked_settings();
+    incoming.plugins[0].source = PluginSource::Url {
+        url: "https://plugins.example.com/other.wasm".into(),
+    };
+    for key in MASKED_AWS_KEYS {
+        incoming.plugins[0]
+            .config
+            .insert(key.to_string(), format!("new-{key}"));
+    }
+
+    restore_secrets(&mut incoming, &stored).expect("restore");
+    let cfg = &incoming.plugins[0].config;
+    assert_eq!(cfg["AWS_SECRET_ACCESS_KEY"], "new-AWS_SECRET_ACCESS_KEY");
+    assert_eq!(cfg["API_TOKEN"], "new-API_TOKEN");
+    assert_eq!(cfg["AWS_REGION"], stored.plugins[0].config["AWS_REGION"]);
+}
+
+#[test]
+fn drop_masked_config_keeps_public_and_empty_values() {
+    let mut s = settings_with_secrets();
+    let public = aws_public_keys();
+    let mut dropped = drop_masked_config(&mut s.plugins[0], public.get("aws"));
+    dropped.sort();
+    assert_eq!(dropped, MASKED_AWS_KEYS);
+    let keys: Vec<&str> = s.plugins[0].config.keys().map(String::as_str).collect();
+    assert_eq!(keys, ["AWS_REGION", "EMPTY"]);
+
+    // Not loaded: nothing is declared public, so every value goes.
+    let mut s = settings_with_secrets();
+    drop_masked_config(&mut s.plugins[0], None);
+    let keys: Vec<&str> = s.plugins[0].config.keys().map(String::as_str).collect();
+    assert_eq!(keys, ["EMPTY"]);
+}
+
 // ── handler-level: GET /api/settings → PUT /api/settings round trips ────────
 
 /// AppState backed by a temp-file SQLite DB. The kube client points at an
@@ -515,6 +610,73 @@ async fn put_without_credentials_does_not_wipe_them() {
         Some("ciphertext-anthropic")
     );
     assert_eq!(creds.gcp_sa_key.as_deref(), Some("ciphertext-gcp"));
+}
+
+/// A loaded `aws` plugin whose schema declares `AWS_SECRET_ACCESS_KEY` a
+/// plain string: what a swapped-in binary can claim about itself.
+fn plugin_claiming_the_secret_is_public() -> crate::plugins::LoadedPlugin {
+    let mut plugin = crate::plugin_fixture::FixturePlugin::new().loaded("aws");
+    plugin.metadata.config_schema = ["AWS_REGION", "AWS_SECRET_ACCESS_KEY"]
+        .into_iter()
+        .map(|key| crate::plugins::ConfigField {
+            key: key.to_string(),
+            label: key.to_string(),
+            field_type: crate::plugins::ConfigFieldType::String,
+            ..Default::default()
+        })
+        .collect();
+    plugin
+}
+
+/// A settings writer who points a plugin at other code can't take its stored
+/// values along, so the new binary's schema can't unmask them either.
+#[tokio::test]
+async fn a_source_swap_never_exposes_values_stored_for_the_old_source() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let (state, seeded) = seeded_state(tmp.path()).await;
+
+    let Json(mut payload) = get_settings(State(state.clone())).await.expect("get");
+    payload.plugins[0].source = PluginSource::Url {
+        url: "https://plugins.example.com/other.wasm".into(),
+    };
+    let err = put_settings(State(state.clone()), Json(payload.clone()))
+        .await
+        .expect_err("masked values for a new source");
+    assert!(
+        matches!(&err, AppError::BadRequest(m) if m.contains("has a new source")),
+        "{err:?}"
+    );
+    let stored = load_settings_from_db(&state).await;
+    assert_eq!(
+        serde_json::to_value(&stored).expect("stored"),
+        serde_json::to_value(&seeded).expect("seeded"),
+        "a refused PUT changes nothing"
+    );
+
+    // Saved without the masked values, the swap goes through; the new binary
+    // then claims the secret is a plain string.
+    payload.plugins[0]
+        .config
+        .retain(|_, value| value != MASKED_VALUE);
+    let _ = put_settings(State(state.clone()), Json(payload))
+        .await
+        .expect("swap without the stored values");
+    *state.plugins.write().await = vec![plugin_claiming_the_secret_is_public()];
+
+    let Json(after) = get_settings(State(state.clone())).await.expect("get");
+    assert_no_secrets(&after, "GET /api/settings after a source swap");
+    let stored = load_settings_from_db(&state).await;
+    let config = serde_json::to_string(&stored.plugins[0].config).expect("config");
+    for secret in ["plaintext-secret", "ciphertext-token"] {
+        assert!(!config.contains(secret), "{secret} carried over: {config}");
+    }
+    let audit = audit_entries(&state).await;
+    assert!(
+        audit
+            .iter()
+            .any(|e| e.detail == "changed the source of plugin 'aws'"),
+        "{audit:?}"
+    );
 }
 
 // ── endpoints and credential bindings ───────────────────────────────────────

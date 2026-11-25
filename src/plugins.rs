@@ -1084,14 +1084,7 @@ async fn fetch_bytes(
 ) -> anyhow::Result<Vec<u8>> {
     // Uploaded WASMs are read from disk — no HTTP needed.
     if let PluginSource::Upload { filename } = &cfg.source {
-        let path = upload_path(std::path::Path::new(UPLOADS_DIR), filename).ok_or_else(|| {
-            anyhow::anyhow!(
-                "uploaded plugin file {filename:?} isn't a plain file name in the uploads directory"
-            )
-        })?;
-        return tokio::fs::read(&path)
-            .await
-            .map_err(|e| anyhow::anyhow!("failed to read uploaded plugin {filename}: {e}"));
+        return read_upload(std::path::Path::new(UPLOADS_DIR), cfg, filename).await;
     }
 
     let endpoints = settings.endpoints.clone().unwrap_or_default();
@@ -1125,34 +1118,56 @@ async fn fetch_bytes(
     }
     let bytes = resp.bytes().await?.to_vec();
 
-    // Verify SHA-256 checksum when the catalog entry provides one.
-    // Reject mismatches to prevent tampered or corrupted WASM from loading.
     // Log a warning (but allow load) when no checksum is configured, so
     // development workflows aren't blocked while still surfacing the gap.
-    match &cfg.sha256 {
-        Some(expected_hex) => {
-            let actual_hex = sha256_hex(&bytes);
-            if actual_hex != *expected_hex {
-                return Err(ChecksumMismatch {
-                    plugin: cfg.name.clone(),
-                    expected: expected_hex.clone(),
-                    actual: actual_hex,
-                }
-                .into());
-            }
-            tracing::debug!(plugin = %cfg.name, "SHA-256 checksum verified");
-        }
-        None => {
-            tracing::warn!(
-                plugin = %cfg.name,
-                url = %url,
-                "no sha256 checksum configured for plugin — \
-                 consider pinning a checksum in settings to prevent supply-chain tampering"
-            );
-        }
+    if !verify_checksum(cfg, &bytes)? {
+        tracing::warn!(
+            plugin = %cfg.name,
+            url = %url,
+            "no sha256 checksum configured for plugin — \
+             consider pinning a checksum in settings to prevent supply-chain tampering"
+        );
     }
 
     Ok(bytes)
+}
+
+/// Read the uploaded binary `filename` of plugin `cfg` from `dir`. A pin
+/// applies to uploads as to downloads.
+async fn read_upload(
+    dir: &std::path::Path,
+    cfg: &PluginConfig,
+    filename: &str,
+) -> anyhow::Result<Vec<u8>> {
+    let path = upload_path(dir, filename).ok_or_else(|| {
+        anyhow::anyhow!(
+            "uploaded plugin file {filename:?} isn't a plain file name in the uploads directory"
+        )
+    })?;
+    let bytes = tokio::fs::read(&path)
+        .await
+        .map_err(|e| anyhow::anyhow!("failed to read uploaded plugin {filename}: {e}"))?;
+    verify_checksum(cfg, &bytes)?;
+    Ok(bytes)
+}
+
+/// Check `bytes` against the plugin's `sha256` pin, rejecting a mismatch so
+/// tampered or corrupted WASM never loads. `Ok(false)` when there's no pin.
+fn verify_checksum(cfg: &PluginConfig, bytes: &[u8]) -> anyhow::Result<bool> {
+    let Some(expected_hex) = &cfg.sha256 else {
+        return Ok(false);
+    };
+    let actual_hex = sha256_hex(bytes);
+    if actual_hex != *expected_hex {
+        return Err(ChecksumMismatch {
+            plugin: cfg.name.clone(),
+            expected: expected_hex.clone(),
+            actual: actual_hex,
+        }
+        .into());
+    }
+    tracing::debug!(plugin = %cfg.name, "SHA-256 checksum verified");
+    Ok(true)
 }
 
 /// Download URL for a plugin source, plus the GitHub endpoint it points at
@@ -3461,6 +3476,40 @@ mod tests {
                 "{filename}: {err}"
             );
         }
+    }
+
+    /// A pin used to be ignored for uploads: the bytes were returned before
+    /// the checksum was compared.
+    #[tokio::test]
+    async fn a_pin_applies_to_uploaded_binaries() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("demo.wasm"), b"\0asm uploaded").unwrap();
+        let mut cfg = PluginConfig {
+            name: "demo".into(),
+            enabled: true,
+            source: PluginSource::Upload {
+                filename: "demo.wasm".into(),
+            },
+            token_secret: None,
+            allowed_hosts: vec![],
+            config: Default::default(),
+            inherit_env_keys: vec![],
+            inherit_env_file_keys: Default::default(),
+            sha256: Some("0".repeat(64)),
+            mcp_tuning: Default::default(),
+        };
+        let err = read_upload(dir.path(), &cfg, "demo.wasm")
+            .await
+            .unwrap_err();
+        assert!(err.downcast_ref::<ChecksumMismatch>().is_some(), "{err:#}");
+
+        cfg.sha256 = Some(sha256_hex(b"\0asm uploaded"));
+        assert_eq!(
+            read_upload(dir.path(), &cfg, "demo.wasm").await.unwrap(),
+            b"\0asm uploaded"
+        );
+        cfg.sha256 = None;
+        assert!(read_upload(dir.path(), &cfg, "demo.wasm").await.is_ok());
     }
 
     #[test]

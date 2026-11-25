@@ -232,7 +232,7 @@ async fn upload_for_a_configured_plugin_lands_in_the_uploads_dir() {
     let uploads = dir.path().join("uploads");
     configure(&state, &["demo"]).await;
 
-    let status = store_upload(
+    let result = store_upload(
         state.clone(),
         &uploads,
         "demo".to_string(),
@@ -240,12 +240,136 @@ async fn upload_for_a_configured_plugin_lands_in_the_uploads_dir() {
     )
     .await
     .unwrap();
-    assert_eq!(status, StatusCode::NO_CONTENT);
+    assert_eq!(result.sha256, crate::plugins::sha256_hex(WASM));
     assert_eq!(std::fs::read(uploads.join("demo.wasm")).unwrap(), WASM);
+    assert_eq!(files_under(&uploads), ["demo.wasm"], "no staged file left");
     let settings = crate::handlers::settings::load_settings_from_db(&state).await;
     assert!(
         matches!(&settings.plugins[0].source, PluginSource::Upload { filename } if filename == "demo.wasm"),
         "{:?}",
         settings.plugins[0].source
     );
+}
+
+// ---------------------------------------------------------------------------
+// An upload is other code: it gets none of the stored secrets
+// ---------------------------------------------------------------------------
+
+/// Configure `demo` with a public, a secret and an empty value, pinned to
+/// `pin`, and load a `demo` whose schema says which is which.
+async fn demo_with_secrets(dir: &std::path::Path, pin: Option<String>) -> AppState {
+    let mut loaded = crate::plugin_fixture::FixturePlugin::new().loaded("demo");
+    loaded.metadata.config_schema = vec![
+        ConfigField {
+            key: "REGION".into(),
+            field_type: crate::plugins::ConfigFieldType::String,
+            ..Default::default()
+        },
+        ConfigField {
+            key: "TOKEN".into(),
+            field_type: crate::plugins::ConfigFieldType::Secret,
+            ..Default::default()
+        },
+    ];
+    let state = crate::plugin_fixture::test_state(dir, vec![loaded], None).await;
+    configure(&state, &["demo"]).await;
+    let mut settings = crate::handlers::settings::load_settings_from_db(&state).await;
+    settings.plugins[0].sha256 = pin;
+    settings.plugins[0].config = [
+        ("REGION", "us-east-1"),
+        ("TOKEN", "s3cr3t-token"),
+        ("UNDECLARED", "s3cr3t-undeclared"),
+        ("EMPTY", ""),
+    ]
+    .into_iter()
+    .map(|(k, v)| (k.to_string(), v.to_string()))
+    .collect();
+    crate::handlers::settings::upsert_settings_to_db_pub(&state.db, &settings)
+        .await
+        .unwrap();
+    state
+}
+
+async fn demo_config(state: &AppState) -> Vec<(String, String)> {
+    let settings = crate::handlers::settings::load_settings_from_db(state).await;
+    settings.plugins[0]
+        .config
+        .iter()
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect()
+}
+
+#[tokio::test]
+async fn an_unpinned_upload_drops_the_masked_config_values() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = demo_with_secrets(dir.path(), None).await;
+    let uploads = dir.path().join("uploads");
+
+    let result = store_upload(
+        state.clone(),
+        &uploads,
+        "demo".to_string(),
+        Bytes::from_static(WASM),
+    )
+    .await
+    .unwrap();
+    assert_eq!(result.cleared_config_keys, ["TOKEN", "UNDECLARED"]);
+    assert_eq!(
+        demo_config(&state).await,
+        [
+            ("EMPTY".to_string(), String::new()),
+            ("REGION".to_string(), "us-east-1".to_string()),
+        ]
+    );
+    let audit = <crate::entities::audit_log::Entity as sea_orm::EntityTrait>::find()
+        .all(&state.db)
+        .await
+        .unwrap();
+    assert!(
+        audit
+            .iter()
+            .any(|e| e.detail.contains("dropped 2 stored config value(s)")),
+        "{audit:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_pinned_plugin_only_takes_the_pinned_binary() {
+    let dir = tempfile::tempdir().unwrap();
+    let pin = crate::plugins::sha256_hex(b"\0asm the pinned build");
+    let state = demo_with_secrets(dir.path(), Some(pin.clone())).await;
+    let uploads = dir.path().join("uploads");
+    let before = crate::handlers::settings::load_settings_from_db(&state).await;
+
+    let err = store_upload(
+        state.clone(),
+        &uploads,
+        "demo".to_string(),
+        Bytes::from_static(WASM),
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        matches!(&err, AppError::BadRequest(m) if m.contains(&format!("pinned to sha256 {pin}"))),
+        "{err:?}"
+    );
+    assert!(!uploads.exists(), "nothing was written");
+    let after = crate::handlers::settings::load_settings_from_db(&state).await;
+    assert_eq!(
+        serde_json::to_value(&after.plugins).unwrap(),
+        serde_json::to_value(&before.plugins).unwrap(),
+        "source and config unchanged"
+    );
+
+    // The pinned binary itself goes in, and keeps the config.
+    let result = store_upload(
+        state.clone(),
+        &uploads,
+        "demo".to_string(),
+        Bytes::from_static(b"\0asm the pinned build"),
+    )
+    .await
+    .unwrap();
+    assert!(result.cleared_config_keys.is_empty());
+    assert_eq!(demo_config(&state).await.len(), 4);
 }
