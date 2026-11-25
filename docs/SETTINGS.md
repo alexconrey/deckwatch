@@ -30,7 +30,7 @@ The Settings page renders a sidebar tree with the following sections:
 | **Container Registries** | `container_registries` | Managed list of OCI registries for GitOps dropdowns |
 | **Plugins** | `plugins` | External WASM plugins loaded from Git repositories |
 | **MCP Tuning** | `mcp_tuning` | Resource-scoped org guidance injected into MCP tool descriptions |
-| **Audit Log** | `audit` | Read-only view of the `audit_log` table |
+| **Audit Log** | `audit` | Read-only view of the `audit_log` table: UI/API changes, and MCP tool calls that write, delete or exec or were denied (see [MCP.md](MCP.md#audit-log)). Retention is deployment config (`DECKWATCH_AUDIT_RETENTION_DAYS`, `DECKWATCH_AUDIT_MAX_ROWS`), not a setting |
 
 ## Schema
 
@@ -124,9 +124,33 @@ To activate once ready:
 4. Restart the deckwatch pod so it re-reads settings at startup and layers
    the `require_auth` middleware onto the API router.
 
-## Configuring notifications (Coming Soon)
+## Configuring notifications
 
-Same pattern -- persist the webhook URL now, activate later.
+Notifications go to one webhook: Slack, Microsoft Teams, or any receiver of
+JSON (the payload carries `text`, `event_type` and the structured `event`).
+Set them under Settings → Notifications:
+
+- `enabled` and `webhook_url`;
+- `event_types`: the event types to send (empty sends all);
+- `namespaces`: the namespaces to send about (empty sends all).
+
+Settings are read from the database on every send, so a change applies to
+the next notification. The **Test** button sends a test message.
+
+What deckwatch sends today:
+
+| Event type | When |
+|---|---|
+| `plugin_failing` | A plugin target starts failing: a provisioned resource, a plugin's `apply()` for an application, or a plugin that fails to load. Sent once when it starts failing, never on every reconcile. |
+| `plugin_recovered` | A failing plugin target works again. |
+
+A target that fails again within 10 minutes of its last `plugin_failing`
+notification sends nothing (nor its next recovery), so a flapping plugin
+can't flood the channel. A plugin that fails to load concerns every
+namespace and ignores the `namespaces` filter. Plugin text in the message is
+escaped, so it can't become a Slack mention or link. The other event types
+(`build_*`, `deployment_*`, `application_*`, `pod_crash_loop`) can be
+selected but aren't sent yet.
 
 ## Local development
 

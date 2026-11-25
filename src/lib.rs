@@ -27,16 +27,23 @@ mod metrics;
 mod migrations;
 mod notifications;
 pub mod outbound;
+mod plugin_events;
+#[cfg(test)]
+mod plugin_fixture;
+mod plugin_k8s_events;
+mod plugin_status;
 mod plugins;
 mod rate_limit;
 mod routes;
 mod state;
+mod telemetry;
 mod watcher;
 mod webhook_registration;
 mod webhook_tls;
 
 use clap::Parser;
 use tokio::net::TcpListener;
+use tracing_subscriber::util::SubscriberInitExt as _;
 
 use config::Config;
 use handlers::registry::RegistryStore;
@@ -48,10 +55,21 @@ use state::AppState;
 pub async fn run() {
     let _ = rustls::crypto::ring::default_provider().install_default();
 
-    tracing_subscriber::fmt()
-        .with_env_filter(logging::env_filter())
-        .json()
-        .init();
+    // JSON logs on stdout, plus OpenTelemetry export of deckwatch's own
+    // telemetry when an OTEL_EXPORTER_OTLP_*ENDPOINT is set (src/telemetry.rs).
+    let telemetry = telemetry::Telemetry::from_env();
+    telemetry::subscriber(
+        logging::env_filter(),
+        telemetry.telemetry(),
+        std::io::stdout,
+    )
+    .init();
+    telemetry.log();
+    // Plugins get the trace context of their call (`trace_context`), so
+    // their own API calls join the trace, only while traces are exported.
+    if telemetry.telemetry().is_some_and(|t| t.signals().traces) {
+        plugin_events::install_trace_context_provider(plugin_events::otel_traceparent);
+    }
 
     metrics::init();
 
@@ -152,21 +170,35 @@ pub async fn run() {
         plugin_patch_fingerprints: std::sync::Arc::new(tokio::sync::Mutex::new(
             std::collections::HashMap::new(),
         )),
+        plugin_telemetry: plugin_events::PluginTelemetry::new(config.encryption_key.clone()),
     };
 
     migrate_configmap_apps_to_db(&state).await;
     handlers::settings::bind_legacy_credentials_at_startup(&state).await;
+    // Records plugin call outcomes in the plugin_status table.
+    plugin_status::spawn_worker(&state);
 
     // Fetch plugins declared in persisted settings. Failures per-plugin are
     // logged and skipped so a bad plugin URL never blocks startup.
     {
         let settings = handlers::settings::load_settings_from_db(&state).await;
+        state
+            .plugin_telemetry
+            .keep_plugins(plugins::enabled_plugin_names(&settings));
         if !settings.plugins.is_empty() {
             tracing::info!(count = settings.plugins.len(), "fetching plugins");
             let loaded = plugins::fetch_plugins(&settings, &state).await;
             *state.plugins.write().await = loaded;
         }
     }
+
+    audit::spawn_retention(
+        state.db.clone(),
+        audit::Retention {
+            max_age_days: config.audit_retention_days,
+            max_rows: config.audit_max_rows,
+        },
+    );
 
     let watcher_state = state.clone();
     tokio::spawn(async move {
@@ -447,3 +479,10 @@ pub mod testing {
 
 #[cfg(test)]
 mod integration_tests;
+#[cfg(test)]
+mod live_plugin_events_tests;
+#[cfg(test)]
+mod plugin_events_acceptance_tests;
+
+#[cfg(test)]
+mod test_tracing;

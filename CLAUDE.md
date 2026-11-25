@@ -9,7 +9,7 @@ health probe configuration, GitOps pipelines, an embedded OCI container
 registry, AI diagnostics, and an MCP server for Claude Code integration.
 
 **Repository:** https://github.com/alexconrey/deckwatch
-**Current version:** v0.6.7
+**Current version:** v0.7.0
 
 ## Architecture
 
@@ -19,7 +19,8 @@ registry, AI diagnostics, and an MCP server for Claude Code integration.
 - **Frontend**: Vue 3 + Vuetify 3 + TypeScript + Vite + Pinia
 - **Database**: SeaORM with SQLite (default), PostgreSQL, or MySQL
 - **Deployment**: Docker (multi-stage, distroless runtime) + Helm chart
-- **CI/CD**: GitHub Actions (cargo check/clippy/fmt, frontend build, helm lint)
+- **CI/CD**: GitHub Actions (CI on PRs and main; a tag-triggered Release
+  workflow publishes the image to GHCR and creates the GitHub Release)
 - **Local dev**: k3d cluster with port-forward
 
 ### Key design decisions
@@ -47,6 +48,9 @@ src/                              # Rust backend (library + thin binary)
   db.rs                           # Database connect + migrate + ensure_application
   audit.rs                        # Audit log insert + list endpoint
   metrics.rs                      # Prometheus metrics (deckwatch_* prefix)
+  logging.rs                      # Default log filter (RUST_LOG fallback)
+  telemetry.rs                    # Subscriber + optional OTLP export of deckwatch's
+                                  #   own traces/logs/metrics (OTEL_*, docs/TRACING.md)
   entities/                       # SeaORM entity definitions
     settings.rs                   # settings table (key-value)
     applications.rs               # applications table
@@ -193,41 +197,80 @@ cd frontend && npx vitest run                 # Frontend (~70+ tests)
 
 ### CI
 
-CI runs on PRs to main via `.github/workflows/ci.yml`:
-- `cargo check --locked`
-- `cargo check --locked --all-targets` (tests must compile; they are not run in CI yet)
-- `cargo clippy -- -D warnings`
-- `cargo fmt --check`
-- Frontend: `pnpm install && vite build`
-- `helm lint`
+CI (`.github/workflows/ci.yml`) runs on every PR to main and every push to
+main:
+- **Rust Check:** `cargo clippy --locked --all-targets -- -D warnings`,
+  `cargo test --locked`, `cargo fmt --check`
+- **Frontend Build:** `pnpm install --frozen-lockfile`, `pnpm run build`,
+  `pnpm run typecheck:test`, `pnpm test`
+- **Docs Build:** the mdBook manual, built the way the image builds it
+- **Helm Lint:** `helm lint`
+- **Release Check:** the tests for `.github/scripts/release-notes.sh`, and
+  that script run against the current version (see "Cutting a release")
+- **Docker Build:** the release image (linux/amd64, not pushed), on every
+  push to main, and on PRs that change the files in the `changes` job's
+  pattern
 
 The Rust toolchain is pinned in `rust-toolchain.toml` and must match the
 `rust:<version>` image tag in the `Dockerfile` (CI fails if they differ), so
 bump both in the same PR.
 
-Publish workflow (`.github/workflows/publish.yml`) builds multi-arch image to
-GHCR on tag push.
+The Release workflow (`.github/workflows/publish.yml`) runs on `v*` tags; see
+"Cutting a release".
 
 ### Cutting a release
 
+A release is the image `ghcr.io/alexconrey/deckwatch:X.Y.Z` (no `v`) plus the
+Helm chart in `helm/deckwatch` at version X.Y.Z, both built from the tag
+`vX.Y.Z`. Its notes are the `## [X.Y.Z]` section of `CHANGELOG.md` (Keep a
+Changelog 1.1.0 and semver; within 0.x a minor release may break things).
+
 **CRITICAL:** The Helm chart version MUST stay in lockstep with the application
-version. Never tag a release without updating the Helm chart — a mismatched
-`appVersion` in `Chart.yaml` causes the deployed UI to show the wrong version
-and breaks ArgoCD drift detection.
+version. A mismatched `appVersion` in `Chart.yaml` causes the deployed UI to
+show the wrong version and breaks ArgoCD drift detection. The Release workflow
+refuses a tag that doesn't match all of the versions.
 
-When bumping the version, update **all four files in the same commit**:
-1. `Cargo.toml` → `version`
-2. `Cargo.lock` → run `cargo check` to regenerate
-3. `helm/deckwatch/Chart.yaml` → `version` AND `appVersion`
-4. `frontend/package.json` → `version` (the UI footer reads this automatically)
+1. **Changes accumulate under `## [Unreleased]`** in `CHANGELOG.md`: every PR
+   with a user-visible change adds its entry there (see Git Workflow). The
+   version doesn't change between releases.
+2. **The release PR** (branch `release/vX.Y.Z`; collect everything planned for
+   the release on main first) does two things:
+   - **Dates the section.** Rename `## [Unreleased]` to
+     `## [X.Y.Z] - YYYY-MM-DD` with the PR's date (the maintainer updates it if
+     the tag slips), add a new empty `## [Unreleased]` above it, and update
+     the compare links at the bottom. Sections are ordered Upgrade notes,
+     Security, Added, Changed, Fixed, Dependencies, Internal and CI.
+   - **Bumps the five version spots in one commit:**
+     1. `Cargo.toml` → `version`
+     2. `Cargo.lock` → deckwatch's own `[[package]]` entry only. Edit that one
+        line and check it with `cargo metadata --locked`. Don't run
+        `cargo update`: it re-resolves unrelated packages.
+     3. `helm/deckwatch/Chart.yaml` → `version` AND `appVersion`
+     4. `frontend/package.json` → `version` (the UI footer reads it)
+     5. `CLAUDE.md` → `Current version`
 
-Also update `CLAUDE.md` → `Current version` in the same commit.
+   Preview the notes, or the refusal, with
+   `.github/scripts/release-notes.sh vX.Y.Z`; CI's Release Check job runs it
+   for the current version on every PR. If more PRs land on main before the
+   tag, merge `origin/main` into the release PR and add their entries; don't
+   rebase it.
+3. **The maintainer merges the release PR, then tags** `vX.Y.Z` on main and
+   pushes the tag. Agents never create tags or GitHub Releases.
+4. **The Release workflow** (`.github/workflows/publish.yml`) runs on the tag,
+   one run per tag, never cancelled:
+   - **Verify tag** runs `release-notes.sh`, which refuses the tag unless it
+     equals `Cargo.toml`'s version, `Chart.yaml`'s `version` and
+     `appVersion`, and `frontend/package.json`'s version, and `CHANGELOG.md`
+     has a dated, non-empty `## [X.Y.Z] - YYYY-MM-DD` section. Every other
+     job needs this one, so a refused tag publishes nothing. Fix main with a
+     PR; the maintainer then deletes the tag and tags the fixed commit.
+   - **build** and **merge** push the linux/amd64 and linux/arm64 image to
+     GHCR, tagged `X.Y.Z`, `X.Y`, `X`, the short commit SHA and `latest`.
+   - **Create GitHub Release**, the only job with `contents: write`, creates
+     the `vX.Y.Z` release from the CHANGELOG section, plus a pull command and
+     the image digest.
 
-**Do not split these across separate PRs.** A release commit must touch all five
-so the tag, the binary, the chart, the frontend, and the docs all agree.
-
-Then commit, tag (`vX.Y.Z`), and push with `--tags`. The publish workflow
-builds the multi-arch image automatically.
+`bash .github/scripts/release-notes-test.sh` tests the script (CI runs it).
 
 ## Coding Conventions
 
@@ -262,6 +305,11 @@ builds the multi-arch image automatically.
 ### Git Workflow
 - **NEVER commit directly to main** — always create a branch and open a PR
 - **NEVER push tags directly** — only tag after a PR has been merged to main
+- **PRs with user-visible changes add an entry under `## [Unreleased]` in
+  `CHANGELOG.md`**, in the same PR, with the PR number. Write for an operator
+  upgrading a deployment: what they must change and what behaves differently.
+  Anything that needs action goes under `### Upgrade notes`. Changes only to
+  CI, tests or internals may go under `### Internal and CI` or be left out.
 - Iterative small commits, not monolithic version bumps
 - Concise commit messages; larger context in PR descriptions
 - Do NOT include `Co-Authored-By: Claude` in commits or PRs
@@ -358,6 +406,29 @@ Key files: `src/plugins.rs` (fetch, execute, merge), `src/handlers/plugins.rs`
 - **Prometheus monitoring**: runtime setting in DB (Settings → Observability)
 - **Container registry**: controlled by `registry.enabled` in Helm values (not settings page)
 - **AI providers**: server-side toggles in DB (Settings → AI Providers)
+- **deckwatch's own telemetry**: off unless `OTEL_EXPORTER_OTLP_ENDPOINT` (or a
+  per-signal endpoint) is set, through Helm `telemetry.otlp.*`. Read once at
+  startup, never from the settings DB.
+
+## Logging and telemetry
+
+- Code logs with `tracing`; libraries in the process (mcp-k8s, extism plugin
+  log lines under `extism::pdk`) do the same. `src/logging.rs` holds the
+  default filter. With `RUST_LOG` unset, it keeps `deckwatch`, `tower_http`,
+  `mcp_k8s` and `extism::pdk` at info and `opentelemetry` at warn.
+- `src/telemetry.rs` builds the subscriber: JSON lines on stdout, plus
+  OpenTelemetry layers when OTLP export is configured. Spans become traces,
+  events become log records with the span's trace id (span events when logs
+  aren't exported), and `monotonic_counter.*`/`counter.*`/`histogram.*` event
+  fields become metrics. Prometheus `/metrics` is separate.
+- Export is OTLP/HTTP (`http/protobuf` only) through
+  `outbound::global().client(Purpose::Observability)`, so
+  `DECKWATCH_EXTRA_CA_FILE` applies. Never put tool arguments, Secret data, env
+  values or manifests in span or event fields: they are exported.
+- Tests: `src/telemetry_tests.rs` uses opentelemetry_sdk's in-memory exporters.
+  Callsite interest is cached per process, so a test that captures events from
+  code other tests also run should use a process-wide subscriber (see
+  `tool_call_events` in `src/handlers/mcp_tests.rs`).
 
 ## Key Files for Common Tasks
 

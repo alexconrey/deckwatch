@@ -15,7 +15,10 @@ import type {
   CreateDeploymentRequest,
   HpaResponse,
   HpaConfigRequest,
+  PluginEventReport,
 } from "@/types/api";
+import PluginEventList from "@/components/common/PluginEventList.vue";
+import { hasProblems, summarizeEvents, worstSeverity } from "@/utils/pluginEvents";
 import StatusChip from "@/components/common/StatusChip.vue";
 import ReplicaGauge from "@/components/views/deployment/ReplicaGauge.vue";
 import ConfirmDialog from "@/components/common/ConfirmDialog.vue";
@@ -48,6 +51,11 @@ const { features } = useFeatures();
 const detail = ref<DeploymentDetailResponse | null>(null);
 const loading = ref(true);
 const error = ref<string | null>(null);
+// What the plugins reported on the last update made from this page.
+const pluginEvents = ref<PluginEventReport[]>([]);
+const notePluginEvents = (resp: DeploymentDetailResponse) => {
+  pluginEvents.value = resp.plugin_events ?? [];
+};
 const actionLoading = ref(false);
 
 const showDeleteDialog = ref(false);
@@ -412,7 +420,7 @@ const handleRestart = async () => {
 const handleEdit = async (values: CreateDeploymentRequest) => {
   actionLoading.value = true;
   try {
-    await deploymentsApi.update(props.namespace, props.name, {
+    const updated = await deploymentsApi.update(props.namespace, props.name, {
       image: values.image,
       replicas: values.replicas,
       env: values.env,
@@ -424,6 +432,7 @@ const handleEdit = async (values: CreateDeploymentRequest) => {
       readiness_probe: values.readiness_probe,
       startup_probe: values.startup_probe,
     });
+    notePluginEvents(updated);
 
     // Save or delete HPA alongside the deployment update
     if (hpaForm.value.enabled) {
@@ -476,7 +485,9 @@ const handleLabelsAnnotationsSave = async () => {
   }
   actionLoading.value = true;
   try {
-    await deploymentsApi.update(props.namespace, props.name, { pod_labels, pod_annotations });
+    notePluginEvents(
+      await deploymentsApi.update(props.namespace, props.name, { pod_labels, pod_annotations }),
+    );
     showLabelsEdit.value = false;
     await fetchDetail();
   } catch (e) {
@@ -489,10 +500,12 @@ const handleLabelsAnnotationsSave = async () => {
 const handleAffinitySave = async (payload: { node_selector: Record<string, string>; node_affinity: import("@/types/api").NodeAffinityConfig }) => {
   actionLoading.value = true;
   try {
-    await deploymentsApi.update(props.namespace, props.name, {
-      node_selector: payload.node_selector,
-      node_affinity: payload.node_affinity,
-    });
+    notePluginEvents(
+      await deploymentsApi.update(props.namespace, props.name, {
+        node_selector: payload.node_selector,
+        node_affinity: payload.node_affinity,
+      }),
+    );
     showAffinityDialog.value = false;
     await fetchDetail();
   } catch (e) {
@@ -776,6 +789,21 @@ const handleDeleteIngress = async () => {
 
     <v-alert v-if="error" type="error" class="mb-4" closable>
       {{ error }}
+    </v-alert>
+
+    <v-alert
+      v-if="hasProblems(pluginEvents)"
+      :type="worstSeverity(pluginEvents) === 'error' ? 'error' : 'warning'"
+      variant="tonal"
+      class="mb-4"
+      closable
+      data-testid="update-plugin-events"
+      @click:close="pluginEvents = []"
+    >
+      <div class="mb-1">
+        Saved. The plugins reported {{ summarizeEvents(pluginEvents) }}:
+      </div>
+      <PluginEventList :events="pluginEvents" />
     </v-alert>
 
     <v-progress-linear v-if="loading" indeterminate color="primary" />

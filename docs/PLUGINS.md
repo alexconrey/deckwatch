@@ -32,6 +32,7 @@ Deckwatch supports external plugins — compiled WASM binaries hosted in Git rep
 | Env var injection | Shipped | Static values, `secretKeyRef`, `configMapKeyRef` |
 | Sidecar injection | Shipped | |
 | Kubernetes resource creation | Shipped | CRDs, ExternalSecrets, CronJobs, etc. via server-side apply |
+| Kubernetes object deletion on deprovision | Shipped (SDK v0.10.0) | `deprovision()` returns `delete_kubernetes_resources`; deckwatch deletes ServiceAccounts and Jobs in the application's namespace. See [Deleting Kubernetes objects on deprovision](#deleting-kubernetes-objects-on-deprovision) |
 | ServiceAccount binding | Shipped (SDK v0.3.0) | Plugin declares `service_account_name`; deckwatch sets it on the pod template |
 | Plugin dependency resolution | Shipped (SDK v0.4.0) | `metadata()` export, `provides`/`depends_on`, topological sort, output threading |
 | Plugin networking (`allowed_hosts`) | Shipped | Controls which URLs the plugin can reach via extism HTTP host function |
@@ -256,6 +257,34 @@ These annotations are how deckwatch knows what to clean up if a plugin is disabl
 
 ---
 
+## Deleting Kubernetes objects on deprovision
+
+A plugin can't delete Kubernetes objects itself. When a provisioned resource is removed, deckwatch calls the plugin's `deprovision()` export, and the plugin can list objects for deckwatch to delete in `delete_kubernetes_resources` (SDK v0.10.0):
+
+```json
+{
+  "errors": [],
+  "message": "Deleted IAM role team-shop-rds",
+  "delete_kubernetes_resources": [
+    { "api_version": "batch/v1", "kind": "Job", "name": "shop-db-bootstrap-1a2b3c4d" },
+    { "api_version": "v1", "kind": "ServiceAccount", "name": "shop-db-bootstrap" }
+  ]
+}
+```
+
+Deckwatch deletes them after `deprovision()` returns, whether the resource was removed through the API or the MCP `deprovision_resource` tool:
+
+- Only in the application's namespace. An entry has no namespace field; a `namespace` key is ignored.
+- Only `v1` `ServiceAccount` and `batch/v1` `Job`. Other kinds, and invalid object names, are refused.
+- Jobs first, with background propagation so their pods are deleted too; then ServiceAccounts.
+- A ServiceAccount that a Deployment, CronJob or Job in the namespace still uses is kept, because deleting it would stop new pods from being created. The namespace's `default` ServiceAccount is never deleted.
+- An object that's already gone counts as deleted.
+- Every object gets an audit entry (action `delete`, outcome in the detail). Refusals and failures are also logged as warnings and counted in `deckwatch_plugin_errors_total` (`k8s_delete_refused`, `k8s_delete_failed`). None of them stops the resource record from being removed.
+
+The `DELETE …/resources/{plugin}/{resource_id}` response and the MCP tool's response report each object's outcome in `kubernetes_resource_deletions`, next to the plugin's `message` and events.
+
+---
+
 ## Writing a plugin
 
 See [deckwatch-plugin-sdk](https://github.com/alexconrey/deckwatch-plugin-sdk) for the SDK crate and full development guide.
@@ -312,6 +341,101 @@ cargo build --release --target wasm32-unknown-unknown
 
 ---
 
+## Events, warnings and errors
+
+Everything a plugin call reports is turned into **plugin events**, each with a
+severity (`info`, `warning` or `error`), a code, a message, and optionally a
+resource id, a Kubernetes object, a `retryable` flag and a hint:
+
+- **From the plugin.** Structured `events` (SDK 0.10.0, `PluginEvent`) on
+  `PluginResult`, `ResourceProvisionResult` and `ResourceDeprovisionResult`.
+  Use codes of the form `<plugin-name>.<code>`. The legacy `errors`,
+  `warnings` and deprovision `message` strings still work and become events
+  with code `plugin.unspecified`; the SDK's copies of structured events in
+  those fields are recognised and reported once.
+- **From deckwatch.** Failures it detects itself, with reserved codes:
+  `plugin.fetch_failed`, `plugin.checksum_mismatch`, `plugin.load_failed`
+  (bad module, missing export, `min_deckwatch_version`), `plugin.trap` (a
+  panic), `plugin.timeout`, `plugin.output_invalid` (the message names the
+  field, e.g. `env_vars[1].name`), `plugin.k8s_apply_failed` and
+  `plugin.policy_rejected`, plus the informational `plugin.fields_released`
+  (the reconciler removed what an application's provisioned resources had
+  added to a workload, because none are left). A plugin can't use the
+  `plugin.*` namespace: such codes are moved under the plugin's name.
+
+Where they show up:
+
+- **The response of the action that ran the plugin**, warnings included even
+  when it succeeds: `plugin_events` on deployment create and update, and on
+  provision and refresh; `{message, plugin_events,
+  kubernetes_resource_deletions}` from deprovision (the `message` is what the
+  plugin says it did and didn't clean up). A
+  `provision()` that fails outright returns 502 with the events. The MCP
+  tools `provision_resource`, `refresh_resource`, `deprovision_resource`,
+  `validate_plugin` and `enable_plugin` return them too, inside a fence that
+  marks them as untrusted text.
+- **Plugin status**: the current state of every call target (a provisioned
+  resource, a plugin's `apply()` for an application, or the plugin's own
+  load): healthy, degraded or failing, the latest events, when the current
+  run of failures started, how many calls in a row failed, and the last
+  success. The application and plugin pages show it as badges, and
+  **Problems** in the top bar (shown while anything is failing or degraded)
+  lists every failing or degraded target. The API is `GET /api/plugin-status`
+  (filter with `health=failing,degraded`, `plugin`, `namespace`),
+  `GET /api/namespaces/{ns}/applications/{name}/plugin-status` and
+  `GET /api/plugins/{name}/status`. It holds current state only: a row is
+  replaced on every call, and removed with its resource, its application, or
+  when the plugin is disabled or removed. The reconcile loop records one
+  `apply()` outcome per plugin and application per cycle, the worst across
+  the application's Deployments.
+- **Kubernetes Events** on the affected Deployments, from reporting
+  controller `deckwatch` (events.k8s.io/v1, through kube-rs `Recorder`).
+  They show up in `kubectl describe deployment`, deckwatch's event views and
+  MCP `get_events` (fenced as untrusted text there). Reasons:
+
+  | Reason | Type | When |
+  |---|---|---|
+  | `PluginApplyFailed` | Warning | `apply()` failed or reported an error (deployment create/update, reconcile) |
+  | `PluginApplyWarning` | Warning | `apply()` reported a warning |
+  | `PluginProvisionFailed` | Warning | `provision()` failed or reported an error (provision, refresh, status polling) |
+  | `PluginProvisionWarning` | Warning | `provision()` reported a warning |
+  | `PluginProvisioned` | Normal | an operator's provision or refresh worked |
+  | `PluginDeprovisionFailed` | Warning | `deprovision()` failed or reported an error |
+  | `PluginDeprovisioned` | Normal | `deprovision()` worked; the note is its message |
+  | `PluginRecovered` | Normal | a failing target works again |
+  | `PluginFieldsReleased` | Normal | the reconciler removed what provisioned resources had added to a workload |
+
+  The action carries the event code (e.g. `Apply plugin.trap`). The same
+  Event on the same workload is published at most every 5 minutes, and the
+  Recorder folds repeats into a series, so a persistent failure is one Event
+  whose count goes up (`kubectl describe` shows `(x12 over 1h)`). Provision
+  and deprovision Events go on every Deployment of the application. The
+  chart's ClusterRole grants `create` and `patch` on `events.k8s.io` events;
+  set `POD_NAME` (the chart does) to fill `reportingInstance`.
+- **Notifications** (`plugin_failing`, `plugin_recovered`), once per
+  transition into or out of failing, never on every reconcile. See
+  [notifications](SETTINGS.md#configuring-notifications).
+- **The logs**, as `plugin event:` lines inside the call's `plugin {export}`
+  span, next to the plugin's own `log_*` output (target `extism::pdk`).
+- **Traces**: when deckwatch exports traces (`OTEL_EXPORTER_OTLP_*`), each
+  call's `plugin {export}` span is exported, and the plugin gets its
+  `trace_context`.
+
+Plugin text is untrusted. Before deckwatch returns, logs or stores it, it
+masks the values it passed the plugin for `secret` config fields (in any form:
+plain, the stored ciphertext, JSON-escaped or percent-encoded), redacts
+credentials in URLs, strips control characters, puts each message on one line
+and caps it at 2 KB, and keeps at most 20 events per call. Logging is rate
+limited per plugin; what's over the limit is dropped and counted in
+`deckwatch_plugin_events_dropped_total`.
+
+When deckwatch exports traces, `PluginContext`, `ResourceProvisionRequest`
+and `ResourceDeprovisionRequest` carry `trace_context`, a W3C `traceparent`
+for the call. Forward it with the SDK's `trace_headers()` so the plugin's own
+API calls join the trace.
+
+---
+
 ## Security considerations
 
 ### WASM sandboxing
@@ -360,7 +484,7 @@ Common causes:
 
 - Verify the deployment has the annotation the plugin checks for
 - Check that the annotation value matches exactly (case-sensitive, e.g. `"enabled"` not `"true"`)
-- Look for `plugin apply() failed` in deckwatch logs, which indicates a runtime error inside the WASM
+- Check the `plugin_events` in the deployment create/update response (the UI shows them after saving), or look for `plugin event:` lines in the deckwatch logs. A `plugin.trap`, `plugin.timeout` or `plugin.output_invalid` code means the plugin failed and was skipped.
 
 ### Env vars not appearing after update
 
@@ -376,7 +500,8 @@ This is intentional. If `deckwatch.plugin-env/<name>` or `deckwatch.plugin-sidec
 
 For developers working on deckwatch itself:
 
-- **`src/plugins.rs`** — plugin fetching, WASM execution via extism, env/sidecar merge logic
+- **`src/plugins.rs`** — plugin fetching, WASM execution via extism (every call goes through `call_export`, the funnel), env/sidecar merge logic
+- **`src/plugin_events.rs`** — turning results and failures into plugin events: normalization, secret masking, caps, the LLM fence and the log rate limit
 - **`src/handlers/settings.rs`** — `PluginConfig` and `PluginSource` types, background refresh on settings PUT
 - **`src/state.rs`** — `AppState.plugins: Arc<RwLock<Vec<LoadedPlugin>>>`
 - **`src/handlers/deployments.rs`** — `apply_plugins()` called in both `create` and `update` handlers

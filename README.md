@@ -87,12 +87,22 @@ Open [http://localhost:9090](http://localhost:9090).
 
 ### Pull from GHCR
 
+Each release is the image `ghcr.io/alexconrey/deckwatch:<version>` plus the
+chart in `helm/deckwatch` at the same version. From a checkout of the release
+tag (for example `v0.7.0`), the chart's image tag defaults to its
+`appVersion`, so the chart and the image match:
+
 ```bash
 helm install deckwatch helm/deckwatch \
   --namespace deckwatch --create-namespace \
-  --set image.repository=ghcr.io/alexconrey/deckwatch \
-  --set image.tag=0.2.1
+  --set image.repository=ghcr.io/alexconrey/deckwatch
 ```
+
+### Upgrading
+
+Read [CHANGELOG.md](CHANGELOG.md) before you upgrade. Each release lists what
+changed, and its **Upgrade notes** say what you may have to change first: the
+minimum Kubernetes version, Helm values, API behaviour.
 
 ## Configuration
 
@@ -102,7 +112,7 @@ helm install deckwatch helm/deckwatch \
 | `DECKWATCH_PORT` | `--port` | `8080` | Listen port |
 | `DECKWATCH_FRONTEND_DIR` | `--frontend-dir` | `frontend/dist` | Path to built SPA |
 | `DECKWATCH_DATABASE_URL` | `--database-url` | `sqlite://deckwatch.db` | Database connection string (SQLite, Postgres, or MySQL) |
-| `RUST_LOG` | — | `deckwatch=info,tower_http=info,mcp_k8s=info,extism::pdk=info` | Log filter (Helm: `logFilter`). `mcp_k8s` is the embedded library behind most MCP tools; `extism::pdk` carries plugin log lines |
+| `RUST_LOG` | — | `deckwatch=info,tower_http=info,mcp_k8s=info,extism::pdk=info,opentelemetry=warn` | Log filter (Helm: `logFilter`). `mcp_k8s` is the embedded library behind most MCP tools; `extism::pdk` carries plugin log lines; `opentelemetry` reports failed OTLP exports ([docs/TRACING.md](docs/TRACING.md#10-deckwatchs-own-telemetry)) |
 
 ## Architecture
 

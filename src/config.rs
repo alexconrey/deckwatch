@@ -129,6 +129,17 @@ pub struct Config {
     /// install (`secret-encryption-key.yaml`).
     #[arg(long, env = "DECKWATCH_ENCRYPTION_KEY", default_value = "")]
     pub encryption_key: String,
+
+    /// Days to keep audit log rows; older rows are pruned hourly. 0 keeps
+    /// them regardless of age. Deployment config rather than a setting, so
+    /// the unauthenticated settings API can't shorten the audit trail.
+    #[arg(long, env = "DECKWATCH_AUDIT_RETENTION_DAYS", default_value = "365")]
+    pub audit_retention_days: u32,
+
+    /// The most audit log rows to keep, newest first; older ones are pruned
+    /// hourly. 0 means no limit.
+    #[arg(long, env = "DECKWATCH_AUDIT_MAX_ROWS", default_value = "100000")]
+    pub audit_max_rows: u64,
 }
 
 impl Config {

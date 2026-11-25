@@ -22,4 +22,5 @@ spec:
       {{- end }}
   selector:
     {{- include "deckwatch.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: server
 {{- end }}

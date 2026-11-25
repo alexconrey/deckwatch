@@ -1016,10 +1016,36 @@ pub fn event_summary(event: &k8s_openapi::api::core::v1::Event) -> EventSummary 
         involved_object_kind: event.involved_object.kind.clone().unwrap_or_default(),
         involved_object_name: event.involved_object.name.clone().unwrap_or_default(),
         involved_object_namespace: event.involved_object.namespace.clone(),
-        count: event.count,
-        first_timestamp: event.first_timestamp.as_ref().map(|t| t.0.to_string()),
-        last_timestamp: event.last_timestamp.as_ref().map(|t| t.0.to_string()),
-        source_component: event.source.as_ref().and_then(|s| s.component.clone()),
+        // Events written through events.k8s.io/v1 (kube-rs Recorder, which
+        // deckwatch uses for plugin Events, and most modern controllers) have
+        // no count/firstTimestamp/lastTimestamp/source: fall back to
+        // series, eventTime and reportingComponent.
+        count: event
+            .count
+            .or_else(|| event.series.as_ref().and_then(|s| s.count))
+            .or(event.event_time.as_ref().map(|_| 1)),
+        first_timestamp: event
+            .first_timestamp
+            .as_ref()
+            .map(|t| t.0.to_string())
+            .or_else(|| event.event_time.as_ref().map(|t| t.0.to_string())),
+        last_timestamp: event
+            .last_timestamp
+            .as_ref()
+            .map(|t| t.0.to_string())
+            .or_else(|| {
+                event
+                    .series
+                    .as_ref()
+                    .and_then(|s| s.last_observed_time.as_ref())
+                    .map(|t| t.0.to_string())
+            })
+            .or_else(|| event.event_time.as_ref().map(|t| t.0.to_string())),
+        source_component: event
+            .source
+            .as_ref()
+            .and_then(|s| s.component.clone())
+            .or_else(|| event.reporting_component.clone()),
         source_host: event.source.as_ref().and_then(|s| s.host.clone()),
     }
 }

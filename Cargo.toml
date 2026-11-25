@@ -1,6 +1,6 @@
 [package]
 name = "deckwatch"
-version = "0.6.7"
+version = "0.7.0"
 edition = "2021"
 publish = false
 
@@ -17,7 +17,9 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-uti
 tower = "0.5"
 tower-http = { version = "0.7", features = ["fs", "compression-gzip", "trace"] }
 
-kube = { version = "5", features = ["ws"] }
+# runtime: events::Recorder, for the Kubernetes Events deckwatch publishes
+# about plugin failures (src/plugin_k8s_events.rs).
+kube = { version = "5", features = ["ws", "runtime"] }
 # deckwatch is the binary, so it picks the Kubernetes API version (k8s-openapi
 # allows exactly one `v1_*` feature per build; libraries such as mcp-k8s don't
 # set one). v1_33 is the oldest k8s-openapi 0.29 offers, so deckwatch supports
@@ -26,12 +28,15 @@ k8s-openapi = { version = "0.29", features = ["v1_33"] }
 # default-features = false: deckwatch only uses the mcp_k8s library, not the
 # standalone server binary (and its utoipa-swagger-ui / zip build dependencies).
 # kube and k8s-openapi must match mcp-k8s's: deckwatch passes its kube::Client in.
-mcp-k8s = { git = "https://github.com/alexconrey/mcp-k8s.git", tag = "v0.5.0", default-features = false }
+mcp-k8s = { git = "https://github.com/alexconrey/mcp-k8s.git", tag = "v0.5.2", default-features = false }
 rustls = { version = "0.23", features = ["ring"] }
 
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_yaml = "0.9"
+# Error paths (e.g. `env_vars[2].name`) when plugin output fails to parse.
+# Already in the dependency tree through axum.
+serde_path_to_error = "0.1"
 
 thiserror = "2"
 futures = "0.3"
@@ -39,6 +44,19 @@ tokio-stream = "0.1"
 
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+
+# deckwatch's own telemetry (src/telemetry.rs): OTLP/HTTP export of the spans,
+# events and metric events it emits through `tracing`. Off unless an
+# OTEL_EXPORTER_OTLP_*ENDPOINT is set. No HTTP-client features: export goes
+# through the shared outbound client (src/outbound), so it gets the extra CAs.
+# spec_unstable_metrics_views: the attribute allowlist on the view for
+# mcp-k8s's duration histogram (telemetry::mcp_duration_view).
+opentelemetry = "0.33"
+opentelemetry_sdk = { version = "0.33", default-features = false, features = ["trace", "metrics", "logs", "internal-logs", "spec_unstable_metrics_views"] }
+opentelemetry-otlp = { version = "0.33", default-features = false, features = ["http-proto", "gzip-http", "trace", "metrics", "logs", "internal-logs"] }
+opentelemetry-http = { version = "0.33", default-features = false }
+opentelemetry-appender-tracing = "0.33"
+tracing-opentelemetry = "0.34"
 
 clap = { version = "4", features = ["derive", "env"] }
 jiff = "1.0"
@@ -81,6 +99,8 @@ extism = "1.41"
 
 [dev-dependencies]
 tempfile = "3"
+# In-memory span, log and metric exporters for src/telemetry_tests.rs.
+opentelemetry_sdk = { version = "0.33", default-features = false, features = ["testing"] }
 # TLS mock upstreams in tests/outbound_tls.rs. Already in the lockfile via
 # kube and reqwest 0.13.
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }

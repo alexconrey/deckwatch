@@ -209,7 +209,7 @@ Deckwatch uses SeaORM with SQLite by default (configurable to PostgreSQL or MySQ
 | `applications` | `entities/applications.rs` | Canonical registry of tracked applications, keyed by `{namespace}/{name}` |
 | `gitops_configs` | `entities/gitops_configs.rs` | Per-application GitOps configuration (repo, branch, token, paths, build status). FK to `applications` |
 | `builds` | `entities/builds.rs` | Build history records (job name, commit, image tag, status, timestamps). FK to `applications` |
-| `audit_log` | `entities/audit_log.rs` | Immutable audit trail (action, resource, namespace, user identity, detail) |
+| `audit_log` | `entities/audit_log.rs` | Audit trail (action, resource, namespace, user identity, detail; for MCP calls also the tool, outcome and self-reported client), pruned by `DECKWATCH_AUDIT_RETENTION_DAYS` / `DECKWATCH_AUDIT_MAX_ROWS` |
 
 **ConfigMap fallback migration path:** Settings were originally stored in a `deckwatch-config` ConfigMap. On upgrade, existing ConfigMap settings are read and migrated to the database on first access. The ConfigMap is no longer the source of truth but is still created by Helm for backwards compatibility with older releases.
 

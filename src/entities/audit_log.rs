@@ -12,6 +12,15 @@ pub struct Model {
     pub namespace: String,
     pub detail: String,
     pub user_identity: String,
+    /// Where the row came from: `api` (the REST API, so the UI) or `mcp`.
+    pub source: String,
+    /// MCP rows: the tool called.
+    pub tool: String,
+    /// MCP rows: `ok`, `error`, `denied` or `cancelled`.
+    pub outcome: String,
+    /// MCP rows: the client's name from `initialize`. Self-reported by the
+    /// client, so a label, never an identity.
+    pub client_name: String,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
