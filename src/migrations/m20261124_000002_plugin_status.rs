@@ -1,8 +1,13 @@
 //! Current state of every plugin call target: one row per (application,
 //! plugin, resource id). Holds current state only (the latest events, not a
 //! history), so it stays bounded. See `crate::plugin_status`.
+//!
+//! Safe to run again after a crash (see `super::schema`): the table and each
+//! index are created only if missing.
 
 use sea_orm_migration::prelude::*;
+
+use super::schema;
 
 pub struct Migration;
 
@@ -71,28 +76,26 @@ impl MigrationTrait for Migration {
             )
             .await?;
 
-        manager
-            .create_index(
-                Index::create()
-                    .name("idx_plugin_status_target")
-                    .table(PluginStatus::Table)
-                    .col(PluginStatus::ApplicationId)
-                    .col(PluginStatus::PluginName)
-                    .col(PluginStatus::ResourceId)
-                    .unique()
-                    .to_owned(),
-            )
-            .await?;
+        schema::create_index_if_missing(
+            manager,
+            PluginStatus::Table,
+            "idx_plugin_status_target",
+            Index::create()
+                .col(PluginStatus::ApplicationId)
+                .col(PluginStatus::PluginName)
+                .col(PluginStatus::ResourceId)
+                .unique()
+                .to_owned(),
+        )
+        .await?;
 
-        manager
-            .create_index(
-                Index::create()
-                    .name("idx_plugin_status_health")
-                    .table(PluginStatus::Table)
-                    .col(PluginStatus::Health)
-                    .to_owned(),
-            )
-            .await?;
+        schema::create_index_if_missing(
+            manager,
+            PluginStatus::Table,
+            "idx_plugin_status_health",
+            Index::create().col(PluginStatus::Health).to_owned(),
+        )
+        .await?;
 
         Ok(())
     }

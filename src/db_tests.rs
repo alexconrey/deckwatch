@@ -182,3 +182,284 @@ async fn plugin_status_migration_creates_the_table_and_rolls_back() {
     Migrator::up(&db, None).await.expect("migrate again");
     assert_eq!(count(&db).await, 1);
 }
+
+// ---------------------------------------------------------------------------
+// The 0.7.0 migrations survive a crash (src/migrations/schema.rs)
+// ---------------------------------------------------------------------------
+
+/// The migrations added in 0.7.0.
+const MIGRATIONS_0_7_0: [&str; 3] = [
+    "m20261124_000001_gitops_token_binding",
+    "m20261124_000002_plugin_status",
+    "m20261124_000003_audit_log_mcp",
+];
+
+/// A fresh SQLite database in a file under `dir` (with `sqlite::memory:`,
+/// each pooled connection would get a database of its own).
+async fn file_db(dir: &std::path::Path) -> sea_orm::DatabaseConnection {
+    let url = format!("sqlite://{}?mode=rwc", dir.join("crash.db").display());
+    sea_orm::Database::connect(url).await.expect("connect")
+}
+
+/// Apply every migration before the 0.7.0 ones.
+async fn migrate_to_0_6(db: &sea_orm::DatabaseConnection) {
+    use sea_orm_migration::MigratorTrait;
+    let before = Migrator::migrations()
+        .iter()
+        .position(|m| m.name() == MIGRATIONS_0_7_0[0])
+        .expect("first 0.7.0 migration");
+    Migrator::up(db, Some(before as u32))
+        .await
+        .expect("migrate to 0.6");
+}
+
+async fn recorded_0_7_0(db: &sea_orm::DatabaseConnection) -> usize {
+    use sea_orm::{ConnectionTrait, Statement};
+    let sql = format!(
+        "SELECT COUNT(*) AS n FROM seaql_migrations WHERE version IN ('{}')",
+        MIGRATIONS_0_7_0.join("', '")
+    );
+    db.query_one(Statement::from_string(db.get_database_backend(), sql))
+        .await
+        .expect("query")
+        .expect("row")
+        .try_get::<i64>("", "n")
+        .expect("n") as usize
+}
+
+/// Every column and index the 0.7.0 migrations add exists, and the entities
+/// read their tables.
+async fn assert_0_7_0_schema(db: &sea_orm::DatabaseConnection) {
+    let manager = sea_orm_migration::SchemaManager::new(db);
+    for (table, column) in [
+        ("gitops_configs", "token_binding"),
+        ("audit_log", "source"),
+        ("audit_log", "tool"),
+        ("audit_log", "outcome"),
+        ("audit_log", "client_name"),
+    ] {
+        assert!(
+            crate::migrations::schema::has_column(&manager, table, column)
+                .await
+                .expect("column check"),
+            "{table}.{column}"
+        );
+    }
+    for (table, index) in [
+        ("plugin_status", "idx_plugin_status_target"),
+        ("plugin_status", "idx_plugin_status_health"),
+        ("audit_log", "idx_audit_log_timestamp"),
+        ("audit_log", "idx_audit_log_source"),
+    ] {
+        assert!(
+            crate::migrations::schema::has_index(&manager, table, index)
+                .await
+                .expect("index check"),
+            "{index} on {table}"
+        );
+    }
+    crate::entities::gitops_configs::Entity::find()
+        .all(db)
+        .await
+        .expect("gitops_configs");
+    crate::entities::plugin_status::Entity::find()
+        .all(db)
+        .await
+        .expect("plugin_status");
+    crate::entities::audit_log::Entity::find()
+        .all(db)
+        .await
+        .expect("audit_log");
+}
+
+#[tokio::test]
+async fn schema_checks_see_columns_and_indexes() {
+    use sea_orm_migration::MigratorTrait;
+    let dir = tempfile::tempdir().unwrap();
+    let db = file_db(dir.path()).await;
+    Migrator::up(&db, None).await.expect("migrate");
+    let manager = sea_orm_migration::SchemaManager::new(&db);
+    use crate::migrations::schema::{has_column, has_index};
+    assert!(has_column(&manager, "audit_log", "outcome").await.unwrap());
+    assert!(!has_column(&manager, "audit_log", "nope").await.unwrap());
+    assert!(!has_column(&manager, "no_table", "outcome").await.unwrap());
+    assert!(has_index(&manager, "audit_log", "idx_audit_log_source")
+        .await
+        .unwrap());
+    assert!(
+        !has_index(&manager, "audit_log", "idx_plugin_status_health")
+            .await
+            .unwrap()
+    );
+}
+
+/// A crash after a migration ran but before `seaql_migrations` recorded it
+/// (SQLite and MySQL don't wrap the two in a transaction) leaves its schema
+/// changes in place; the next start runs it again. A rollback that deletes
+/// only those records leaves the same state.
+#[tokio::test]
+async fn the_0_7_0_migrations_run_again_when_their_records_are_lost() {
+    let dir = tempfile::tempdir().unwrap();
+    records_lost(&file_db(dir.path()).await).await;
+}
+
+/// The scenario of the test above, on an empty database `db`.
+async fn records_lost(db: &sea_orm::DatabaseConnection) {
+    use sea_orm::{ConnectionTrait, Statement};
+    use sea_orm_migration::MigratorTrait;
+
+    Migrator::up(db, None).await.expect("migrate");
+    let backend = db.get_database_backend();
+
+    // A token saved under 0.7.0 with its own binding, and one without.
+    crate::db::ensure_application(db, "prod", "api")
+        .await
+        .unwrap();
+    for (id, token, binding) in [
+        (
+            "bound",
+            "'ciphertext'",
+            r#"'{"github_api":"https://ghe.example"}'"#,
+        ),
+        ("unbound", "'ciphertext'", "NULL"),
+    ] {
+        db.execute(Statement::from_string(
+            backend,
+            format!(
+                "INSERT INTO gitops_configs (id, application_id, repo_url, branch, token_secret, \
+                 encrypted_token, token_binding, git_auth_user, dockerfile_path, docker_context, \
+                 oci_repository, include_paths, exclude_paths, poll_interval_seconds, \
+                 webhook_enabled, created_at, updated_at) VALUES ('{id}', 'prod/api', \
+                 'https://github.com/o/r', 'main', '', {token}, {binding}, '', 'Dockerfile', '.', \
+                 'r', '', '', 60, false, '2026-01-01 00:00:00', '2026-01-01 00:00:00')"
+            ),
+        ))
+        .await
+        .expect("insert gitops config");
+    }
+
+    db.execute(Statement::from_string(
+        backend,
+        format!(
+            "DELETE FROM seaql_migrations WHERE version IN ('{}')",
+            MIGRATIONS_0_7_0.join("', '")
+        ),
+    ))
+    .await
+    .expect("forget the 0.7.0 records");
+    assert_eq!(recorded_0_7_0(db).await, 0);
+
+    Migrator::up(db, None)
+        .await
+        .expect("the 0.7.0 migrations run again");
+    assert_eq!(recorded_0_7_0(db).await, 3);
+    assert_0_7_0_schema(db).await;
+
+    let rows = crate::entities::gitops_configs::Entity::find()
+        .all(db)
+        .await
+        .unwrap();
+    let binding = |id: &str| {
+        rows.iter()
+            .find(|r| r.id == id)
+            .unwrap()
+            .token_binding
+            .clone()
+    };
+    // An existing binding is kept; a token without one gets the default.
+    assert_eq!(
+        binding("bound").as_deref(),
+        Some(r#"{"github_api":"https://ghe.example"}"#)
+    );
+    assert_eq!(
+        binding("unbound").as_deref(),
+        Some(r#"{"github_api":"https://api.github.com"}"#)
+    );
+}
+
+/// A crash part-way through: some of each migration's statements ran, none
+/// was recorded.
+#[tokio::test]
+async fn the_0_7_0_migrations_finish_after_a_crash_halfway_through() {
+    let dir = tempfile::tempdir().unwrap();
+    crash_halfway(&file_db(dir.path()).await).await;
+}
+
+/// The scenario of the test above, on an empty database `db`.
+async fn crash_halfway(db: &sea_orm::DatabaseConnection) {
+    use sea_orm_migration::prelude::*;
+    use sea_orm_migration::MigratorTrait;
+
+    migrate_to_0_6(db).await;
+    let manager = SchemaManager::new(db);
+
+    // m20261124_000001: the column, but not the bindings.
+    manager
+        .alter_table(
+            Table::alter()
+                .table(Alias::new("gitops_configs"))
+                .add_column(ColumnDef::new(Alias::new("token_binding")).text().null())
+                .to_owned(),
+        )
+        .await
+        .unwrap();
+    // m20261124_000002: the table and its first index, then the crash. The
+    // migration really ran, so take its table from the migrator and drop the
+    // second index again.
+    Migrator::up(db, Some(2)).await.expect("000001 and 000002");
+    manager
+        .drop_index(
+            Index::drop()
+                .name("idx_plugin_status_health")
+                .table(Alias::new("plugin_status"))
+                .to_owned(),
+        )
+        .await
+        .unwrap();
+    // m20261124_000003: two of the four columns and one index.
+    for (column, default) in [("source", "api"), ("tool", "")] {
+        manager
+            .alter_table(
+                Table::alter()
+                    .table(Alias::new("audit_log"))
+                    .add_column(
+                        ColumnDef::new(Alias::new(column))
+                            .string()
+                            .not_null()
+                            .default(default),
+                    )
+                    .to_owned(),
+            )
+            .await
+            .unwrap();
+    }
+    manager
+        .create_index(
+            Index::create()
+                .name("idx_audit_log_timestamp")
+                .table(Alias::new("audit_log"))
+                .col(Alias::new("timestamp"))
+                .to_owned(),
+        )
+        .await
+        .unwrap();
+    // None of it recorded.
+    {
+        use sea_orm::{ConnectionTrait, Statement};
+        db.execute(Statement::from_string(
+            db.get_database_backend(),
+            format!(
+                "DELETE FROM seaql_migrations WHERE version IN ('{}')",
+                MIGRATIONS_0_7_0.join("', '")
+            ),
+        ))
+        .await
+        .unwrap();
+    }
+
+    Migrator::up(db, None)
+        .await
+        .expect("the migrations finish what the crash left");
+    assert_eq!(recorded_0_7_0(db).await, 3);
+    assert_0_7_0_schema(db).await;
+}

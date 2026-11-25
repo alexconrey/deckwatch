@@ -5,8 +5,13 @@
 //!
 //! Rows written before this migration by the old per-tool MCP audit calls
 //! (their detail starts with `MCP:`) are marked `mcp`.
+//!
+//! Safe to run again after a crash (see `super::schema`): each column and
+//! index is added only if missing, and marking `mcp` rows is idempotent.
 
 use sea_orm_migration::prelude::*;
+
+use super::schema;
 
 pub struct Migration;
 
@@ -26,14 +31,12 @@ impl MigrationTrait for Migration {
             (AuditLog::Outcome, ""),
             (AuditLog::ClientName, ""),
         ] {
-            manager
-                .alter_table(
-                    Table::alter()
-                        .table(AuditLog::Table)
-                        .add_column(ColumnDef::new(column).string().not_null().default(default))
-                        .to_owned(),
-                )
-                .await?;
+            schema::add_column_if_missing(
+                manager,
+                AuditLog::Table,
+                ColumnDef::new(column).string().not_null().default(default),
+            )
+            .await?;
         }
 
         let mark_mcp = Query::update()
@@ -43,24 +46,20 @@ impl MigrationTrait for Migration {
             .to_owned();
         manager.exec_stmt(mark_mcp).await?;
 
-        manager
-            .create_index(
-                Index::create()
-                    .name("idx_audit_log_timestamp")
-                    .table(AuditLog::Table)
-                    .col(AuditLog::Timestamp)
-                    .to_owned(),
-            )
-            .await?;
-        manager
-            .create_index(
-                Index::create()
-                    .name("idx_audit_log_source")
-                    .table(AuditLog::Table)
-                    .col(AuditLog::Source)
-                    .to_owned(),
-            )
-            .await
+        schema::create_index_if_missing(
+            manager,
+            AuditLog::Table,
+            "idx_audit_log_timestamp",
+            Index::create().col(AuditLog::Timestamp).to_owned(),
+        )
+        .await?;
+        schema::create_index_if_missing(
+            manager,
+            AuditLog::Table,
+            "idx_audit_log_source",
+            Index::create().col(AuditLog::Source).to_owned(),
+        )
+        .await
     }
 
     async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
