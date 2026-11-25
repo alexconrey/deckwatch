@@ -177,6 +177,7 @@ first.
   quoted for a POSIX shell (a leading `~/` in `local_context` still
   expands), and the result also lists the arguments as `argv`, for running
   the command without a shell. Ordinary commands look the same as before.
+  (#343)
 - **Bounded label cardinality on the public `/api/frontend-metrics`.**
   Free-form labels (`route`, `path`, `kind`) take at most 128 bytes of
   visible ASCII and 512 values each; new values after that are recorded as
