@@ -117,7 +117,13 @@ first.
   vars, sidecars, init containers, volumes and annotations that the plugin
   applied to the application's workloads. The first reconcile after startup
   also cleans up workloads that earlier versions left in that state, which
-  rolls out those Deployments. (#229)
+  rolls out those Deployments, but only for applications the database knows:
+  fields left on workloads of deleted applications, or removed from an
+  application, stay until you remove them. Workloads that deckwatch patches
+  get a `plugins.deckwatch.io/fields-owner` annotation identifying the
+  database, and later releases need it, so a new or reset database, or
+  another deckwatch on the same cluster, never strips fields it didn't apply.
+  (#229, #XXX)
 - **Outbound requests have timeouts.** Git (GitOps polling, branch lookups
   and manual builds): 60 s per request. AI calls: 10 minutes. Registry probes
   and Entra JWKS: 15 s. These had none before. The Vertex AI and Bedrock
@@ -459,6 +465,20 @@ first.
   those fields stayed, and plugins kept acting on them: deckwatch-plugin-aws
   re-created an empty SQS queue from leftover `sqs.deckwatch.io/*`
   annotations. (#229)
+- **A new or reset database no longer strips plugin fields from the
+  cluster.** The first reconcile after startup released the plugin env vars,
+  sidecars and init containers from every workload in scope whose
+  application had no plugin resources in the database, which on an empty
+  database (a reinstall, a new `DATABASE_URL`, a restored backup) meant every
+  plugin-managed Deployment and CronJob, rolling them out broken. deckwatch
+  now releases fields only with evidence that this database applied them:
+  the `plugins.deckwatch.io/fields-owner` annotation the reconciler adds, or,
+  for fields from before it, an application this database knows. And an
+  application whose remaining resources add no env vars, sidecars or init
+  containers is still reconciled, so the fields of a removed resource go and
+  annotation-only resources are applied. A database restored from an older
+  backup still releases the fields of resources it has no record of.
+  (#XXX)
 - A plugin that declares a config field type deckwatch doesn't know no longer
   loses all its config fields and resources; the field renders as text.
   (#243)

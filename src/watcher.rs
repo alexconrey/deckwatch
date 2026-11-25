@@ -1705,6 +1705,56 @@ const PLUGIN_RESOURCES_FIELD_MANAGER: &str = "deckwatch-plugin-resources";
 /// Label that makes a deployment or cronjob a member of an application.
 const APP_LABEL: &str = "deckwatch.io/application";
 
+/// Annotation `reconcile_application_plugins` applies, with the plugin
+/// resource fields, to every workload it patches: the id of the database
+/// whose provisioned resources the fields came from ([`plugin_fields_owner`]).
+///
+/// It is the sweep's positive evidence. A database that has no rows for an
+/// application can't tell a removed resource from one it never knew about
+/// (it may be new, reset, restored, or another deckwatch's), so the sweep
+/// releases fields only from workloads this database's reconciler patched.
+/// Not under `deckwatch.io/`, whose annotations GitOps clean-up removes.
+const PLUGIN_FIELDS_OWNER_ANNOTATION: &str = "plugins.deckwatch.io/fields-owner";
+
+/// Settings-table key of this database's [`PLUGIN_FIELDS_OWNER_ANNOTATION`]
+/// value.
+const PLUGIN_FIELDS_OWNER_KEY: &str = "plugin_fields_owner";
+
+/// This database's plugin fields owner id ([`PLUGIN_FIELDS_OWNER_ANNOTATION`]):
+/// a random id, created the first time it's needed and kept in the settings
+/// table.
+pub(crate) async fn plugin_fields_owner(
+    db: &sea_orm::DatabaseConnection,
+) -> Result<String, sea_orm::DbErr> {
+    use crate::entities::settings;
+    if let Some(row) = settings::Entity::find_by_id(PLUGIN_FIELDS_OWNER_KEY)
+        .one(db)
+        .await?
+    {
+        return Ok(row.value);
+    }
+    let row = settings::ActiveModel {
+        key: Set(PLUGIN_FIELDS_OWNER_KEY.to_string()),
+        value: Set(uuid::Uuid::new_v4().to_string()),
+        updated_at: Set(now_utc()),
+    };
+    // Another replica sharing the database may create it at the same time;
+    // whichever row landed is the id.
+    let _ = settings::Entity::insert(row)
+        .on_conflict(
+            sea_orm::sea_query::OnConflict::column(settings::Column::Key)
+                .do_nothing()
+                .to_owned(),
+        )
+        .exec(db)
+        .await;
+    settings::Entity::find_by_id(PLUGIN_FIELDS_OWNER_KEY)
+        .one(db)
+        .await?
+        .map(|row| row.value)
+        .ok_or_else(|| sea_orm::DbErr::RecordNotFound(PLUGIN_FIELDS_OWNER_KEY.to_string()))
+}
+
 fn plugin_resources_patch_params() -> PatchParams {
     PatchParams::apply(PLUGIN_RESOURCES_FIELD_MANAGER).force()
 }
@@ -1747,27 +1797,59 @@ fn owns_plugin_resource_fields(meta: &ObjectMeta) -> bool {
     })
 }
 
+/// What the sweep knows about where a workload's plugin resource fields came
+/// from.
+pub(crate) struct Provenance<'a> {
+    /// This database's [`PLUGIN_FIELDS_OWNER_ANNOTATION`] value.
+    pub owner: &'a str,
+    /// Every application in this database's `applications` table.
+    pub known_apps: &'a BTreeSet<String>,
+}
+
 /// The namespace and name of a workload whose plugin resource fields should
 /// be released: the field manager still owns fields on it, but the workload
 /// no longer belongs to an application with provisioned resources. Either
 /// the application's last resource was removed, or the workload lost its
 /// application label (removed from the application, or the application was
 /// deleted, which also deletes its resources).
+///
+/// Only with positive evidence that this database applied the fields: the
+/// workload carries this database's [`PLUGIN_FIELDS_OWNER_ANNOTATION`].
+/// Fields applied before the annotation existed carry none; they're released
+/// only for an application this database knows. Fields another database
+/// applied, or that a fresh or reset database never saw, are never touched.
 fn stale_plugin_workload<'a>(
     meta: &'a ObjectMeta,
     apps_with_resources: &BTreeSet<String>,
+    provenance: &Provenance<'_>,
 ) -> Option<(&'a str, &'a str)> {
     let ns = meta.namespace.as_deref()?;
     let name = meta.name.as_deref()?;
     if !owns_plugin_resource_fields(meta) {
         return None;
     }
-    let app_has_resources = meta
+    let app = meta
         .labels
         .as_ref()
         .and_then(|labels| labels.get(APP_LABEL))
-        .is_some_and(|app| apps_with_resources.contains(&format!("{ns}/{app}")));
-    (!app_has_resources).then_some((ns, name))
+        .map(|app| format!("{ns}/{app}"));
+    if app
+        .as_ref()
+        .is_some_and(|app| apps_with_resources.contains(app))
+    {
+        return None;
+    }
+    let owner = meta
+        .annotations
+        .as_ref()
+        .and_then(|annotations| annotations.get(PLUGIN_FIELDS_OWNER_ANNOTATION));
+    let applied_here = match owner {
+        Some(owner) => owner == provenance.owner,
+        None => app
+            .as_ref()
+            .is_some_and(|app| provenance.known_apps.contains(app)),
+    };
+    applied_here.then_some((ns, name))
 }
 
 /// Cross-cycle state for releasing the fields `reconcile_application_plugins`
@@ -1788,13 +1870,16 @@ pub(crate) struct PluginFieldSweep {
     /// Which plugins provisioned resources for each application in the
     /// previous cycle, so a release can be reported against them.
     plugins_by_app: BTreeMap<String, BTreeSet<String>>,
+    /// This database's [`plugin_fields_owner`] id, once read.
+    owner: Option<String>,
 }
 
 impl PluginFieldSweep {
     /// Sweep on the first cycle after startup (catches removals that
-    /// happened while deckwatch was down, and fields older versions left
-    /// behind), whenever an application has lost all of its resources since
-    /// the previous cycle, and after a sweep that failed part-way.
+    /// happened while deckwatch was down, and fields older versions left on
+    /// workloads of applications this database knows), whenever an
+    /// application has lost all of its resources since the previous cycle,
+    /// and after a sweep that failed part-way.
     fn needed(&self, apps_with_resources: &BTreeSet<String>) -> bool {
         self.retry
             || self
@@ -1821,7 +1906,22 @@ async fn release_stale_plugin_fields(
     state: &AppState,
     apps_with_resources: &BTreeSet<String>,
     plugins_by_app: &BTreeMap<String, BTreeSet<String>>,
+    owner: &str,
 ) -> bool {
+    let known_apps: BTreeSet<String> = match crate::entities::applications::Entity::find()
+        .all(&state.db)
+        .await
+    {
+        Ok(apps) => apps.into_iter().map(|app| app.id).collect(),
+        Err(e) => {
+            tracing::warn!(error = %e, "reconcile_application_plugins: failed to list applications");
+            return false;
+        }
+    };
+    let provenance = Provenance {
+        owner,
+        known_apps: &known_apps,
+    };
     let scopes: Vec<Option<&str>> = if state.allowed_namespaces.is_empty() {
         vec![None]
     } else {
@@ -1838,6 +1938,7 @@ async fn release_stale_plugin_fields(
             state,
             scope,
             apps_with_resources,
+            &provenance,
             plugins_by_app,
             deployment_fingerprint_key,
         )
@@ -1846,6 +1947,7 @@ async fn release_stale_plugin_fields(
             state,
             scope,
             apps_with_resources,
+            &provenance,
             plugins_by_app,
             cronjob_fingerprint_key,
         )
@@ -1860,6 +1962,7 @@ async fn release_stale_workloads<K>(
     state: &AppState,
     scope: Option<&str>,
     apps_with_resources: &BTreeSet<String>,
+    provenance: &Provenance<'_>,
     plugins_by_app: &BTreeMap<String, BTreeSet<String>>,
     fingerprint_key: fn(&str, &str) -> String,
 ) -> bool
@@ -1891,7 +1994,8 @@ where
 
     let mut released_all = true;
     for workload in &workloads {
-        let Some((ns, name)) = stale_plugin_workload(&workload.metadata, apps_with_resources)
+        let Some((ns, name)) =
+            stale_plugin_workload(&workload.metadata, apps_with_resources, provenance)
         else {
             continue;
         };
@@ -2022,14 +2126,30 @@ pub(crate) async fn reconcile_application_plugins(state: &AppState, sweep: &mut 
         }
     };
 
+    let owner = match &sweep.owner {
+        Some(owner) => owner.clone(),
+        None => match plugin_fields_owner(&state.db).await {
+            Ok(owner) => sweep.owner.insert(owner).clone(),
+            Err(e) => {
+                tracing::warn!(error = %e, "reconcile_application_plugins: failed to read the plugin fields owner id");
+                return;
+            }
+        },
+    };
+
     // The loop below only patches applications that still have resources,
     // so it can drop the fields of a removed resource only while others
     // remain. Release what's left on workloads whose application has none.
     let apps_with_resources: BTreeSet<String> =
         rows.iter().map(|row| row.application_id.clone()).collect();
     if sweep.needed(&apps_with_resources) {
-        sweep.retry =
-            !release_stale_plugin_fields(state, &apps_with_resources, &sweep.plugins_by_app).await;
+        sweep.retry = !release_stale_plugin_fields(
+            state,
+            &apps_with_resources,
+            &sweep.plugins_by_app,
+            &owner,
+        )
+        .await;
     }
     sweep.apps_with_resources = Some(apps_with_resources);
     sweep.plugins_by_app.clear();
@@ -2093,12 +2213,12 @@ pub(crate) async fn reconcile_application_plugins(state: &AppState, sweep: &mut 
         }
     }
 
+    // Every application with rows is patched, even when they add no env,
+    // sidecars or init containers: the apply is what drops the fields of a
+    // removed resource (and applies annotation-only resources).
     for (app_id, env_map) in &app_state {
         let sidecars = app_sidecars.get(app_id).cloned().unwrap_or_default();
         let init_containers = app_init_containers.get(app_id).cloned().unwrap_or_default();
-        if env_map.is_empty() && sidecars.is_empty() && init_containers.is_empty() {
-            continue;
-        }
 
         let (ns, app_name) = match app_id.split_once('/') {
             Some(pair) => pair,
@@ -2251,13 +2371,13 @@ pub(crate) async fn reconcile_application_plugins(state: &AppState, sweep: &mut 
                     let mut containers_patch = vec![primary_patch];
                     containers_patch.extend(sidecars.iter().map(sidecar_to_json));
 
+                    final_annotations
+                        .insert(PLUGIN_FIELDS_OWNER_ANNOTATION.to_string(), owner.clone());
                     let mut metadata_patch = serde_json::json!({
                         "name": dep_name,
                         "namespace": ns,
+                        "annotations": final_annotations,
                     });
-                    if !final_annotations.is_empty() {
-                        metadata_patch["annotations"] = serde_json::json!(final_annotations);
-                    }
                     if !final_labels.is_empty() {
                         metadata_patch["labels"] = serde_json::json!(final_labels);
                     }
@@ -2375,6 +2495,7 @@ pub(crate) async fn reconcile_application_plugins(state: &AppState, sweep: &mut 
                         "metadata": {
                             "name": cj_name,
                             "namespace": ns,
+                            "annotations": { PLUGIN_FIELDS_OWNER_ANNOTATION: owner },
                         },
                         "spec": {
                             "jobTemplate": {

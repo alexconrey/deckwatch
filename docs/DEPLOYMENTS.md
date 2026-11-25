@@ -341,6 +341,14 @@ Deckwatch adds the sidecar and env vars to the application's deployments on
 its next reconcile cycle, which runs every 10 seconds. Each plugin's README
 lists its fields and exactly what it injects.
 
+When the application's last resource is removed, the next cycle removes what
+the resources added. Deckwatch marks every workload it patches this way with a
+`plugins.deckwatch.io/fields-owner` annotation that identifies its database, and
+only removes fields from workloads that carry its own database's mark (or, for
+workloads patched before 0.7.0, from workloads of applications its database
+knows). A new or reset database, or a second deckwatch on the same cluster,
+leaves the other workloads alone.
+
 ## Cloning and Promoting
 
 You can clone a deployment to another namespace using the promote/clone
