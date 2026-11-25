@@ -884,6 +884,31 @@ export interface McpTuning {
   nodes?: string;
   storage?: string;
   plugins?: string;
+  /** GET always returns it; a PUT that omits it keeps the stored value. */
+  guardrails?: McpGuardrails;
+}
+
+export type WorkloadPolicyMode = "restrictive" | "permissive";
+
+/**
+ * Settings → MCP Tuning → Kubernetes tool guardrails (`mcp_tuning.guardrails`):
+ * the switches of the embedded mcp-k8s tools. Field names are mcp-k8s's.
+ */
+export interface McpGuardrails {
+  /** "restrictive" (default): mcp-k8s's workload policy; "permissive": every workload guardrail off. */
+  workload_policy: WorkloadPolicyMode;
+  /** Rules the restrictive policy lets through, by mcp-k8s field name (e.g. "allow_load_balancer"). */
+  exceptions: string[];
+  /** API groups create_/update_custom_resource may write ("*": any). Empty refuses custom resource writes. */
+  allowed_custom_resource_groups: string[];
+  /** approve_csr may approve system:masters and other system: identities. */
+  allow_privileged_csr: boolean;
+  /** apply_manifest is listed and served (default true). It bypasses the workload guardrails. */
+  apply_manifest_enabled: boolean;
+  /** get_secret may return values and get_resource_json a Secret's data (default false). */
+  secret_decode_enabled: boolean;
+  /** The typed create tools fill in runAsNonRoot and friends (default true). */
+  secure_defaults: boolean;
 }
 
 export interface CostSettings {

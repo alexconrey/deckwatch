@@ -63,6 +63,16 @@ eachTheme(() => {
     }
   });
 
+  test.describe("settings states", () => {
+    test("MCP Tuning with the permissive policy", async ({ app, page }) => {
+      await app.goto("/settings");
+      await section(page, "MCP Tuning");
+      await page.getByTestId("mcp-guardrails").getByRole("button", { name: "Permissive" }).click();
+      await expect(page.getByText("Every workload guardrail is off.", { exact: false })).toBeVisible();
+      await app.snap("settings/mcp-tuning-permissive", { fullPage: true });
+    });
+  });
+
   test.describe("settings dialogs and menus", () => {
     test("default storage class menu", async ({ app, page }) => {
       await app.goto("/settings");

@@ -215,6 +215,49 @@ test.describe("Settings: OpenTelemetry export", () => {
   });
 });
 
+test.describe("Settings: MCP Tuning guardrails", () => {
+  test("the Kubernetes tool guardrails are saved with the guidance", async ({ app, page, mockApi }) => {
+    await app.goto("/settings");
+    await section(page, "MCP Tuning");
+    const guardrails = page.getByTestId("mcp-guardrails");
+    await expect(guardrails.getByLabel("apply_manifest (raw manifests)")).toBeChecked();
+    await expect(guardrails.getByLabel("Return Secret values")).not.toBeChecked();
+
+    await guardrails.getByLabel("apply_manifest (raw manifests)").uncheck();
+    await guardrails.getByLabel("Return Secret values").check();
+    await guardrails.getByLabel(/NodePort Services/).check();
+    await page.getByRole("button", { name: "Save" }).first().click();
+
+    const put = await mockApi.waitForRequest("PUT", "/settings");
+    const tuning = (put.body as { mcp_tuning: { global?: string; guardrails: unknown } }).mcp_tuning;
+    expect(tuning.global).toBe("Prefer read-only tools. Confirm before deleting anything.");
+    expect(tuning.guardrails).toEqual({
+      workload_policy: "restrictive",
+      exceptions: ["allow_node_port", "allow_load_balancer"],
+      allowed_custom_resource_groups: ["cert-manager.io"],
+      allow_privileged_csr: false,
+      apply_manifest_enabled: false,
+      secret_decode_enabled: true,
+      secure_defaults: true,
+    });
+    await expect(page.getByText("Settings saved")).toBeVisible();
+  });
+
+  test("the permissive policy warns and hides the exceptions", async ({ app, page, mockApi }) => {
+    await app.goto("/settings");
+    await section(page, "MCP Tuning");
+    const guardrails = page.getByTestId("mcp-guardrails");
+    await guardrails.getByRole("button", { name: "Permissive" }).click();
+    await expect(guardrails.getByText("Every workload guardrail is off.", { exact: false })).toBeVisible();
+    await expect(guardrails.getByText("Exceptions", { exact: true })).toHaveCount(0);
+
+    await page.getByRole("button", { name: "Save" }).first().click();
+    const put = await mockApi.waitForRequest("PUT", "/settings");
+    const tuning = (put.body as { mcp_tuning: { guardrails: { workload_policy: string } } }).mcp_tuning;
+    expect(tuning.guardrails.workload_policy).toBe("permissive");
+  });
+});
+
 test.describe("Settings: endpoints", () => {
   test("endpoint overrides are checked while typing and saved with the advanced settings", async ({
     app,

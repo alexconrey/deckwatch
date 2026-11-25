@@ -137,6 +137,17 @@ function settings(): DeckwatchSettings {
     mcp_tuning: {
       global: "Prefer read-only tools. Confirm before deleting anything.",
       deployments: "Always check metrics before recommending resource changes.",
+      // GET always returns the guardrails: the defaults, plus one exception
+      // and one custom resource API group.
+      guardrails: {
+        workload_policy: "restrictive",
+        exceptions: ["allow_load_balancer"],
+        allowed_custom_resource_groups: ["cert-manager.io"],
+        allow_privileged_csr: false,
+        apply_manifest_enabled: true,
+        secret_decode_enabled: false,
+        secure_defaults: true,
+      },
     },
     marketplace_url: MARKETPLACE_URL,
     observability: { otlp_endpoint: COLLECTOR_URL, otlp_metrics_endpoint: "" },
