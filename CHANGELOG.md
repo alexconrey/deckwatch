@@ -576,6 +576,16 @@ first.
 - MCP `list_ipaddresses`, `get_ipaddress`, `list_servicecidrs` and
   `get_servicecidr` use GA `networking.k8s.io/v1`, which every supported
   cluster serves (they used `v1beta1`). (#252)
+- The GitOps watcher no longer stops for good when one of its steps panics.
+  A multi-byte character in the wrong place in a git server's ref list, or in
+  more than 64 KiB of build output, panicked the background task that polls
+  repositories, monitors builds and reconciles plugins. It then stayed
+  stopped until deckwatch restarted, while the API kept serving and the
+  health checks kept passing. Ref lists, build logs and commit SHAs are now
+  cut on character boundaries, a branch is found by its exact ref name (a
+  branch whose name merely contains `refs/heads/<branch>` is no longer
+  mistaken for it), and a panic in any watcher step is logged as an error
+  and skips only that step for the cycle. (#303)
 - The OpenAPI spec (`/api/docs`) no longer lists the removed addon
   endpoints. (#214)
 - With `tracing.enabled`, the chart's deckwatch, registry and webhook

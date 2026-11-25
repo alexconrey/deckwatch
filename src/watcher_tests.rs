@@ -652,6 +652,121 @@ fn parse_ref_sha_skips_capabilities_symref() {
     assert_eq!(sha, "9b52e759fdc98199592093b531cd6dd4dfa02d06");
 }
 
+#[test]
+fn parse_ref_sha_survives_multibyte_ref_names() {
+    // A branch whose name has a multi-byte character 40 bytes before an
+    // embedded "refs/heads/main" (and sorts before main). Slicing the line by
+    // byte offset used to panic here.
+    let hostile = format!("refs/heads/a\u{e9}{}refs/heads/main", "0".repeat(39));
+    let resp = format!(
+        "001e# service=git-upload-pack\n0000\
+         00a0aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa HEAD\0 symref=HEAD:refs/heads/main\n\
+         0050cccccccccccccccccccccccccccccccccccccccc {hostile}\n\
+         003f9b52e759fdc98199592093b531cd6dd4dfa02d06 refs/heads/main\n0000"
+    );
+    let sha = parse_ref_sha(&resp, "main").unwrap();
+    assert_eq!(sha, "9b52e759fdc98199592093b531cd6dd4dfa02d06");
+    // Non-ASCII text anywhere else is fine too.
+    assert!(parse_ref_sha("\u{e9}\u{e9}\u{e9} refs/heads/main\n", "main").is_err());
+    assert!(parse_ref_sha("\u{20ac}".repeat(50).as_str(), "main").is_err());
+}
+
+#[test]
+fn parse_ref_sha_requires_the_exact_ref_name() {
+    // A ref whose name only ends in "refs/heads/main", preceded by 40 hex
+    // digits of its own, must not be taken for main.
+    let resp = "0069dddddddddddddddddddddddddddddddddddddddd \
+                refs/heads/eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeerefs/heads/main\n\
+                003f9b52e759fdc98199592093b531cd6dd4dfa02d06 refs/heads/main\n";
+    assert_eq!(
+        parse_ref_sha(resp, "main").unwrap(),
+        "9b52e759fdc98199592093b531cd6dd4dfa02d06"
+    );
+    // Nor a longer branch name, or a tag of the same name.
+    let resp = "0042aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa refs/heads/main-old\n\
+                0040bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb refs/tags/main\n";
+    assert!(parse_ref_sha(resp, "main").is_err());
+    // The SHA must be exactly 40 hex digits after the length prefix.
+    let resp = "003fzb52e759fdc98199592093b531cd6dd4dfa02d06 refs/heads/main\n";
+    assert!(parse_ref_sha(resp, "main").is_err());
+}
+
+#[test]
+fn build_logs_are_cut_on_a_character_boundary() {
+    // Three-byte characters across the cut, at every alignment.
+    for pad in 0..3 {
+        let logs = format!(
+            "{}\n{}",
+            "x".repeat(pad),
+            "\u{20ac}".repeat(MAX_BUILD_LOG_BYTES / 3 + 10)
+        );
+        let kept = keep_log_tail(logs.clone());
+        assert!(
+            kept.starts_with("[truncated"),
+            "{}",
+            kept.chars().take(40).collect::<String>()
+        );
+        assert!(kept.len() <= MAX_BUILD_LOG_BYTES + 64);
+        assert!(logs.ends_with(kept.lines().last().unwrap()));
+    }
+    // It starts at the next full line.
+    let logs = format!("{}\nlast line\n", "\u{e9}".repeat(MAX_BUILD_LOG_BYTES));
+    assert_eq!(
+        keep_log_tail(logs),
+        "[truncated — showing last ~64KB]\nlast line\n"
+    );
+    // Short logs are kept whole.
+    assert_eq!(
+        keep_log_tail("short \u{e9} log".to_string()),
+        "short \u{e9} log"
+    );
+}
+
+#[test]
+fn shas_are_abbreviated_by_characters() {
+    assert_eq!(
+        abbreviate_sha("9b52e759fdc98199592093b531cd6dd4dfa02d06"),
+        "9b52e75"
+    );
+    assert_eq!(abbreviate_sha("abc"), "abc");
+    assert_eq!(abbreviate_sha(""), "");
+    // A stored value that isn't a hex SHA (from a webhook payload or an
+    // imported annotation) must not panic.
+    assert_eq!(
+        abbreviate_sha("\u{e9}\u{e9}\u{e9}\u{e9}\u{e9}\u{e9}\u{e9}\u{e9}"),
+        "\u{e9}\u{e9}\u{e9}\u{e9}\u{e9}\u{e9}\u{e9}"
+    );
+}
+
+#[tokio::test]
+async fn a_panicking_watcher_phase_is_logged_and_the_next_one_runs() {
+    let (outputs, captured) = crate::test_tracing::capture(async {
+        let first = guarded("test_phase", async {
+            let text = "\u{e9}t\u{e9}";
+            // A byte-offset slice inside a multi-byte character.
+            let cut = &text[..1];
+            cut.len()
+        })
+        .await;
+        let second = guarded("test_phase", async { 42 }).await;
+        (first, second)
+    })
+    .await;
+    assert_eq!(outputs, (None, Some(42)));
+
+    let events = captured.events_on("deckwatch::watcher");
+    let event = events
+        .iter()
+        .find(|e| e.message == "watcher phase panicked; skipping it this cycle")
+        .expect("the panic is logged");
+    assert_eq!(event.fields["phase"], "test_phase");
+    assert!(
+        event.fields["panic"].contains("is not a char boundary"),
+        "{:?}",
+        event.fields
+    );
+}
+
 // ── reconcile_application_plugins tests ─────────────────────────────────────
 
 /// Verify that the application_id → plugin_names grouping logic works correctly.

@@ -70,34 +70,77 @@ pub async fn run_poller(state: AppState) {
     let registry_http = outbound.client(crate::outbound::Purpose::Registry);
     let mut plugin_field_sweep = PluginFieldSweep::default();
 
+    // Every phase runs under `guarded`: this one task does all GitOps
+    // polling, build monitoring and plugin reconciliation, so a panic in one
+    // phase is logged and skips that phase for this cycle instead of ending
+    // the task (its JoinHandle isn't watched).
     loop {
         tokio::select! {
             _ = interval.tick() => {
                 let cycle_start = Instant::now();
 
-                if let Err(e) = poll_cycle(&state, &git_http).await {
+                if let Some(Err(e)) = guarded("poll_cycle", poll_cycle(&state, &git_http)).await {
                     tracing::error!(error = %e, "watcher poll cycle failed");
                 }
 
-                if let Err(e) = monitor_builds(&state, &registry_http).await {
+                if let Some(Err(e)) =
+                    guarded("monitor_builds", monitor_builds(&state, &registry_http)).await
+                {
                     tracing::error!(error = %e, "watcher build monitor failed");
                 }
 
-                reconcile_application_plugins(&state, &mut plugin_field_sweep).await;
+                guarded(
+                    "reconcile_application_plugins",
+                    reconcile_application_plugins(&state, &mut plugin_field_sweep),
+                )
+                .await;
 
                 metrics::record_gitops_poll_duration(cycle_start.elapsed().as_secs_f64());
             }
             _ = pending_interval.tick() => {
-                reconcile_pending_resources(&state).await;
+                guarded("reconcile_pending_resources", reconcile_pending_resources(&state)).await;
             }
             _ = gauge_interval.tick() => {
                 // Update resource gauges on a slower cadence (best-effort; errors are
                 // logged, not fatal). Running this every 60 s instead of every 10 s
                 // cuts cluster-wide LIST calls by 6×.
-                update_resource_gauges(&state).await;
+                guarded("update_resource_gauges", update_resource_gauges(&state)).await;
             }
         }
     }
+}
+
+/// Run `fut`, one phase of a watcher cycle (or one deployment's git check).
+/// If it panics, log the panic as an error and return `None`, so the caller
+/// carries on with the next phase or cycle.
+async fn guarded<F: std::future::Future>(phase: &'static str, fut: F) -> Option<F::Output> {
+    use futures::FutureExt as _;
+    match std::panic::AssertUnwindSafe(fut).catch_unwind().await {
+        Ok(output) => Some(output),
+        Err(panic) => {
+            tracing::error!(
+                phase,
+                panic = %panic_message(panic.as_ref()),
+                "watcher phase panicked; skipping it this cycle"
+            );
+            None
+        }
+    }
+}
+
+/// The message of a panic payload, cut to 512 bytes (it can quote the data
+/// that caused it).
+fn panic_message(panic: &(dyn std::any::Any + Send)) -> &str {
+    let message = panic
+        .downcast_ref::<&str>()
+        .copied()
+        .or_else(|| panic.downcast_ref::<String>().map(String::as_str))
+        .unwrap_or("(panic payload is not a string)");
+    let mut end = message.len().min(512);
+    while !message.is_char_boundary(end) {
+        end -= 1;
+    }
+    &message[..end]
 }
 
 async fn poll_cycle(state: &AppState, http: &reqwest::Client) -> anyhow::Result<()> {
@@ -131,7 +174,10 @@ async fn poll_cycle(state: &AppState, http: &reqwest::Client) -> anyhow::Result<
             continue;
         }
 
-        if let Err(e) = check_and_build(state, http, ns, dep_name, config, &settings).await {
+        // Guarded per deployment too: one repository's bad response must not
+        // stop the others from being polled.
+        let check = check_and_build(state, http, ns, dep_name, config, &settings);
+        if let Some(Err(e)) = guarded("git_check", check).await {
             tracing::warn!(
                 deployment = %dep_name,
                 namespace = %ns,
@@ -191,7 +237,7 @@ async fn check_and_build(
         return Ok(());
     }
 
-    let short_sha = &remote_sha[..7.min(remote_sha.len())];
+    let short_sha = abbreviate_sha(&remote_sha);
 
     let include_paths: Vec<&str> = if config.include_paths.is_empty() {
         vec![]
@@ -357,20 +403,36 @@ pub async fn check_remote_head(
     parse_ref_sha(&resp, branch)
 }
 
+/// The commit `refs/heads/{branch}` points to in a git ref advertisement
+/// (`info/refs`). Each line is an optional pkt-line length (two of them on
+/// the line after a flush), a 40-digit hex SHA, a space and the ref name,
+/// and on the first line a NUL and the capabilities.
+///
+/// The ref name must match exactly, so a branch whose name merely contains
+/// `refs/heads/{branch}` can't stand in for it. The SHA is checked as bytes:
+/// the response comes from whatever server the repo URL names, and nothing
+/// in it may make this panic.
 fn parse_ref_sha(resp: &str, branch: &str) -> anyhow::Result<String> {
     let target_ref = format!("refs/heads/{branch}");
-    let mut search_from = 0;
-    while let Some(pos) = resp[search_from..].find(&target_ref) {
-        let ref_pos = search_from + pos;
-        let before = &resp[..ref_pos];
-        let before = before.trim_end_matches([' ', '\0']);
-        if before.len() >= 40 {
-            let sha = &before[before.len() - 40..];
-            if sha.chars().all(|c| c.is_ascii_hexdigit()) {
-                return Ok(sha.to_string());
-            }
+    for line in resp.split('\n') {
+        let line = line.split('\0').next().unwrap_or_default();
+        let Some((left, name)) = line.trim_end_matches('\r').rsplit_once([' ', '\t']) else {
+            continue;
+        };
+        if name != target_ref {
+            continue;
         }
-        search_from = ref_pos + target_ref.len();
+        let left = left.as_bytes();
+        let Some(prefix_len) = left.len().checked_sub(40) else {
+            continue;
+        };
+        let (prefix, sha) = left.split_at(prefix_len);
+        // Before the SHA: nothing (plain format), or one or two pkt-line lengths.
+        let prefix_ok =
+            matches!(prefix.len(), 0 | 4 | 8) && prefix.iter().all(u8::is_ascii_hexdigit);
+        if prefix_ok && sha.iter().all(u8::is_ascii_hexdigit) {
+            return Ok(String::from_utf8_lossy(sha).into_owned());
+        }
     }
     anyhow::bail!("branch '{branch}' not found in remote refs")
 }
@@ -583,7 +645,7 @@ async fn trigger_build(
     settings: &crate::handlers::settings::DeckwatchSettings,
 ) -> anyhow::Result<String> {
     let dep_name = dep.name_any();
-    let short_sha = &commit_sha[..7.min(commit_sha.len())];
+    let short_sha = abbreviate_sha(commit_sha);
     let job_name = format!("{dep_name}-build-{short_sha}");
 
     // Read config from the database.
@@ -953,17 +1015,7 @@ async fn capture_build_group_logs(state: &AppState, ns: &str, build_group: &str)
         None
     } else {
         // Truncate to MAX_BUILD_LOG_BYTES to keep DB rows reasonable.
-        if combined.len() > MAX_BUILD_LOG_BYTES {
-            let tail = &combined[combined.len() - MAX_BUILD_LOG_BYTES..];
-            let start = tail.find('\n').map(|i| i + 1).unwrap_or(0);
-            Some(format!(
-                "[truncated -- showing last ~{}KB]\n{}",
-                MAX_BUILD_LOG_BYTES / 1024,
-                &tail[start..]
-            ))
-        } else {
-            Some(combined)
-        }
+        Some(keep_log_tail(combined))
     }
 }
 
@@ -1231,7 +1283,7 @@ async fn monitor_builds(state: &AppState, http: &reqwest::Client) -> anyhow::Res
 
         let now = now_utc();
         let commit_sha = config.last_commit_sha.as_deref().unwrap_or("");
-        let short_sha = &commit_sha[..7.min(commit_sha.len())];
+        let short_sha = abbreviate_sha(commit_sha);
 
         match group_status {
             BuildGroupStatus::InProgress | BuildGroupStatus::ManifestInProgress => {
@@ -1492,6 +1544,38 @@ where
 /// (and usually most relevant) output is preserved.
 const MAX_BUILD_LOG_BYTES: usize = 64 * 1024;
 
+/// `logs` cut to its last [`MAX_BUILD_LOG_BYTES`] bytes when longer, starting
+/// at the next line and after a note saying so. The end of a build log is
+/// usually the most informative part (errors, the final steps). The cut moves
+/// forward to a character boundary: build output is arbitrary text, and a
+/// multi-byte character at the cut must not panic.
+fn keep_log_tail(logs: String) -> String {
+    if logs.len() <= MAX_BUILD_LOG_BYTES {
+        return logs;
+    }
+    let mut cut = logs.len() - MAX_BUILD_LOG_BYTES;
+    while !logs.is_char_boundary(cut) {
+        cut += 1;
+    }
+    let tail = &logs[cut..];
+    // Find the first newline so we don't start mid-line.
+    let start = tail.find('\n').map(|i| i + 1).unwrap_or(0);
+    format!(
+        "[truncated — showing last ~{}KB]\n{}",
+        MAX_BUILD_LOG_BYTES / 1024,
+        &tail[start..]
+    )
+}
+
+/// The first 7 characters of a commit SHA, for job names, image tags and
+/// messages. A stored SHA can come from places other than a git server (a
+/// webhook payload, an imported annotation), so it is cut by characters, not
+/// bytes.
+fn abbreviate_sha(sha: &str) -> &str {
+    let end = sha.char_indices().nth(7).map_or(sha.len(), |(i, _)| i);
+    &sha[..end]
+}
+
 /// Capture build pod logs for the given job. Returns `None` (with a warning)
 /// if the pod or its logs cannot be retrieved — log capture must never block
 /// the cleanup path.
@@ -1524,22 +1608,7 @@ async fn capture_build_log(state: &AppState, ns: &str, job_name: &str) -> Option
     };
 
     match pods_api.logs(pod_name, &log_params).await {
-        Ok(logs) => {
-            if logs.len() > MAX_BUILD_LOG_BYTES {
-                // Keep the tail — the end of the log is usually the most
-                // informative (error messages, final build steps).
-                let truncated = &logs[logs.len() - MAX_BUILD_LOG_BYTES..];
-                // Find the first newline so we don't start mid-line.
-                let start = truncated.find('\n').map(|i| i + 1).unwrap_or(0);
-                Some(format!(
-                    "[truncated — showing last ~{}KB]\n{}",
-                    MAX_BUILD_LOG_BYTES / 1024,
-                    &truncated[start..]
-                ))
-            } else {
-                Some(logs)
-            }
-        }
+        Ok(logs) => Some(keep_log_tail(logs)),
         Err(e) => {
             tracing::warn!(error = %e, job_name, pod_name, "failed to fetch build pod logs");
             None
