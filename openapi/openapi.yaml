@@ -957,6 +957,9 @@ paths:
         Stores the body as `/data/uploads/{name}.wasm`, switches the plugin source
         to `upload`, and reloads it in the background. Once reloaded, the plugin's
         `sha256` in `GET /api/plugins` matches `shasum -a 256` of the uploaded file.
+        `{name}` must name a configured plugin and make a plain file name (letters,
+        digits, `.`, `_` and `-`, not starting with `.`); nothing is written
+        otherwise.
       requestBody:
         required: true
         content:
@@ -964,7 +967,7 @@ paths:
             schema: { type: string, format: binary }
       responses:
         "204": { description: Uploaded; reload started }
-        "400": { description: Empty body or not a WASM binary }
+        "400": { description: Empty body, not a WASM binary, or a name that isn't a plain file name }
         "404": { description: Plugin not found in settings }
 
   # -------------------------------------------------------------- registry UI

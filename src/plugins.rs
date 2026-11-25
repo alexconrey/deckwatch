@@ -1061,6 +1061,21 @@ pub fn enabled_plugin_names(settings: &DeckwatchSettings) -> Vec<String> {
 /// Directory where uploaded WASM binaries are stored.
 pub const UPLOADS_DIR: &str = "/data/uploads";
 
+/// The path of the uploaded plugin file `filename` in `dir`, or `None` if
+/// `filename` isn't a plain file name: ASCII letters, digits, `.`, `_` and
+/// `-`, not starting with `.`. Whoever can edit settings or call the upload
+/// route chooses the name, so it must never reach outside `dir` (`/`, `..`,
+/// an absolute path).
+pub fn upload_path(dir: &std::path::Path, filename: &str) -> Option<std::path::PathBuf> {
+    let plain = !filename.is_empty()
+        && filename.len() <= 255
+        && !filename.starts_with('.')
+        && filename
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'));
+    plain.then(|| dir.join(filename))
+}
+
 async fn fetch_bytes(
     cfg: &PluginConfig,
     http: &reqwest::Client,
@@ -1069,7 +1084,11 @@ async fn fetch_bytes(
 ) -> anyhow::Result<Vec<u8>> {
     // Uploaded WASMs are read from disk — no HTTP needed.
     if let PluginSource::Upload { filename } = &cfg.source {
-        let path = std::path::Path::new(UPLOADS_DIR).join(filename);
+        let path = upload_path(std::path::Path::new(UPLOADS_DIR), filename).ok_or_else(|| {
+            anyhow::anyhow!(
+                "uploaded plugin file {filename:?} isn't a plain file name in the uploads directory"
+            )
+        })?;
         return tokio::fs::read(&path)
             .await
             .map_err(|e| anyhow::anyhow!("failed to read uploaded plugin {filename}: {e}"));
@@ -3383,6 +3402,65 @@ mod tests {
             "existing container image should not be overwritten"
         );
         assert_eq!(pod_spec.containers[1].name, "new-sidecar");
+    }
+
+    #[test]
+    fn upload_path_allows_only_plain_file_names() {
+        let dir = std::path::Path::new("/data/uploads");
+        assert_eq!(upload_path(dir, "aws.wasm"), Some(dir.join("aws.wasm")));
+        assert_eq!(
+            upload_path(dir, "my_plugin-2.0.wasm"),
+            Some(dir.join("my_plugin-2.0.wasm"))
+        );
+        for bad in [
+            "",
+            ".wasm",
+            "..",
+            "../x.wasm",
+            "../../etc/passwd",
+            "/etc/passwd",
+            "a/b.wasm",
+            "a\\b.wasm",
+            "x\0.wasm",
+            "a b.wasm",
+            "\u{fc}.wasm",
+        ] {
+            assert_eq!(upload_path(dir, bad), None, "{bad:?}");
+        }
+        assert_eq!(upload_path(dir, &"a".repeat(256)), None);
+    }
+
+    /// Upload filenames come from settings, which anyone who can edit them
+    /// chooses: one outside the uploads directory isn't read.
+    #[tokio::test]
+    async fn an_upload_source_outside_the_uploads_dir_is_not_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = crate::plugin_fixture::test_state(dir.path(), vec![], None).await;
+        let http = reqwest::Client::new();
+        let settings = DeckwatchSettings::default();
+        for filename in ["../../etc/hosts", "/etc/hosts"] {
+            let cfg = PluginConfig {
+                name: "demo".into(),
+                enabled: true,
+                source: PluginSource::Upload {
+                    filename: filename.into(),
+                },
+                token_secret: None,
+                allowed_hosts: vec![],
+                config: Default::default(),
+                inherit_env_keys: vec![],
+                inherit_env_file_keys: Default::default(),
+                sha256: None,
+                mcp_tuning: Default::default(),
+            };
+            let err = fetch_bytes(&cfg, &http, &settings, &state)
+                .await
+                .expect_err(filename);
+            assert!(
+                err.to_string().contains("isn't a plain file name"),
+                "{filename}: {err}"
+            );
+        }
     }
 
     #[test]
