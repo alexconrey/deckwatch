@@ -232,7 +232,7 @@ first.
 - **Releases are published only from `main`.** The release workflow now also
   refuses a tag whose commit isn't on `main` (the tip of `main` or one of its
   ancestors), before it builds anything, so a tag on any other branch
-  publishes no image and no GitHub Release.
+  publishes no image and no GitHub Release. (#297)
 
 ### Added
 
