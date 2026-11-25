@@ -52,6 +52,7 @@ src/                              # Rust backend (library + thin binary)
   telemetry.rs                    # Subscriber + optional OTLP export of deckwatch's
                                   #   own traces/logs/metrics (OTEL_* or settings,
                                   #   docs/TRACING.md); telemetry/endpoints.rs: precedence
+  otel_inject.rs                  # Per-application OTEL_* env injection (reconciler)
   entities/                       # SeaORM entity definitions
     settings.rs                   # settings table (key-value)
     applications.rs               # applications table
@@ -72,6 +73,7 @@ src/                              # Rust backend (library + thin binary)
     ai_fix.rs                     # AI fix job creation
     settings.rs                   # Settings CRUD (DB-backed)
     applications.rs               # Application CRUD + members
+    app_observability.rs          # Application Observability section (PodMonitors, OTel injection)
     promote.rs                    # Cross-namespace promotion
     webhooks.rs                   # Git webhook receiver
     admission.rs                  # K8s validating webhook
@@ -406,6 +408,18 @@ Key files: `src/plugins.rs` (fetch, execute, merge), `src/handlers/plugins.rs`
 - **Prometheus monitoring**: runtime setting in DB (Settings → Observability)
 - **Container registry**: controlled by `registry.enabled` in Helm values (not settings page)
 - **AI providers**: server-side toggles in DB (Settings → AI Providers)
+- **Per-application OpenTelemetry injection**: off by default; the
+  application's Observability tab (`applications.observability` in the DB).
+  `src/otel_inject.rs`, run by the watcher every cycle, sets the `OTEL_*`
+  variables on the primary container of the application's Deployments,
+  StatefulSets and CronJobs, with the endpoints from Settings → Observability
+  only (never deckwatch's own `OTEL_*` variables). It never overwrites a value
+  the workload sets in its `env` (it can't see `envFrom`), records what it set
+  in the `observability.deckwatch.io/otel-env` annotation, and removes only
+  that.
+  It patches with strategic merge patches conditional on `resourceVersion`,
+  not server-side apply: SSA would delete a user's value when giving up a
+  variable the user edited.
 - **deckwatch's own telemetry**: off unless an OTLP endpoint is set, through
   `OTEL_EXPORTER_OTLP_ENDPOINT` (or a per-signal endpoint, Helm
   `telemetry.otlp.*`) or Settings → Observability (`observability.otlp_endpoint`
