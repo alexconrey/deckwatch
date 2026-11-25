@@ -126,6 +126,7 @@ test.describe("Applications", () => {
       await page.getByRole("button", { name: "Delete" }).click();
 
       const dialog = app.dialog("Delete Application");
+      await app.autofocused(dialog.getByRole("textbox"));
       const confirm = dialog.getByRole("button", { name: "Delete" });
       await dialog.getByLabel("Also delete all member resources (deployments and cronjobs)").check();
       await expect(confirm).toBeDisabled();
@@ -142,6 +143,7 @@ test.describe("Applications", () => {
       await app.goto("/applications/default/sandbox");
       await page.getByRole("button", { name: "Delete" }).click();
       const dialog = app.dialog("Delete Application");
+      await app.autofocused(dialog.getByRole("textbox"));
       await dialog.getByRole("textbox").fill("sandbox");
       await dialog.getByRole("button", { name: "Delete" }).click();
 

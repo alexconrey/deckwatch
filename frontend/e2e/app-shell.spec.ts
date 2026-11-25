@@ -67,6 +67,7 @@ test.describe("App shell", () => {
       await page.getByRole("option", { name: "Create Namespace…" }).click();
 
       const dialog = app.dialog("Create Namespace");
+      await app.autofocused(dialog.getByLabel("Name"));
       await dialog.getByLabel("Name").fill("payments");
       await dialog.getByLabel("Labels (optional)").fill("team=billing\ncost-center=42");
       await dialog.getByRole("button", { name: "Create" }).click();
@@ -84,6 +85,7 @@ test.describe("App shell", () => {
       await page.getByRole("option", { name: "Create Namespace…" }).click();
 
       const dialog = app.dialog("Create Namespace");
+      await app.autofocused(dialog.getByLabel("Name"));
       await dialog.getByLabel("Name").fill("Bad_Name");
       await expect(dialog.getByText("Resource names cannot contain underscores", { exact: false })).toBeVisible();
       await dialog.getByRole("button", { name: "Create" }).click();
