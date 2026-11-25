@@ -192,6 +192,14 @@ pub async fn run() {
         }
     }
 
+    audit::spawn_retention(
+        state.db.clone(),
+        audit::Retention {
+            max_age_days: config.audit_retention_days,
+            max_rows: config.audit_max_rows,
+        },
+    );
+
     let watcher_state = state.clone();
     tokio::spawn(async move {
         tracing::info!("starting git watcher");

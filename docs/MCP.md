@@ -354,11 +354,43 @@ includes the client's name and version from `initialize`
 (`mcp_k8s.client.name` and `mcp_k8s.client.version`). The client reports
 these itself, so treat them as a label, not as the caller's identity.
 
+### Audit log
+
+Every MCP tool call that writes, deletes or execs, and every call a
+guardrail refuses, adds one row to deckwatch's audit log (Settings → Audit
+Log, `GET /api/audit`), whether the tool is deckwatch's own or one of
+mcp-k8s's. Reads that go through are not audited. A row records:
+
+| Column | Value |
+|---|---|
+| `source` | `mcp` (`api` for changes made through the UI or REST API) |
+| `tool` | The tool called |
+| `action` | `write`, `delete`, `exec`, or `read` for a refused read |
+| `outcome` | `ok`, `error`, `denied`, or `cancelled` when the client went away mid-call (the change may still have been made) |
+| `resource_type`, `resource_name`, `namespace` | The target, such as `deployment` `web` in `prod`. For `apply_manifest`, from the manifest |
+| `client_name` | The client's name from `initialize`. **The client reports it itself**, so it labels a call; it doesn't identify the caller |
+| `detail` | JSON: the argument keys, the allowlisted argument values (namespace, name, kind, image, container, replicas, ...), the refusing rule, the client's name and version (`"self_reported": true`), the session id, the trace id when deckwatch exports traces, and the duration |
+| `user_identity` | Empty until MCP clients authenticate |
+
+Argument values outside that allowlist are never stored: no Secret data, env
+values, commands, manifest bodies or plugin config.
+
+The guardrails checked before a call runs are deckwatch's namespace allowlist
+(`DECKWATCH_NAMESPACES`, for the namespace a call targets) and mcp-k8s's
+permission settings. A refused call returns the reason as an error and is
+recorded with `outcome` `denied` and the rule (`namespace_allowlist`, or
+mcp-k8s's `global:<action>` / `override:<resource>-<action>`).
+
+Rows are kept for 365 days and up to 100,000 rows, then pruned hourly. Set
+`DECKWATCH_AUDIT_RETENTION_DAYS` and `DECKWATCH_AUDIT_MAX_ROWS` (Helm
+`audit.retentionDays`, `audit.maxRows`; `0` turns a limit off).
+
 Prometheus `/metrics` counts each tool call once:
 `deckwatch_mcp_tool_calls_total{tool,status}` counts the calls deckwatch
-serves itself, and `mcp_k8s_tool_calls_total{tool,status}` counts the ones
-mcp-k8s runs, including those deckwatch intercepts and then hands on (such as
-`create_deployment`). `deckwatch_mcp_requests_total{method,status}` labels
+serves itself (and calls a guardrail refused, as `status="denied"`), and
+`mcp_k8s_tool_calls_total{tool,status}` counts the ones mcp-k8s runs,
+including those deckwatch intercepts and then hands on (such as
+`apply_manifest`). `deckwatch_mcp_requests_total{method,status}` labels
 methods outside the MCP specification as `_OTHER`.
 
 ---

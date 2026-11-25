@@ -40,22 +40,44 @@ use tracing::Span;
 #[derive(Debug)]
 pub struct DeckwatchTool {
     pub name: &'static str,
-    /// What the tool does, as recorded in `mcp_k8s.action`. mcp-k8s
-    /// classifies tools by name prefix (`list_`, `create_`, `delete_`…) and
-    /// calls everything else a read, so names like `trigger_build` need an
-    /// explicit class.
+    /// What the tool does, as recorded in `mcp_k8s.action` and audit rows.
+    /// mcp-k8s classifies tools by name prefix (`list_`, `create_`,
+    /// `delete_`…) and calls everything else a read, so names like
+    /// `trigger_build` need an explicit class.
     pub action: ActionClass,
+    /// The kind of object it acts on: an audit row's `resource_type`.
+    pub resource: &'static str,
+    /// The arguments that name that object when `name` doesn't, joined with
+    /// `/` for an audit row's `resource_name` (`deployment_name`, or
+    /// `application_name` and `plugin_name`).
+    pub target: &'static [&'static str],
 }
 
-const fn tool(name: &'static str, action: ActionClass) -> DeckwatchTool {
-    DeckwatchTool { name, action }
+const fn tool(
+    name: &'static str,
+    action: ActionClass,
+    resource: &'static str,
+    target: &'static [&'static str],
+) -> DeckwatchTool {
+    DeckwatchTool {
+        name,
+        action,
+        resource,
+        target,
+    }
 }
+
+/// Target arguments of the plugin resource tools.
+const PLUGIN_RESOURCE: &[&str] = &["application_name", "plugin_name", "resource_id"];
+/// Target arguments of the application/plugin association tools.
+const APPLICATION_PLUGIN: &[&str] = &["application_name", "plugin_name"];
 
 use ActionClass::{Delete, Exec, Read, Write};
 
-/// Every tool deckwatch dispatches itself, with its action class. The tests
-/// check that every dispatched or listed deckwatch tool is in here, and that
-/// the classes agree with mcp-k8s for names it knows.
+/// Every tool deckwatch dispatches itself: its action class, and what its
+/// audit rows call its target. The tests check that every dispatched or
+/// listed deckwatch tool is in here, and that the classes agree with mcp-k8s
+/// for names it knows.
 ///
 /// - `write`: creates or changes cluster or deckwatch state.
 /// - `delete`: deletes or tears down (`deprovision_resource` destroys
@@ -63,60 +85,99 @@ use ActionClass::{Delete, Exec, Read, Write};
 ///   PodMonitor).
 /// - `exec`: runs code: `exec_pod` in a container, `validate_plugin` a
 ///   caller-supplied WASM plugin with caller-chosen config and hosts.
+///
+/// An empty target means the row's name comes from `name` (or `pod_name`,
+/// `job_name`, or an `apply_manifest` manifest), as mcp-k8s's `summarize`
+/// reads it, or that the tool has no single target.
 pub const DECKWATCH_TOOLS: &[DeckwatchTool] = &[
     // Applications
-    tool("create_application", Write),
-    tool("list_applications", Read),
-    tool("get_application", Read),
-    tool("restart_application", Write),
-    tool("scale_application", Write),
-    tool("list_templates", Read),
+    tool("create_application", Write, "application", &[]),
+    tool("list_applications", Read, "application", &[]),
+    tool("get_application", Read, "application", &[]),
+    tool("restart_application", Write, "application", &[]),
+    tool("scale_application", Write, "application", &[]),
+    tool("list_templates", Read, "template", &[]),
     // GitOps and builds
-    tool("set_gitops", Write),
-    tool("get_gitops", Read),
-    tool("trigger_build", Write),
-    tool("list_builds", Read),
-    tool("get_build_log", Read),
-    tool("watch_build", Read),
-    tool("generate_local_build", Read),
+    tool("set_gitops", Write, "gitops", &["deployment_name"]),
+    tool("get_gitops", Read, "gitops", &[]),
+    tool("trigger_build", Write, "build", &[]),
+    tool("list_builds", Read, "build", &["deployment_name"]),
+    tool("get_build_log", Read, "build", &[]),
+    tool("watch_build", Read, "build", &["deployment_name"]),
+    tool("generate_local_build", Read, "build", &["deployment_name"]),
     // Ingresses and ingress templates
-    tool("create_ingress", Write),
-    tool("update_ingress", Write),
-    tool("list_ingress_templates", Read),
-    tool("create_ingress_template", Write),
-    tool("update_ingress_template", Write),
-    tool("delete_ingress_template", Delete),
+    tool("create_ingress", Write, "ingress", &[]),
+    tool("update_ingress", Write, "ingress", &[]),
+    tool("list_ingress_templates", Read, "ingress-template", &[]),
+    tool("create_ingress_template", Write, "ingress-template", &[]),
+    tool("update_ingress_template", Write, "ingress-template", &[]),
+    tool("delete_ingress_template", Delete, "ingress-template", &[]),
     // Monitoring
-    tool("get_monitoring", Read),
-    tool("enable_monitoring", Write),
-    tool("disable_monitoring", Delete),
+    tool("get_monitoring", Read, "podmonitor", &["deployment_name"]),
+    tool(
+        "enable_monitoring",
+        Write,
+        "podmonitor",
+        &["deployment_name"],
+    ),
+    tool(
+        "disable_monitoring",
+        Delete,
+        "podmonitor",
+        &["deployment_name"],
+    ),
     // Plugins
-    tool("list_plugins", Read),
-    tool("enable_plugin", Write),
-    tool("disable_plugin", Write),
-    tool("update_plugin_config", Write),
-    tool("get_plugin_config", Read),
-    tool("validate_plugin", Exec),
-    tool("associate_plugin", Write),
-    tool("disassociate_plugin", Write),
-    tool("list_application_resources", Read),
-    tool("provision_resource", Write),
-    tool("deprovision_resource", Delete),
-    tool("refresh_resource", Write),
+    tool("list_plugins", Read, "plugin", &[]),
+    tool("enable_plugin", Write, "plugin", &[]),
+    tool("disable_plugin", Write, "plugin", &[]),
+    tool("update_plugin_config", Write, "plugin", &[]),
+    tool("get_plugin_config", Read, "plugin", &[]),
+    tool("validate_plugin", Exec, "plugin", &[]),
+    tool(
+        "associate_plugin",
+        Write,
+        "application-plugin",
+        APPLICATION_PLUGIN,
+    ),
+    tool(
+        "disassociate_plugin",
+        Write,
+        "application-plugin",
+        APPLICATION_PLUGIN,
+    ),
+    tool(
+        "list_application_resources",
+        Read,
+        "plugin-resource",
+        &["application_name"],
+    ),
+    tool(
+        "provision_resource",
+        Write,
+        "plugin-resource",
+        PLUGIN_RESOURCE,
+    ),
+    tool(
+        "deprovision_resource",
+        Delete,
+        "plugin-resource",
+        PLUGIN_RESOURCE,
+    ),
+    tool(
+        "refresh_resource",
+        Write,
+        "plugin-resource",
+        PLUGIN_RESOURCE,
+    ),
     // Agent feedback
-    tool("submit_agent_feedback", Write),
-    // mcp-k8s tools deckwatch intercepts. The deployment tools still hand
-    // the call to mcp-k8s; update_deployment and create_pod add a service
-    // account, apply_manifest accepts YAML, and exec_pod is deckwatch's own
-    // non-interactive implementation.
-    tool("create_deployment", Write),
-    tool("update_deployment", Write),
-    tool("delete_deployment", Delete),
-    tool("scale_deployment", Write),
-    tool("restart_deployment", Write),
-    tool("create_pod", Write),
-    tool("apply_manifest", Write),
-    tool("exec_pod", Exec),
+    tool("submit_agent_feedback", Write, "agent-feedback", &[]),
+    // mcp-k8s tools deckwatch intercepts: update_deployment and create_pod
+    // add a service account, apply_manifest accepts YAML, and exec_pod is
+    // deckwatch's own non-interactive implementation.
+    tool("update_deployment", Write, "deployment", &[]),
+    tool("create_pod", Write, "pod", &[]),
+    tool("apply_manifest", Write, "manifest", &[]),
+    tool("exec_pod", Exec, "pod", &[]),
 ];
 
 /// The deckwatch tool named `name`, if deckwatch serves it itself.
@@ -271,6 +332,9 @@ pub struct RequestContext {
     pub protocol_version: Option<String>,
     /// W3C trace context from the `traceparent` and `tracestate` headers.
     pub http_trace: Option<W3cTraceContext>,
+    /// The request span's trace id, when deckwatch exports traces. Set once
+    /// the span exists.
+    pub trace_id: Option<String>,
 }
 
 impl RequestContext {
@@ -289,6 +353,7 @@ impl RequestContext {
                 .map(str::to_string),
             http_trace: header("traceparent")
                 .and_then(|tp| W3cTraceContext::from_parts(tp, header("tracestate"))),
+            trace_id: None,
         }
     }
 }
@@ -334,7 +399,7 @@ pub fn request_span(
 }
 
 /// `s` without control characters, cut to at most `max` bytes.
-fn clip(s: &str, max: usize) -> String {
+pub(crate) fn clip(s: &str, max: usize) -> String {
     let mut out = String::new();
     for c in s.chars().filter(|c| !c.is_control()) {
         if out.len() + c.len_utf8() > max {

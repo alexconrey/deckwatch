@@ -21,6 +21,7 @@ pub mod ingresses;
 pub mod license;
 pub mod logs;
 pub mod mcp;
+pub mod mcp_audit;
 pub mod mcp_telemetry;
 pub mod monitoring;
 pub mod namespaces;
