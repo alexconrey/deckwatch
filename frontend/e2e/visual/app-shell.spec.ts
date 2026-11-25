@@ -57,9 +57,12 @@ eachTheme(() => {
     const dialog = app.dialog("Add Plugin");
     await openMenu(dialog, "Plugin");
     await page.getByRole("option", { name: "otel" }).click();
-    await dialog.getByRole("button", { name: "Associate" }).click();
-    await expect(page.getByText('Plugin "otel" associated')).toBeVisible();
+    // Frozen before the click, the snackbar's timeout can't run out before
+    // the capture, however slow the machine.
     await app.freezeTimers();
+    await dialog.getByRole("button", { name: "Associate" }).click();
+    await app.settle();
+    await expect(page.getByText('Plugin "otel" associated')).toBeVisible();
     await app.snap("shell/snackbar");
   });
 
@@ -93,9 +96,9 @@ eachTheme(() => {
       });
     });
     await app.goto("/applications");
+    await app.freezeTimers();
     await app.runTimers(15_000);
     await expect(page.getByRole("alert").filter({ hasText: "Unhealthy" })).toBeVisible();
-    await app.freezeTimers();
     await app.snap("shell/cluster-alert-toast");
   });
 });

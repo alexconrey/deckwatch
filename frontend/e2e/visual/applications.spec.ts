@@ -1,4 +1,5 @@
 import type { Page } from "@playwright/test";
+import type { App } from "../support/app";
 import { eachTheme, expect, test } from "./visual-test";
 import { openMenu } from "../support/ui";
 
@@ -7,6 +8,16 @@ import { openMenu } from "../support/ui";
  */
 
 const wizard = (page: Page) => page.locator(".v-stepper");
+
+/**
+ * Open storefront's overview and fire the metrics poll once, so its
+ * sparklines (also visible behind a dialog) hold two identical samples, a
+ * line rather than a ramp from zero, however many real-time polls follow.
+ */
+async function openStorefront(app: App): Promise<void> {
+  await app.goto("/applications/default/storefront");
+  await app.runTimers(10_000);
+}
 
 eachTheme(() => {
   test("applications list", async ({ app }) => {
@@ -65,9 +76,7 @@ eachTheme(() => {
   });
 
   test("application detail overview", async ({ app }) => {
-    await app.goto("/applications/default/storefront");
-    // Two metrics polls, so the sparklines are lines rather than a ramp.
-    await app.runTimers(10_000);
+    await openStorefront(app);
     await app.snap("applications/detail-overview", { fullPage: true });
   });
 
@@ -106,7 +115,7 @@ eachTheme(() => {
   });
 
   test("edit application dialog", async ({ app, page }) => {
-    await app.goto("/applications/default/storefront");
+    await openStorefront(app);
     await page.getByRole("button", { name: "Edit" }).click();
     await expect(app.dialog("Edit Application").getByLabel("Repository URL")).toHaveValue(
       "https://github.com/acme/storefront.git",
@@ -115,7 +124,7 @@ eachTheme(() => {
   });
 
   test("delete application dialog with cascade", async ({ app, page }) => {
-    await app.goto("/applications/default/storefront");
+    await openStorefront(app);
     await page.getByRole("button", { name: "Delete" }).click();
     const dialog = app.dialog("Delete Application");
     await app.autofocused(dialog.getByRole("textbox"));
@@ -126,7 +135,7 @@ eachTheme(() => {
   });
 
   test("add resource dialog", async ({ app, page }) => {
-    await app.goto("/applications/default/storefront");
+    await openStorefront(app);
     await page.getByRole("button", { name: "Add Resource" }).click();
     const dialog = app.dialog("Add Resource to Application");
     await expect(dialog.getByRole("cell", { name: "legacy-admin", exact: true })).toBeVisible();
@@ -134,7 +143,7 @@ eachTheme(() => {
   });
 
   test("fix with AI agent chooser", async ({ app, page }) => {
-    await app.goto("/applications/default/storefront");
+    await openStorefront(app);
     await page.getByRole("button", { name: "Fix with AI" }).click();
     await expect(app.dialog("Choose an AI agent")).toBeVisible();
     await app.snap("applications/fix-with-ai-chooser");
