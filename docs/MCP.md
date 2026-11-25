@@ -216,7 +216,19 @@ authentication enabled, MCP clients will need to provide a bearer token.
 
 The MCP server respects deckwatch's namespace restrictions. If deckwatch is
 configured with `DECKWATCH_NAMESPACES=staging,production`, the MCP tools
-will only return data from those namespaces.
+will only return data from those namespaces. With an allowlist, the tools
+also refuse anything that would reach other namespaces:
+
+- `create_namespace`, `update_namespace` and `delete_namespace` refuse
+  namespaces outside the list;
+- `watch_resource` and `list_custom_resources` on a namespaced kind, and
+  `list_csistoragecapacities`, refuse to run without a `namespace` (it would
+  mean every namespace);
+- `drain_node` refuses, before cordoning, when it would evict pods outside
+  the list;
+- `can_i` and `list_my_permissions` refuse other namespaces;
+- `get_custom_resource`, `update_custom_resource` and
+  `delete_custom_resource` require `namespace` for namespaced kinds.
 
 ### Multiple Clusters
 
@@ -241,6 +253,93 @@ When asking Claude Code a question, specify which cluster you mean:
 claude mcp remove deckwatch-local
 ```
 
+## Guardrails
+
+The Kubernetes tools come from the embedded
+[mcp-k8s](https://github.com/alexconrey/mcp-k8s) library (v0.7.0), which
+checks what agents create, keeps Secret values back, and refuses privileged
+certificate approvals. Deckwatch turns these guardrails on, but keeps
+`apply_manifest` available. An admin changes them in **Settings → MCP Tuning
+→ Kubernetes tool guardrails**; they are stored as `mcp_tuning.guardrails`
+in the settings (`GET`/`PUT /api/settings`). `tools/list` and every
+`tools/call` read them, so a change applies from the next request, without a
+restart. MCP clients pick up a changed tool list when they reconnect
+(deckwatch doesn't send `notifications/tools/list_changed`). Every change is
+audit-logged as `mcp_tuning.guardrails.<field>`.
+
+| Setting | Default | What it does |
+|---|---|---|
+| `workload_policy` | `restrictive` | `restrictive`: the typed create and update tools (`create_pod`, `create_deployment`, `update_deployment`, `create_service`, the RBAC tools, ...) and the custom resource tools refuse privileged containers, privilege escalation, host namespaces, `hostPath` volumes, host ports, capabilities beyond the container runtime's defaults, risky volume types (nfs, inline csi, gitRepo, ...), Unconfined seccomp or AppArmor profiles, NodePort, LoadBalancer and ExternalName Services and `externalIPs`, ingress snippet annotations, RBAC escalation and pod-security namespace labels set to `privileged`. An update is checked with a server-side dry run, so updating a workload that already breaks a rule is refused too. `permissive`: every workload guardrail off, as with mcp-k8s 0.5. |
+| `exceptions` | none | Rules `restrictive` lets through anyway (see below). Ignored in permissive mode. |
+| `allowed_custom_resource_groups` | none | API groups whose custom resources `create_custom_resource` and `update_custom_resource` may write, such as `cert-manager.io`, or `*` for any. With none, custom resource writes are refused: an operator can turn a custom resource into pods or RBAC objects. Built-in groups such as `apps` are refused here, since the typed tools write those kinds. Cluster-scoped custom resource kinds stay refused in restrictive mode. Ignored in permissive mode, which allows every group. Reads are never affected. |
+| `allow_privileged_csr` | `false` | Lets `approve_csr` approve CertificateSigningRequests for `system:masters`, any other `system:` user or group (nodes, control-plane components, service accounts, `system:anonymous`), and requests it can't parse. Such a certificate can act as cluster-admin or as a node. A node's request for its own serving certificate is approved either way. Applies in both modes. |
+| `apply_manifest_enabled` | `true` | Lists and serves `apply_manifest`, a server-side apply of any manifest (YAML or JSON). It **bypasses the workload guardrails**: only the namespace allowlist applies, so it can create anything deckwatch's service account may. It carries the MCP `destructiveHint`, so clients such as Claude Code ask the user before each call, and its description tells agents to use it only when the user asks. Off: it isn't listed, and a call is refused with an error naming this setting. |
+| `secret_decode_enabled` | `false` | Lets `get_secret` return decoded values (`decode: true`) and `get_resource_json` return a Secret's `data`. The values then end up in the agent's context and the MCP client's transcript. Off: `get_secret` refuses `decode: true` with an error naming this setting, and `get_resource_json` leaves out `data`, `stringData` and the `kubectl.kubernetes.io/last-applied-configuration` annotation. |
+| `secure_defaults` | `true` | The typed create tools fill in `runAsNonRoot: true`, the RuntimeDefault seccomp profile, `allowPrivilegeEscalation: false`, all capabilities dropped, and `automountServiceAccountToken: false` unless `service_account_name` is set, when the call doesn't set them. These are defaults, not rules: an image that must run as root needs `security_context: {"run_as_non_root": false}`. Applies in both modes. |
+
+The `exceptions` are mcp-k8s's names for the rules, the same names its error
+messages use:
+
+| Exception | Lets through |
+|---|---|
+| `allow_privileged` | Privileged containers, and namespaces labelled with the privileged Pod Security level |
+| `allow_privilege_escalation` | `allowPrivilegeEscalation: true` |
+| `allow_host_namespaces` | `hostNetwork`, `hostPID` and `hostIPC` |
+| `allow_host_path` | `hostPath` volumes |
+| `allow_host_ports` | `hostPort` on container ports |
+| `allow_unconfined` | Unconfined seccomp or AppArmor, custom SELinux options, unsafe sysctls |
+| `allow_node_port` | NodePort Services |
+| `allow_load_balancer` | LoadBalancer Services and cloud load-balancer annotations |
+| `allow_external_services` | ExternalName Services and `externalIPs` |
+| `allow_ingress_snippets` | ingress-nginx `*-snippet` annotations and nginx configuration in annotation values |
+| `allow_rbac_escalation` | `escalate`, `bind` and `impersonate` verbs, wildcards, aggregation, binding cluster-admin or anonymous subjects, service account token Secrets |
+
+mcp-k8s has more settings than deckwatch exposes: lists of extra
+capabilities, volume types, allowed image registries, ingress annotation
+allow and deny lists, and kinds the custom resource tools may write despite
+being refused by default (cluster-scoped kinds, for example). A rejection
+that names one of them can only be lifted with the permissive policy, or by
+applying the object with `apply_manifest`. mcp-k8s's per-resource action
+switches (its read-only mode) aren't exposed either: every action is
+allowed.
+
+### When a call is refused
+
+The call returns an error (JSON-RPC code `-32000`, as for every tool error;
+mcp-k8s 0.7 returns MCP `isError` results instead, which deckwatch doesn't
+yet) that names the rule. mcp-k8s names its own server's flag and setting;
+deckwatch adds the setting to change on deckwatch:
+
+```
+rejected by the mcp-k8s workload policy (1 violation):
+- spec.type: LoadBalancer Services provision an externally reachable load balancer; an operator can allow this with --allow-loadbalancer (env MCP_K8S_ALLOW_LOADBALANCER=true; library: WorkloadPolicy.allow_load_balancer)
+These guardrails apply to every typed tool and the custom resource tools. Don't work around a rejection with another tool (including apply_manifest): report it to the user.
+On deckwatch, an admin sets these guardrails in Settings → MCP Tuning → Kubernetes tool guardrails (mcp_tuning.guardrails), not with the mcp-k8s server flags above: allow_load_balancer is an exception to add (mcp_tuning.guardrails.exceptions).
+```
+
+The `initialize` instructions tell agents to report a refusal to the user
+rather than work around it, and to use `apply_manifest` only when the user
+asks for a raw manifest to be applied.
+
+### What the guardrails don't cover
+
+- **Deckwatch's own tools.** `create_ingress` and `update_ingress` (deckwatch's
+  versions, with ingress templates), `create_ingress_template`,
+  `create_application`, the plugin and GitOps tools create objects through
+  deckwatch's own code, which the workload policy doesn't check. In
+  particular, ingress annotations from agents or templates aren't checked for
+  snippets.
+- **`exec_pod`.** Deckwatch serves its own non-interactive `exec_pod`, so
+  mcp-k8s 0.7's exec limits (a 60 s timeout, a 1 MiB cap per output stream,
+  and refusing pods with node-level access) don't apply to it yet.
+- **`update_deployment` with only `service_account`.** Deckwatch's
+  `update_deployment` hands every other field to mcp-k8s, which checks the
+  result; a `service_account`-only update sets `serviceAccountName` itself.
+- **Kubernetes RBAC is the hard boundary.** The guardrails keep the
+  agent-facing tools within sensible limits; they don't replace the RBAC of
+  deckwatch's service account, Pod Security Admission or an admission policy
+  engine.
+
 ## Protocol Details
 
 Deckwatch implements the [MCP 2025-11-25 specification](https://modelcontextprotocol.io/specification/2025-11-25)
@@ -254,9 +353,16 @@ using Streamable HTTP transport:
   tool's `inputSchema` before running it. An argument the schema doesn't
   declare, a missing required argument, or a value of the wrong type or
   outside its allowed values is refused with an error naming it (`null` counts
-  as leaving an optional argument out). The mcp-k8s tools, including the four
-  deckwatch replaces (`update_deployment`, `create_pod`, `apply_manifest`,
-  `exec_pod`), aren't checked this way.
+  as leaving an optional argument out). The mcp-k8s tools, including the
+  three deckwatch replaces (`update_deployment`, `apply_manifest`,
+  `exec_pod`), aren't checked this way; mcp-k8s's typed workload, Service and
+  Ingress tools refuse unknown arguments themselves.
+- **Tools offered:** `tools/list` offers the tools deckwatch serves under the
+  current [guardrail settings](#guardrails), each once (`apply_manifest` only
+  while it is on). mcp-k8s's multi-cluster tools (`list_clusters`,
+  `switch_cluster`, `get_active_cluster`) aren't offered: only the standalone
+  mcp-k8s server serves them, and a deckwatch instance manages the cluster it
+  runs in.
 - **Sessions:** a successful `initialize` returns an `Mcp-Session-Id` header,
   which clients send back on later requests. Deckwatch only uses it to label
   those requests with the name and version the client gave in `initialize`
@@ -302,7 +408,23 @@ kubectl port-forward svc/deckwatch 8080:80 -n deckwatch
 ### "Unknown tool" error
 
 Ensure your deckwatch instance is running v0.1.0 or later. The MCP endpoint
-was added in v0.1.0.
+was added in v0.1.0. `get_resource_yaml` was removed with mcp-k8s 0.7: use
+`get_resource_json`, which takes the same arguments. `list_clusters`,
+`switch_cluster` and `get_active_cluster` aren't served (see
+[Protocol Details](#protocol-details)).
+
+### "rejected by the mcp-k8s workload policy"
+
+A [guardrail](#guardrails) refused the call. The message names the rule and
+the deckwatch setting that allows it. Ask an admin to add the exception, or
+change the request.
+
+### A pod created through MCP doesn't start: "container has runAsNonRoot and image will run as root"
+
+The typed create tools run containers as non-root unless told otherwise
+([secure defaults](#guardrails)). For an image that must run as root, pass
+`security_context: {"run_as_non_root": false}` in the call, or turn off
+**Secure defaults for new workloads**.
 
 ### Tools not appearing in Claude Code
 
@@ -385,9 +507,31 @@ values, commands, manifest bodies or plugin config.
 
 The guardrails checked before a call runs are deckwatch's namespace allowlist
 (`DECKWATCH_NAMESPACES`, for the namespace a call targets) and mcp-k8s's
-permission settings. A refused call returns the reason as an error and is
-recorded with `outcome` `denied` and the rule (`namespace_allowlist`, or
+permission settings, which include `apply_manifest` being turned off. A
+refused call returns the reason as an error and is recorded with `outcome`
+`denied` and the rule (`namespace_allowlist`, `apply_manifest:disabled`, or
 mcp-k8s's `global:<action>` / `override:<resource>-<action>`).
+
+mcp-k8s refuses some calls itself, while running them: the workload policy,
+`approve_csr`'s identity check, and the namespace allowlist for namespace
+objects, calls without a namespace and `drain_node` (see
+[Guardrails](#guardrails)). These also return the reason as an error, but
+their row has `outcome` `error` for now, not `denied`. The request's span and
+its `tool call finished` log line do record them as `mcp_k8s.decision`
+`denied`, with the rule in `mcp_k8s.denied_rule` (`policy:allow_load_balancer`,
+`policy:allow_privileged_csr`, `namespace_allowlist`, ...).
+
+mcp-k8s also emits an `audit` event (`tracing` target `mcp_k8s::audit`) for
+each call that writes, deletes or execs, or that was refused. Deckwatch never
+logs or exports it, whatever `RUST_LOG` says: it records those calls in
+these rows already, with more context (the client, session and trace ids,
+allowlisted argument values, cancelled calls), and a second, differently
+shaped audit record of every call in the logs would only compete with them.
+To follow MCP changes in the logs, select the `tool call finished` lines
+whose `mcp_k8s.action` isn't `read` or whose `mcp_k8s.decision` is `denied`.
+
+`port_forward_check` opens a tunnel into the pod, so mcp-k8s counts it as a
+write on the pod: its calls are audited, as `write`.
 
 Rows are kept for 365 days and up to 100,000 rows, then pruned hourly. Set
 `DECKWATCH_AUDIT_RETENTION_DAYS` and `DECKWATCH_AUDIT_MAX_ROWS` (Helm
@@ -443,6 +587,7 @@ scope, and so on. Nothing is injected into unrelated interactions.
 ### Configuring hints
 
 Go to **Settings → MCP Tuning** and fill in the groups you want to enforce.
+The same page holds the Kubernetes tool [guardrails](#guardrails).
 
 | Group | When it fires |
 |---|---|

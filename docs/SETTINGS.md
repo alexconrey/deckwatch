@@ -29,7 +29,7 @@ The Settings page renders a sidebar tree with the following sections:
 | **Git Repositories** | `git_repositories` | Managed list of Git repos for GitOps dropdowns |
 | **Container Registries** | `container_registries` | Managed list of OCI registries for GitOps dropdowns |
 | **Plugins** | `plugins` | External WASM plugins loaded from Git repositories |
-| **MCP Tuning** | `mcp_tuning` | Resource-scoped org guidance injected into MCP tool descriptions |
+| **MCP Tuning** | `mcp_tuning` | Guardrails of the MCP endpoint's Kubernetes tools (`mcp_tuning.guardrails`), and resource-scoped org guidance injected into MCP tool descriptions |
 | **Audit Log** | `audit` | Read-only view of the `audit_log` table: UI/API changes, and MCP tool calls that write, delete or exec or were denied (see [MCP.md](MCP.md#audit-log)). Retention is deployment config (`DECKWATCH_AUDIT_RETENTION_DAYS`, `DECKWATCH_AUDIT_MAX_ROWS`), not a setting |
 
 ## Schema
@@ -214,6 +214,36 @@ The plugin call reports a `plugin.policy_rejected` warning instead. Give a
 plugin its own credentials in its `config`, or a workload identity token.
 
 ## MCP Tuning
+
+### Kubernetes tool guardrails
+
+`mcp_tuning.guardrails` holds the switches of the Kubernetes tools agents call
+through the MCP endpoint. The defaults are secure, but keep `apply_manifest`:
+
+```jsonc
+{
+  "mcp_tuning": {
+    "guardrails": {
+      "workload_policy": "restrictive",      // or "permissive": every workload guardrail off
+      "exceptions": [],                      // rules restrictive lets through, e.g. "allow_load_balancer"
+      "allowed_custom_resource_groups": [],  // e.g. "cert-manager.io", or "*"; none refuses custom resource writes
+      "allow_privileged_csr": false,         // approve_csr for system:masters and other system: identities
+      "apply_manifest_enabled": true,        // raw manifests; bypasses the workload guardrails
+      "secret_decode_enabled": false,        // get_secret can return values
+      "secure_defaults": true                // runAsNonRoot and friends in the typed create tools
+    }
+  }
+}
+```
+
+`GET /api/settings` always returns the block; a `PUT` that omits it keeps the
+stored one, and an invalid value (an unknown exception, a name that isn't an
+API group, a built-in group such as `apps`) is refused with 400. Every change
+is audit-logged as `mcp_tuning.guardrails.<field>`, and applies from the next
+MCP request. What each setting does, and what they don't cover:
+[MCP.md](MCP.md#guardrails).
+
+### Guidance
 
 Org-specific guidance injected into MCP tool descriptions at `tools/list` time.
 Each hint is appended only to tools in its resource group — namespace guidance

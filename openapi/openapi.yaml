@@ -697,9 +697,10 @@ paths:
       description: |
         Secrets come back masked on GET; masked values are restored from the
         stored copy. `credentials` and git token bindings are server-managed
-        and ignored here. Omitting `endpoints`, `observability` or `tracing`
-        keeps the stored value. Every endpoint change, OTLP endpoints included,
-        is written to the audit log.
+        and ignored here. Omitting `endpoints`, `observability`, `tracing` or
+        `mcp_tuning.guardrails` keeps the stored value. Every endpoint change,
+        OTLP endpoints included, and every MCP guardrail change is written to
+        the audit log.
 
         A plugin's masked `config` values are restored only while it runs the
         same code: when its `source` changes, or its `sha256` pin changes or is
@@ -1618,6 +1619,72 @@ components:
         observability:
           allOf: [{ $ref: "#/components/schemas/ObservabilitySettings" }]
           description: Always present on GET. Omit on PUT to keep the stored endpoints.
+        mcp_tuning: { $ref: "#/components/schemas/McpTuning" }
+
+    McpTuning:
+      type: object
+      description: |
+        MCP settings: guidance appended to tool descriptions (one string per
+        resource group, `global` in the `initialize` instructions), and the
+        guardrails of the Kubernetes tools.
+      properties:
+        global: { type: string }
+        namespaces: { type: string }
+        deployments: { type: string }
+        applications: { type: string }
+        gitops: { type: string }
+        ingresses: { type: string }
+        pods: { type: string }
+        secrets: { type: string }
+        nodes: { type: string }
+        storage: { type: string }
+        plugins: { type: string }
+        guardrails:
+          allOf: [{ $ref: "#/components/schemas/McpGuardrails" }]
+          description: Always present on GET. Omit on PUT to keep the stored guardrails.
+
+    McpGuardrails:
+      type: object
+      description: |
+        Guardrails of the embedded mcp-k8s tools, read on every MCP request
+        (docs/MCP.md, "Guardrails"). Field names are mcp-k8s's. A missing
+        field takes its default.
+      properties:
+        workload_policy:
+          type: string
+          enum: [restrictive, permissive]
+          default: restrictive
+          description: "`permissive` turns every workload guardrail off."
+        exceptions:
+          type: array
+          items:
+            type: string
+            enum: [allow_privileged, allow_privilege_escalation, allow_host_namespaces, allow_host_path, allow_host_ports, allow_unconfined, allow_node_port, allow_load_balancer, allow_external_services, allow_ingress_snippets, allow_rbac_escalation]
+          description: Rules the restrictive policy lets through.
+        allowed_custom_resource_groups:
+          type: array
+          items: { type: string }
+          example: ["cert-manager.io"]
+          description: >-
+            API groups create_custom_resource and update_custom_resource may
+            write (`*`: any). Empty refuses custom resource writes. DNS
+            subdomains; built-in groups are refused (400).
+        allow_privileged_csr:
+          type: boolean
+          default: false
+          description: "approve_csr may approve system:masters and other `system:` identities."
+        apply_manifest_enabled:
+          type: boolean
+          default: true
+          description: apply_manifest is listed and served. It bypasses the workload guardrails.
+        secret_decode_enabled:
+          type: boolean
+          default: false
+          description: get_secret may return Secret values, and get_resource_json a Secret's data.
+        secure_defaults:
+          type: boolean
+          default: true
+          description: The typed create tools fill in runAsNonRoot and the other restricted securityContext defaults.
 
     ObservabilitySettings:
       type: object
