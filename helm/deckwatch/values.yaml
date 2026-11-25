@@ -52,6 +52,71 @@ resources:
     cpu: 200m
     memory: 128Mi
 
+# Extra environment variables for the deckwatch container: a list of
+# Kubernetes EnvVar objects (name, plus value or valueFrom), added after the
+# ones the chart sets. Don't repeat a name the chart sets; use the chart's
+# value for it instead (logFilter for RUST_LOG, for example), because a
+# duplicate name fails server-side apply. Values are strings, so quote
+# numbers.
+#
+# TOKIO_WORKER_THREADS sets how many async worker threads deckwatch runs. The
+# default is one per CPU the container may use, and a CPU limit counts in
+# whole cores, rounded down, with a minimum of one: any limit under 2 cores,
+# such as the 200m above, gives one worker. Plugin calls currently hold a
+# worker for as long as they run, HTTP requests included (#385), and while
+# the only worker is busy, deckwatch answers nothing, health checks included.
+# More workers don't raise the CPU limit, but they keep deckwatch answering
+# while a plugin waits on the network. Use a positive integer; deckwatch
+# doesn't start with anything else.
+extraEnv: []
+#   - name: TOKIO_WORKER_THREADS
+#     value: "4"
+
+# Probes for the deckwatch container. Each is a Kubernetes Probe object,
+# passed to the container unchanged. Helm merges your values into the
+# defaults below, so to switch a probe to another handler (exec, tcpSocket,
+# grpc), also set httpGet: null. To remove a probe, set it to null ({} keeps
+# the defaults).
+#
+# deckwatch fetches and compiles every enabled plugin before it starts
+# serving HTTP. Kubernetes runs the liveness and readiness probes only after
+# the startup probe succeeds, so neither has an initial delay, and the
+# startup probe sets how long deckwatch has to start: 5 minutes (60 checks,
+# 5 s apart). Raise its failureThreshold if loading your plugins takes
+# longer; plugins load one at a time, and each download can take up to 30 s.
+# Without a startup probe, give livenessProbe an initialDelaySeconds that
+# covers startup.
+#
+# /api/healthz answers whenever the HTTP server is up; a liveness failure
+# restarts the container. /api/readyz also checks that deckwatch can reach
+# the Kubernetes API; a readiness failure takes the pod out of the Service
+# until it passes again. Both wait 5 s for an answer, rather than Kubernetes'
+# default of 1 s, so a few slow answers from a busy pod don't restart it or
+# take it out of the Service.
+livenessProbe:
+  httpGet:
+    path: /api/healthz
+    port: http
+  periodSeconds: 10
+  timeoutSeconds: 5
+  failureThreshold: 3
+
+readinessProbe:
+  httpGet:
+    path: /api/readyz
+    port: http
+  periodSeconds: 10
+  timeoutSeconds: 5
+  failureThreshold: 3
+
+startupProbe:
+  httpGet:
+    path: /api/healthz
+    port: http
+  periodSeconds: 5
+  timeoutSeconds: 5
+  failureThreshold: 60
+
 podAnnotations: {}
 podLabels: {}
 nodeSelector: {}

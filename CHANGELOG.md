@@ -17,10 +17,32 @@ Changes merged since the last release are listed under `[Unreleased]`.
 
 ## [Unreleased]
 
+### Added
+
+- **Helm `extraEnv`:** extra environment variables for the deckwatch
+  container, as a list of Kubernetes `EnvVar` objects added after the ones
+  the chart sets. Until plugin calls stop blocking the async runtime (#385),
+  use it to set `TOKIO_WORKER_THREADS` if the CPU limit is under 2 cores (the
+  chart's default is `200m`). deckwatch then runs a single worker thread, and
+  while a plugin call holds it, deckwatch answers nothing, health checks
+  included. See
+  [README.md](README.md#helm-chart-extra-environment-variables). (#391)
+
 ### Fixed
 
+- **The chart's probes give deckwatch time to start, and to answer when
+  busy.** deckwatch loads every enabled plugin before it serves HTTP, and the
+  liveness probe restarted it after about 30 seconds, so slow plugin
+  downloads at startup caused a crash loop. A new startup probe on
+  `/api/healthz` allows 5 minutes (60 checks, 5 s apart). Kubernetes starts
+  the liveness and readiness probes once it passes, so they no longer have an
+  initial delay, and they now wait 5 s for an answer instead of Kubernetes'
+  default of 1 s. All three are Helm values now (`startupProbe`,
+  `livenessProbe` and `readinessProbe`, each a Kubernetes Probe); raise
+  `startupProbe.failureThreshold` if loading your plugins takes longer than
+  5 minutes. See [README.md](README.md#helm-chart-probes). (#391)
 - The API docs (`/api/docs`) and `/api/openapi.yaml` report the running
-  deckwatch version. The spec said 0.2.1 since that release.
+  deckwatch version. The spec said 0.2.1 since that release. (#384)
 
 ## [0.7.0] - 2026-11-25
 

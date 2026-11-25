@@ -174,23 +174,30 @@ spec:
               value: {{ .Values.registry.internalUrl | quote }}
             {{- end }}
             {{- end }}
+            {{- /* Last, so their values can reference the variables above as $(NAME). */}}
+            {{- with .Values.extraEnv }}
+            {{- if not (kindIs "slice" .) }}
+            {{- fail "extraEnv must be a list of EnvVar objects (name, plus value or valueFrom)" }}
+            {{- end }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
           {{- if and .Values.registry.enabled (eq (default "filesystem" .Values.registry.storage) "s3") .Values.registry.s3.credentialsSecret }}
           envFrom:
             - secretRef:
                 name: {{ .Values.registry.s3.credentialsSecret | quote }}
           {{- end }}
+          {{- with .Values.livenessProbe }}
           livenessProbe:
-            httpGet:
-              path: /api/healthz
-              port: http
-            initialDelaySeconds: 5
-            periodSeconds: 10
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.readinessProbe }}
           readinessProbe:
-            httpGet:
-              path: /api/readyz
-              port: http
-            initialDelaySeconds: 5
-            periodSeconds: 10
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.startupProbe }}
+          startupProbe:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
           {{- $needsRegistryVol := and .Values.registry.enabled (or (eq (default "filesystem" .Values.registry.storage) "filesystem") (not .Values.registry.storage)) }}
