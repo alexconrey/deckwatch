@@ -175,8 +175,11 @@ async fn the_migration_adds_the_columns_and_marks_old_mcp_rows() {
     let dir = tempfile::tempdir().unwrap();
     let url = format!("sqlite://{}/audit.db?mode=rwc", dir.path().display());
     let db = Database::connect(&url).await.unwrap();
-    // Every migration before this one.
-    let before = Migrator::migrations().len() as u32 - 1;
+    // Every migration before this one (later ones may exist).
+    let before = Migrator::migrations()
+        .iter()
+        .position(|m| m.name() == "m20261124_000003_audit_log_mcp")
+        .expect("the audit log migration") as u32;
     Migrator::up(&db, Some(before)).await.unwrap();
     for (id, detail) in [
         ("old-mcp", "MCP: created application 'web'"),

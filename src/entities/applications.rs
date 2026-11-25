@@ -11,6 +11,10 @@ pub struct Model {
     pub team: String,
     pub deployment_name: Option<String>,
     pub git_config: Option<String>,
+    /// The application's Observability section as JSON
+    /// (`crate::otel_inject::ApplicationObservability`); NULL: the defaults.
+    #[sea_orm(column_type = "Text", nullable)]
+    pub observability: Option<String>,
     pub created_at: DateTimeUtc,
     pub updated_at: DateTimeUtc,
 }

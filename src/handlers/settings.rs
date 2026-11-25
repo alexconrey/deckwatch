@@ -842,6 +842,28 @@ pub async fn load_settings_from_db(state: &AppState) -> DeckwatchSettings {
     default_settings(state)
 }
 
+/// The `observability` block (the OTLP endpoints in Settings →
+/// Observability) for OpenTelemetry injection into application workloads
+/// (`crate::otel_inject`). Unlike [`load_settings_from_db`], a database error
+/// or a settings row that doesn't parse is an error rather than the
+/// defaults: with the defaults, injection would see no endpoints and remove
+/// its variables from every workload.
+pub async fn load_observability_strict(state: &AppState) -> Result<ObservabilitySettings, String> {
+    match settings_entity::Entity::find_by_id(DB_SETTINGS_KEY)
+        .one(&state.db)
+        .await
+    {
+        Ok(Some(row)) => serde_json::from_str::<DeckwatchSettings>(&row.value)
+            .map(|s| s.observability.unwrap_or_default())
+            .map_err(|e| format!("the settings row is not valid JSON: {e}")),
+        Ok(None) => Ok(load_settings_from_db(state)
+            .await
+            .observability
+            .unwrap_or_default()),
+        Err(e) => Err(format!("failed to read the settings: {e}")),
+    }
+}
+
 /// One-time migration: read the settings ConfigMap and persist it into the
 /// database so subsequent reads go straight to the DB. Returns the migrated
 /// settings on success, or `None` if no ConfigMap exists.

@@ -463,3 +463,63 @@ async fn crash_halfway(db: &sea_orm::DatabaseConnection) {
     assert_eq!(recorded_0_7_0(db).await, 3);
     assert_0_7_0_schema(db).await;
 }
+
+/// `applications.observability` (#398): added as a nullable column, NULL
+/// reads as injection off, the migration runs again after a crash (its
+/// record lost, the column there), and rolling it back drops the column.
+#[tokio::test]
+async fn application_observability_migration_adds_a_nullable_column() {
+    use sea_orm::{ConnectionTrait, Statement};
+    use sea_orm_migration::MigratorTrait;
+
+    const NAME: &str = "m20261125_000001_application_observability";
+    let dir = tempfile::tempdir().unwrap();
+    let db = file_db(dir.path()).await;
+    Migrator::up(&db, None).await.expect("migrate");
+    let has = |db: &sea_orm::DatabaseConnection| {
+        let db = db.clone();
+        async move {
+            let manager = sea_orm_migration::SchemaManager::new(&db);
+            crate::migrations::schema::has_column(&manager, "applications", "observability")
+                .await
+                .expect("column check")
+        }
+    };
+    assert!(has(&db).await);
+    ensure_application(&db, "team", "shop").await.unwrap();
+    let row = applications::Entity::find_by_id("team/shop".to_string())
+        .one(&db)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(row.observability, None);
+    assert_eq!(
+        crate::otel_inject::ApplicationObservability::from_column(row.observability.as_deref())
+            .unwrap(),
+        crate::otel_inject::ApplicationObservability::default()
+    );
+
+    // A crash between the ALTER and its record: the next start runs it again.
+    db.execute(Statement::from_string(
+        db.get_database_backend(),
+        format!("DELETE FROM seaql_migrations WHERE version = '{NAME}'"),
+    ))
+    .await
+    .unwrap();
+    Migrator::up(&db, None).await.expect("migrate again");
+    assert!(has(&db).await);
+
+    let position = Migrator::migrations()
+        .iter()
+        .position(|m| m.name() == NAME)
+        .expect("the migration is registered");
+    let later = Migrator::migrations().len() - position;
+    Migrator::down(&db, Some(later as u32))
+        .await
+        .expect("roll back");
+    assert!(!has(&db).await);
+    Migrator::up(&db, None)
+        .await
+        .expect("migrate after rollback");
+    assert!(has(&db).await);
+}

@@ -69,6 +69,7 @@ pub async fn run_poller(state: AppState) {
     let git_http = outbound.client(crate::outbound::Purpose::Git);
     let registry_http = outbound.client(crate::outbound::Purpose::Registry);
     let mut plugin_field_sweep = PluginFieldSweep::default();
+    let mut otel_sweep = crate::otel_inject::Sweep::default();
 
     // Every phase runs under `guarded`: this one task does all GitOps
     // polling, build monitoring and plugin reconciliation, so a panic in one
@@ -92,6 +93,12 @@ pub async fn run_poller(state: AppState) {
                 guarded(
                     "reconcile_application_plugins",
                     reconcile_application_plugins(&state, &mut plugin_field_sweep),
+                )
+                .await;
+
+                guarded(
+                    "reconcile_otel_injection",
+                    crate::otel_inject::reconcile(&state, &mut otel_sweep),
                 )
                 .await;
 
@@ -1671,7 +1678,7 @@ async fn update_build_status(
 /// Hash a JSON patch value to a `u64` fingerprint using the standard library's
 /// `DefaultHasher`. No external dependencies required. The hash is computed from
 /// the compact JSON string so it captures every field and value.
-fn fingerprint_patch(patch: &serde_json::Value) -> u64 {
+pub(crate) fn fingerprint_patch(patch: &serde_json::Value) -> u64 {
     use std::collections::hash_map::DefaultHasher;
     let s = patch.to_string();
     let mut h = DefaultHasher::new();

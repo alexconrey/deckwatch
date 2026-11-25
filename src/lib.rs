@@ -28,6 +28,7 @@ mod logging;
 mod metrics;
 mod migrations;
 mod notifications;
+mod otel_inject;
 pub mod outbound;
 mod plugin_cache;
 mod plugin_events;
@@ -471,6 +472,7 @@ async fn migrate_configmap_apps_to_db(state: &AppState) {
                 team: Set(String::new()),
                 deployment_name: Set(Some(data.name.clone())),
                 git_config: Set(git_config_json),
+                observability: Set(None),
                 created_at: Set(now),
                 updated_at: Set(now),
             };
