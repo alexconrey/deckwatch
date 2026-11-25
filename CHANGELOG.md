@@ -167,7 +167,7 @@ first.
   deckwatch's origin. Manifests are now served only as OCI or Docker
   manifest and index media types, anything else as
   `application/octet-stream`, and every `/v2` response carries a sandboxing
-  Content-Security-Policy.
+  Content-Security-Policy. (#344)
 - **Secrets leaked from the public `GET /api/settings`:** plugin credentials
   in `plugins[].config`, notification webhook URLs and git-token ciphertext
   were returned in clear to any caller. MCP `get_plugin_config` returned
