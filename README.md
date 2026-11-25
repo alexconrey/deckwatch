@@ -112,7 +112,7 @@ minimum Kubernetes version, Helm values, API behaviour.
 | `DECKWATCH_FRONTEND_DIR` | `--frontend-dir` | `frontend/dist` | Path to built SPA |
 | `DECKWATCH_DATABASE_URL` | `--database-url` | `sqlite://deckwatch.db` | Database connection string (SQLite, Postgres, or MySQL) |
 | `RUST_LOG` | — | `deckwatch=info,tower_http=info,mcp_k8s=info,extism::pdk=info,opentelemetry=warn` | Log filter (Helm: `logFilter`). `mcp_k8s` is the embedded library behind most MCP tools; `extism::pdk` carries plugin log lines; `opentelemetry` reports failed OTLP exports ([docs/TRACING.md](docs/TRACING.md#10-deckwatchs-own-telemetry)) |
-| `TOKIO_WORKER_THREADS` | — | One per CPU the container may use | Async worker threads (Helm: `extraEnv`). A CPU limit under 2 cores gives one; see [extra environment variables](#helm-chart-extra-environment-variables) |
+| `TOKIO_WORKER_THREADS` | — | One per CPU the container may use, at least 2 | Async worker threads (Helm: `extraEnv`); see [extra environment variables](#helm-chart-extra-environment-variables) |
 
 ### Helm chart: probes
 
@@ -164,16 +164,13 @@ extraEnv:
 ```
 
 `TOKIO_WORKER_THREADS` sets how many worker threads deckwatch's async runtime
-(tokio) runs. The default is one per CPU the container may use, and Rust counts
-a CPU limit in whole cores, rounded down, with a minimum of one. Any limit
-under 2 cores, including the chart's default of `200m`, therefore gives a
-single worker. Plugin calls currently hold a worker for as long as they run,
-their HTTP requests included
-([#385](https://github.com/alexconrey/deckwatch/issues/385)), and while the
-only worker is busy, deckwatch answers nothing, its health checks included.
-More workers don't raise the CPU limit, but they keep deckwatch answering while
-a plugin waits on the network. Use a positive integer; deckwatch doesn't start
-with anything else.
+(tokio) runs. The default is one per CPU the container may use, but at least 2.
+Rust counts a CPU limit in whole cores, rounded down, so any limit under 2
+cores, including the chart's default of `200m`, would otherwise give a single
+worker, and while it was busy, deckwatch would answer nothing, its health checks
+included. More workers don't raise the CPU limit. Plugin calls don't run on
+these workers but on threads of their own, at most 4 at a time. Use a positive
+integer; deckwatch doesn't start with anything else.
 
 ## Architecture
 
