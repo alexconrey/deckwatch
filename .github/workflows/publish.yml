@@ -1,16 +1,47 @@
-name: Publish Container Image
+name: Release
 
+# Pushing a v* tag (the maintainer does this after the release PR merges)
+# verifies the tag, builds and pushes the multi-arch image to GHCR, and
+# creates the GitHub Release with the version's CHANGELOG.md section as notes.
 on:
   push:
     tags:
       - "v*"
+
+# Read-only by default; only the jobs that push images or create the release
+# get more.
+permissions:
+  contents: read
+
+# One run per tag, never cancelled: a run stopped half-way could leave the
+# image pushed without its GitHub Release.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
 
 env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}
 
 jobs:
+  # Every other job needs this one, so nothing is built or pushed for a tag
+  # that doesn't match Cargo.toml, Chart.yaml (version and appVersion) and
+  # frontend/package.json, or whose CHANGELOG.md section is missing, undated
+  # ("Unreleased") or empty.
+  verify:
+    name: Verify tag
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Check the tag against the versions and CHANGELOG.md
+        run: |
+          bash .github/scripts/release-notes.sh "$GITHUB_REF_NAME" > "$RUNNER_TEMP/notes.md"
+          cat "$RUNNER_TEMP/notes.md" >> "$GITHUB_STEP_SUMMARY"
+
   build:
+    needs: verify
     strategy:
       matrix:
         platform:
@@ -73,13 +104,14 @@ jobs:
 
   merge:
     runs-on: ubuntu-latest
-    needs: build
+    needs: [verify, build]
 
     permissions:
       contents: read
       packages: write
-      attestations: write
-      id-token: write
+
+    outputs:
+      digest: ${{ steps.inspect.outputs.digest }}
 
     steps:
       - name: Download digests
@@ -117,6 +149,51 @@ jobs:
             $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON") \
             $(printf '${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@sha256:%s ' *)
 
+      # The manifest list's digest goes into the release notes. Failing to
+      # read it only leaves it out of the notes.
       - name: Inspect image
+        id: inspect
+        env:
+          IMAGE: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.version }}
         run: |
-          docker buildx imagetools inspect ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.version }}
+          docker buildx imagetools inspect "$IMAGE"
+          digest=$(docker buildx imagetools inspect "$IMAGE" --format '{{json .Manifest}}' | jq -r '.digest // empty') || digest=""
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+
+  release:
+    name: Create GitHub Release
+    needs: [verify, merge]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # create the release; no other job gets write access
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+          DIGEST: ${{ needs.merge.outputs.digest }}
+        run: |
+          bash .github/scripts/release-notes.sh "$TAG" > "$RUNNER_TEMP/notes.md"
+          version="${TAG#v}"
+          image="$REGISTRY/${IMAGE_NAME,,}"
+          {
+            echo
+            echo "---"
+            echo
+            echo "### Container image"
+            echo
+            echo '```sh'
+            echo "docker pull $image:$version"
+            echo '```'
+            echo
+            if [ -n "$DIGEST" ]; then
+              echo "linux/amd64 and linux/arm64. To pin this build: \`$image@$DIGEST\`"
+              echo
+            fi
+            echo "The Helm chart is \`helm/deckwatch\` at this tag (chart version $version). Set \`image.repository=$image\`; \`image.tag\` defaults to the chart's \`appVersion\`, $version."
+          } >> "$RUNNER_TEMP/notes.md"
+          gh release create "$TAG" --verify-tag --title "$TAG" --notes-file "$RUNNER_TEMP/notes.md"

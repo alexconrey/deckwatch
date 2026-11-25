@@ -1157,7 +1157,7 @@ dependencies = [
 
 [[package]]
 name = "deckwatch"
-version = "0.6.7"
+version = "0.7.0"
 dependencies = [
  "aes-gcm",
  "anyhow",
