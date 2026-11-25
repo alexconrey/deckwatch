@@ -1,6 +1,7 @@
 <script setup lang="ts">
 // MCP activity: what MCP clients changed or were refused (SEC-22 audit rows),
-// and how the tools are used (deckwatch's MCP metrics from Prometheus).
+// and how the tools are used (deckwatch's MCP metrics from Prometheus: its
+// OTLP histogram, or its /metrics counters as the fallback).
 import { computed, reactive, ref, watch } from "vue";
 import { auditApi } from "@/api/audit";
 import { prometheusQueryApi } from "@/api/prometheusQuery";
@@ -30,6 +31,7 @@ import {
   formatTick,
   outcomeMeta,
   parseMcpDetail,
+  sourceMeta,
   sumSeries,
   windowStart,
 } from "@/utils/mcpActivity";
@@ -56,6 +58,7 @@ async function loadMetrics() {
 
 const metricsUnavailable = computed(() => activity.value?.unavailable_reason ?? null);
 const hasMetrics = computed(() => activity.value !== null && !metricsUnavailable.value);
+const source = computed(() => sourceMeta(activity.value?.source ?? null));
 const totals = computed(() => activityTotals(activity.value?.tools ?? []));
 const callsPerMinute = computed(() => sumSeries(activity.value?.calls_per_minute ?? []));
 const errorRate = computed(() => errorRateSeries(activity.value?.calls_per_minute ?? []));
@@ -221,6 +224,13 @@ watch(filters, () => void loadRows());
     </v-alert>
 
     <template v-if="hasMetrics">
+      <div class="d-flex align-center flex-wrap ga-2 mb-3" data-testid="metrics-source">
+        <v-chip :color="source.color" :prepend-icon="source.icon" size="small" variant="tonal" label>
+          {{ source.label }}
+        </v-chip>
+        <span class="text-body-2 text-medium-emphasis">{{ source.detail }}</span>
+      </div>
+
       <v-row dense class="mb-2" data-testid="kpi-row">
         <v-col cols="6" md="3">
           <v-card variant="outlined" class="pa-3">

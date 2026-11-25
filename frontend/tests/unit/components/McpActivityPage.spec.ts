@@ -81,6 +81,7 @@ function page(items: AuditEntry[], next_cursor: string | null = null): AuditPage
 const activity: McpActivityResponse = {
   window_seconds: 86400,
   step_seconds: 300,
+  source: "otlp",
   calls_per_minute: [
     { label: "ok", points: [{ t: 1, v: 9 }, { t: 2, v: 10 }] },
     { label: "error", points: [{ t: 2, v: 1 }] },
@@ -166,11 +167,41 @@ describe("McpActivityPage", () => {
     const tools = w.find("[data-testid='tool-table']").text();
     expect(tools).toContain("list_pods");
     expect(tools).toContain("800 ms");
+    const source = w.find("[data-testid='metrics-source']").text();
+    expect(source).toContain("OTLP");
+    expect(source).toContain("mcp_server_operation_duration_seconds");
+  });
+
+  it("says when the figures come from the /metrics fallback", async () => {
+    mockActivity.mockResolvedValue({ ...activity, source: "scrape" });
+    const w = mountPage();
+    await flushPromises();
+    const source = w.find("[data-testid='metrics-source']").text();
+    expect(source).toContain("/metrics fallback");
+    expect(source).toContain("no OTLP series");
+    expect(w.find("[data-testid='kpi-calls']").text()).toBe("200");
+  });
+
+  it("says when Prometheus has no tool call series", async () => {
+    mockActivity.mockResolvedValue({
+      ...activity,
+      source: null,
+      calls_per_minute: [],
+      apply_manifest_per_minute: [],
+      p95_seconds: [],
+      tools: [],
+    });
+    const w = mountPage();
+    await flushPromises();
+    expect(w.find("[data-testid='metrics-source']").text()).toContain("No data");
+    expect(w.find("[data-testid='kpi-calls']").text()).toBe("0");
+    expect(w.find("[data-testid='tool-table']").text()).toContain("No tool calls in this window.");
   });
 
   it("still shows the audit log when Prometheus isn't configured", async () => {
     mockActivity.mockResolvedValue({
       ...activity,
+      source: null,
       calls_per_minute: [],
       apply_manifest_per_minute: [],
       p95_seconds: [],
@@ -180,6 +211,7 @@ describe("McpActivityPage", () => {
     const w = mountPage();
     await flushPromises();
     expect(w.find("[data-testid='metrics-unavailable']").text()).toContain("prometheus not configured");
+    expect(w.find("[data-testid='metrics-source']").exists()).toBe(false);
     expect(w.find("[data-testid='kpi-row']").exists()).toBe(false);
     expect(w.findAll("[data-testid='time-series-card']")).toHaveLength(0);
     expect(w.findAll("[data-testid='audit-row']")).toHaveLength(2);

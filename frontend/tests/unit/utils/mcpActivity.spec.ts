@@ -10,6 +10,7 @@ import {
   formatSeconds,
   outcomeMeta,
   parseMcpDetail,
+  sourceMeta,
   sumSeries,
   windowStart,
 } from "@/utils/mcpActivity";
@@ -153,5 +154,24 @@ describe("formatting", () => {
     expect(formatSeconds(0.0421)).toBe("42 ms");
     expect(formatSeconds(2.5)).toBe("2.50 s");
     expect(formatSeconds(31)).toBe("31.0 s");
+  });
+});
+
+describe("sourceMeta", () => {
+  it("names each source with a label and an icon, never color alone", () => {
+    const otlp = sourceMeta("otlp");
+    expect(otlp.label).toBe("OTLP");
+    expect(otlp.detail).toContain("mcp_server_operation_duration_seconds");
+    const scrape = sourceMeta("scrape");
+    expect(scrape.label).toBe("/metrics fallback");
+    expect(scrape.detail).toContain("/metrics counters");
+    expect(scrape.color).toBe("warning");
+    const none = sourceMeta(null);
+    expect(none.label).toBe("No data");
+    for (const meta of [otlp, scrape, none]) {
+      expect(meta.icon).toMatch(/^mdi-/);
+      // The page never names mcp-k8s's deprecated metrics.
+      expect(meta.detail).not.toContain("mcp_k8s_");
+    }
   });
 });

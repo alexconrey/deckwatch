@@ -19,6 +19,7 @@ import type {
   IngressTemplate,
   MarketplaceCatalog,
   McpActivityResponse,
+  McpActivitySource,
   NodeSummary,
   OutboundStatus,
   PluginEventReport,
@@ -1197,9 +1198,10 @@ function mcpAudit(): AuditEntry[] {
 /**
  * GET /api/prometheus/mcp_activity: tool calls following a daily curve
  * (busier in UTC working hours), a few errors and denials, and the per-tool
- * totals. Deterministic: no randomness, timestamps end at FIXED_NOW.
+ * totals, from `source`. Deterministic: no randomness, timestamps end at
+ * FIXED_NOW.
  */
-export function mcpActivity(window: string): McpActivityResponse {
+export function mcpActivity(window: string, source: McpActivitySource = "otlp"): McpActivityResponse {
   const { seconds, step } = { "1h": { seconds: 3600, step: 60 }, "7d": { seconds: 604800, step: 1800 } }[window] ?? {
     seconds: 86400,
     step: 300,
@@ -1215,6 +1217,7 @@ export function mcpActivity(window: string): McpActivityResponse {
   return {
     window_seconds: seconds,
     step_seconds: step,
+    source,
     calls_per_minute: [
       { label: "ok", points: ok },
       { label: "error", points: ok.map((p, i) => ({ t: p.t, v: i % 37 === 5 ? 0.4 : 0 })) },
@@ -1322,6 +1325,8 @@ export interface MockState {
   registryRepos: RepositorySummary[];
   registryTags: Record<string, TagSummary[]>;
   audit: AuditEntry[];
+  /** Where GET /api/prometheus/mcp_activity says its figures come from. */
+  mcpActivitySource: McpActivitySource;
   agentFeedback: AgentFeedbackItem[];
   diagnostics: DiagnosticHistoryItem[];
   docsPages: { slug: string; title: string }[];
@@ -1374,6 +1379,7 @@ export function createMockState(): MockState {
     registryRepos: registryRepos(),
     registryTags: registryTags(),
     audit: audit(),
+    mcpActivitySource: "otlp",
     agentFeedback: agentFeedback(),
     diagnostics: diagnostics(),
     docsPages: docsPages.map((p) => ({ ...p })),

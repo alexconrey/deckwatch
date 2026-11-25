@@ -1398,9 +1398,17 @@ export interface ToolActivity {
   p95_seconds: number | null;
 }
 
+// Where the tool call figures come from: "otlp" is the primary source
+// (mcp_server_operation_duration_seconds, from deckwatch's OTLP export),
+// "scrape" the fallback (deckwatch's own /metrics counters).
+export type McpActivitySource = "otlp" | "scrape";
+
 export interface McpActivityResponse {
   window_seconds: number;
   step_seconds: number;
+  // null when Prometheus has neither source for the window, or with
+  // unavailable_reason.
+  source: McpActivitySource | null;
   calls_per_minute: LabeledSeries[];
   apply_manifest_per_minute: LabeledSeries[];
   p95_seconds: TimePoint[];

@@ -82,6 +82,7 @@ test.describe("MCP activity", () => {
 
     await expect(page.getByTestId("kpi-calls")).toHaveText("3,286");
     await expect(page.getByTestId("kpi-denied")).toHaveText("7");
+    await expect(page.getByTestId("metrics-source")).toContainText("OTLP");
     await expect(page.getByTestId("audit-row")).toHaveCount(4);
     const denied = page.getByTestId("audit-row").filter({ hasText: "delete_pod" });
     await expect(denied).toContainText("denied");
@@ -110,10 +111,19 @@ test.describe("MCP activity", () => {
     await expect(page.getByTestId("audit-row")).toContainText("delete_pod");
   });
 
+  test("says when the tool call figures come from the /metrics fallback", async ({ app, page, mockState }) => {
+    mockState.mcpActivitySource = "scrape";
+    await app.goto("/mcp-activity");
+    await expect(page.getByTestId("metrics-source")).toContainText("/metrics fallback");
+    await expect(page.getByTestId("metrics-source")).toContainText("no OTLP series from deckwatch");
+    await expect(page.getByTestId("kpi-calls")).toHaveText("3,286");
+  });
+
   test("without Prometheus it says so and still lists the audit rows", async ({ app, page, mockState }) => {
     mockState.features.prometheus = false;
     await app.goto("/mcp-activity");
     await expect(page.getByTestId("metrics-unavailable")).toContainText("prometheus not configured");
+    await expect(page.getByTestId("metrics-source")).toHaveCount(0);
     await expect(page.getByTestId("kpi-row")).toHaveCount(0);
     await expect(page.getByTestId("audit-row")).toHaveCount(4);
   });
