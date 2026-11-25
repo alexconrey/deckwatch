@@ -6,6 +6,9 @@ import { useNamespaceStore } from "@/stores/namespace";
 import { useAuth } from "@/composables/useAuth";
 import { useFeatures } from "@/composables/useFeatures";
 import CreateNamespaceDialog from "@/components/common/CreateNamespaceDialog.vue";
+import { pluginStatusApi } from "@/api/pluginStatus";
+import { usePolling } from "@/composables/usePolling";
+import type { PluginStatus } from "@/types/api";
 
 declare const __APP_VERSION__: string;
 const appVersion = __APP_VERSION__;
@@ -18,6 +21,20 @@ const theme = useTheme();
 const showCreateNs = ref(false);
 
 const isDark = computed(() => theme.global.current.value.dark);
+
+// Failing and degraded plugin targets, for the "Problems" button. It only
+// shows while there is something to look at.
+const pluginProblems = ref<PluginStatus[]>([]);
+usePolling(async () => {
+  try {
+    pluginProblems.value = await pluginStatusApi.problems();
+  } catch {
+    // Not worth an alert on every page; the Problems view reports errors.
+  }
+}, 30000);
+const failingPlugins = computed(
+  () => pluginProblems.value.filter((p) => p.health === "failing").length,
+);
 const toggleTheme = () => {
   const next = isDark.value ? "deckwatchLight" : "deckwatchDark";
   theme.global.name.value = next;
@@ -134,6 +151,23 @@ const onNsCreated = (name: string) => {
         @click="router.push({ name: 'ClusterOverview' })"
       >
         Cluster
+      </v-btn>
+      <v-btn
+        v-if="pluginProblems.length"
+        variant="text"
+        size="small"
+        :color="failingPlugins ? 'error' : 'warning'"
+        prepend-icon="mdi-puzzle-remove"
+        class="mr-1"
+        data-testid="plugin-problems-nav"
+        :to="{ name: 'PluginProblems' }"
+      >
+        Problems
+        <v-badge
+          :content="pluginProblems.length"
+          :color="failingPlugins ? 'error' : 'warning'"
+          inline
+        />
       </v-btn>
       <v-spacer />
       <v-btn

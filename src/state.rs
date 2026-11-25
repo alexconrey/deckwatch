@@ -56,6 +56,10 @@ pub struct AppState {
     /// Cleared whenever the plugin list is refreshed so stale fingerprints
     /// do not block a fresh config from being applied.
     pub plugin_patch_fingerprints: Arc<Mutex<HashMap<String, u64>>>,
+    /// Plugin event plumbing shared by every plugin call: the per-plugin log
+    /// rate limit, the secret scrubber's decryption key, and the latest load
+    /// result per plugin. See `plugin_events`.
+    pub plugin_telemetry: crate::plugin_events::PluginTelemetry,
 }
 
 impl AppState {

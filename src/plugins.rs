@@ -10,6 +10,7 @@
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use extism::{Function, Manifest, Plugin, UserData, Val, ValType, Wasm};
 use k8s_openapi::api::core::v1::{
@@ -22,17 +23,23 @@ use kube::api::{DynamicObject, Patch, PatchParams};
 use kube::Api;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use tracing::{Instrument, Span};
 
 use crate::handlers::settings::{DeckwatchSettings, PluginConfig, PluginSource};
 use crate::metrics;
+use crate::plugin_events::{
+    self, codes, host_event, Health, LegacyNotices, PluginEventReport, PluginTelemetry,
+    SecretScrubber,
+};
 use crate::state::AppState;
 
-// ── Shared types (mirror of deckwatch-plugin-sdk v0.9.0) ─────────────────────
+// ── Shared types (mirror of deckwatch-plugin-sdk v0.9.0, plus the v0.10.0
+// `PluginEvent`s and `trace_context`) ─────────────────────────────────────────
 // These must stay in sync with `deckwatch-plugin-sdk/src/lib.rs`. The SDK is
 // the canonical source; this is the host-side copy for deserializing plugin
 // output without adding a workspace dependency on the SDK crate.
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct PluginContext {
     pub namespace: String,
     pub deployment_name: String,
@@ -54,6 +61,13 @@ pub struct PluginContext {
     #[serde(default)]
     pub provisioned_resources:
         std::collections::HashMap<String, std::collections::HashMap<String, String>>,
+
+    /// W3C `traceparent` of the plugin call, set only while deckwatch exports
+    /// traces (an OpenTelemetry layer is active). A plugin can put it on its
+    /// outbound HTTP calls so they join the trace. Filled by the call funnel;
+    /// callers leave it `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trace_context: Option<String>,
 }
 
 /// Structured plugin output requesting SA creation/reconciliation.
@@ -113,21 +127,81 @@ pub struct PluginResult {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub init_containers: Vec<SidecarSpec>,
 
-    /// Errors the plugin wants surfaced in deckwatch's structured logs.
-    ///
-    /// Plugins populate this instead of calling `extism_pdk::log!()` — the
-    /// extism log pipe cannot be bridged into deckwatch's tracing subscriber
-    /// without a global callback conflict. Each entry is logged at ERROR level
-    /// after `apply()` returns; the deployment is not blocked.
+    /// Errors the plugin wants surfaced. Each becomes an `error` event with
+    /// code `plugin.unspecified` (unless it's the SDK's copy of a structured
+    /// event); the deployment is not blocked. Prefer `events`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub errors: Vec<String>,
 
-    /// Non-fatal warnings the plugin wants deckwatch to surface in its logs.
-    ///
-    /// Logged at `WARN` level after `apply()` returns; the deployment is not
-    /// blocked. Old plugins deserialize to an empty vec.
+    /// Non-fatal warnings. Each becomes a `warning` event, like `errors`; the
+    /// deployment is not blocked. Old plugins deserialize to an empty vec.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub warnings: Vec<String>,
+
+    /// Structured notices (SDK `PluginEvent`). Merged with `errors` and
+    /// `warnings` by the call funnel (`plugin_events::normalize`) and returned
+    /// to whoever triggered the call. The funnel reads them from the raw
+    /// output, so after a call this is always empty; use `CallOutcome::events`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub events: Vec<PluginEvent>,
+}
+
+/// Severity of a [`PluginEvent`].
+///
+/// Mirrors `deckwatch_plugin_sdk::EventSeverity` — kept in sync manually.
+/// `Unknown` (a severity from a newer SDK) is treated as `Warning`.
+#[non_exhaustive]
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum EventSeverity {
+    #[default]
+    Info,
+    Warning,
+    Error,
+    #[serde(other)]
+    Unknown,
+}
+
+/// A notice, warning or error a plugin reports from a call.
+///
+/// Mirrors `deckwatch_plugin_sdk::PluginEvent` (SDK 0.10.0) — kept in sync
+/// manually. Every key may be missing (`#[serde(default)]` on the struct), so
+/// one partial or hand-written event can't make deckwatch reject the whole
+/// result: a missing severity reads as `info`, and an empty code is treated as
+/// `plugin.unspecified`. The host also uses this type for failures it detects
+/// itself, with the reserved `plugin.*` codes (see `plugin_events::codes`).
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
+#[serde(default)]
+pub struct PluginEvent {
+    pub severity: EventSeverity,
+    /// `<plugin-name>.<code>`. `plugin.*` is reserved for the host.
+    pub code: String,
+    pub message: String,
+    /// The `PluginResource` id the event is about.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resource_id: Option<String>,
+    /// The Kubernetes object the event is about.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub object: Option<KubernetesObjectRef>,
+    #[serde(default)]
+    pub retryable: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hint: Option<String>,
+}
+
+impl PluginEvent {
+    /// The copy the SDK's result helpers put in the legacy `errors`,
+    /// `warnings` and deprovision `message` fields for older hosts:
+    /// `"<code>: <message>"`, or just the message when `code` is empty.
+    /// Mirrors `deckwatch_plugin_sdk::PluginEvent::legacy_text`; the funnel
+    /// uses it to report each problem once.
+    pub fn legacy_text(&self) -> String {
+        if self.code.is_empty() {
+            self.message.clone()
+        } else {
+            format!("{}: {}", self.code, self.message)
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -399,12 +473,15 @@ pub struct PluginResource {
 
 /// Request sent to the plugin's `provision()` WASM export.
 /// Mirrors `deckwatch_plugin_sdk::ResourceProvisionRequest` — kept in sync manually.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ResourceProvisionRequest {
     pub application_name: String,
     pub namespace: String,
     pub resource_id: String,
     pub fields: std::collections::HashMap<String, String>,
+    /// W3C `traceparent`, as in [`PluginContext::trace_context`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trace_context: Option<String>,
 }
 
 /// Result returned from the plugin's `provision()` WASM export.
@@ -440,11 +517,14 @@ pub struct ResourceProvisionResult {
     /// `None` means poll every cycle (the existing behaviour).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retry_after_secs: Option<u64>,
+    /// Structured notices, as in [`PluginResult::events`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub events: Vec<PluginEvent>,
 }
 
 /// Input to a plugin's `deprovision()` WASM export.
 /// Mirrors `deckwatch_plugin_sdk::ResourceDeprovisionRequest` — kept in sync manually.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ResourceDeprovisionRequest {
     pub application_name: String,
     pub namespace: String,
@@ -453,6 +533,9 @@ pub struct ResourceDeprovisionRequest {
     pub state: std::collections::HashMap<String, String>,
     #[serde(default)]
     pub fields: std::collections::HashMap<String, String>,
+    /// W3C `traceparent`, as in [`PluginContext::trace_context`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trace_context: Option<String>,
 }
 
 /// Provisioning lifecycle status of a plugin-managed infrastructure resource.
@@ -478,8 +561,14 @@ pub enum ProvisioningStatus {
 pub struct ResourceDeprovisionResult {
     #[serde(default)]
     pub errors: Vec<String>,
+    /// What was and wasn't cleaned up. Returned to the operator (HTTP
+    /// `DELETE` body and the MCP `deprovision_resource` result) as an `info`
+    /// event.
     #[serde(default)]
     pub message: String,
+    /// Structured notices, as in [`PluginResult::events`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub events: Vec<PluginEvent>,
     /// Kubernetes objects the plugin wants deleted from the application's
     /// namespace once `deprovision()` returns (SDK v0.10.0). Deckwatch only
     /// deletes allowed kinds; see
@@ -593,6 +682,9 @@ pub struct ValidationResult {
     pub result: Option<PluginResult>,
     /// Error message if fetch or execution failed.
     pub error: Option<String>,
+    /// Everything the fetch, `metadata()` and `apply()` calls reported,
+    /// normalized and sanitized.
+    pub events: Vec<PluginEventReport>,
 }
 
 /// Fetch a plugin from its configured source, validate that it loads as a
@@ -609,71 +701,68 @@ pub async fn fetch_and_validate(
 
     let start = std::time::Instant::now();
 
-    let bytes = match fetch_bytes(cfg, &http, &settings, state).await {
-        Ok(b) => b,
-        Err(e) => {
-            metrics::record_plugin_execution(
-                &cfg.name,
-                "validate",
-                "error",
-                start.elapsed().as_secs_f64(),
-            );
-            metrics::record_plugin_error(&cfg.name, "fetch_failed");
-            return ValidationResult {
-                wasm_size_bytes: 0,
-                apply_export_found: false,
-                test_context: test_ctx,
-                result: None,
-                error: Some(format!("fetch failed: {e}")),
-            };
-        }
+    // The whole dry run is one `plugin validate` span; the fetch, metadata()
+    // and apply() calls are its children.
+    let telemetry = &state.plugin_telemetry;
+    let namespace = test_ctx.namespace.clone();
+    let deployment = test_ctx.deployment_name.clone();
+    let call = PluginCall::new(telemetry, Trigger::Validate)
+        .namespace(&namespace)
+        .deployment(&deployment);
+    let span = plugin_span(Export::Validate, &cfg.name, "", &call);
+
+    let load = load_plugin(cfg, &http, &settings, state, Trigger::Validate)
+        .instrument(span.clone())
+        .await;
+    let mut events = load.reports();
+    let load_health = load.health();
+    let Some(plugin) = load.plugin else {
+        let summary = plugin_events::failure_summary(&events)
+            .unwrap_or_else(|| "the plugin failed to load".to_string());
+        span.in_scope(|| finish_span(&span, Health::Failing, &load.events));
+        metrics::record_plugin_execution(
+            &cfg.name,
+            "validate",
+            "error",
+            start.elapsed().as_secs_f64(),
+        );
+        return ValidationResult {
+            wasm_size_bytes: load.wasm_size_bytes,
+            apply_export_found: false,
+            test_context: test_ctx,
+            result: None,
+            error: Some(summary),
+            events,
+        };
     };
 
-    let size = bytes.len();
-    let plugin = LoadedPlugin {
-        name: cfg.name.clone(),
-        sha256: sha256_hex(&bytes),
-        loaded_at: now_rfc3339(),
-        wasm_bytes: Arc::new(bytes),
-        allowed_hosts: cfg.allowed_hosts.clone(),
-        config: cfg.config.clone(),
-        inherit_env_keys: cfg.inherit_env_keys.clone(),
-        inherit_env_file_keys: cfg.inherit_env_file_keys.clone(),
-        metadata: PluginMetadata::default(),
-    };
-
-    match run_plugin(&plugin, &test_ctx) {
-        Ok(result) => {
-            metrics::record_plugin_execution(
-                &cfg.name,
-                "validate",
-                "ok",
-                start.elapsed().as_secs_f64(),
-            );
-            ValidationResult {
-                wasm_size_bytes: size,
-                apply_export_found: true,
-                test_context: test_ctx,
-                result: Some(result),
-                error: None,
-            }
-        }
-        Err(e) => {
-            metrics::record_plugin_execution(
-                &cfg.name,
-                "validate",
-                "error",
-                start.elapsed().as_secs_f64(),
-            );
-            metrics::record_plugin_error(&cfg.name, "apply_failed");
-            ValidationResult {
-                wasm_size_bytes: size,
-                apply_export_found: !e.to_string().contains("not found"),
-                test_context: test_ctx,
-                result: None,
-                error: Some(format!("apply() failed: {e}")),
-            }
-        }
+    let outcome = span.in_scope(|| run_plugin(&plugin, &test_ctx, &call));
+    events.extend(outcome.reports());
+    let apply_export_found = outcome.result.is_some()
+        || !outcome.events.iter().any(|e| {
+            e.code == codes::LOAD_FAILED && e.message == missing_export_message(Export::Apply)
+        });
+    let health = outcome.health().max(load_health);
+    let all_events: Vec<PluginEvent> = events.iter().map(|r| r.event.clone()).collect();
+    span.in_scope(|| finish_span(&span, health, &all_events));
+    metrics::record_plugin_execution(
+        &cfg.name,
+        "validate",
+        if outcome.result.is_some() {
+            "ok"
+        } else {
+            "error"
+        },
+        start.elapsed().as_secs_f64(),
+    );
+    let error = outcome.result.is_none().then(|| outcome.failure_summary());
+    ValidationResult {
+        wasm_size_bytes: plugin.wasm_bytes.len(),
+        apply_export_found,
+        test_context: test_ctx,
+        result: outcome.result,
+        error,
+        events,
     }
 }
 
@@ -723,23 +812,214 @@ fn host_now_fn() -> Function {
     .with_namespace("extism:host/user")
 }
 
-/// Call the plugin's `metadata()` export and deserialize the result.
-/// Returns an error if the export is missing or the output can't be parsed —
-/// callers should fall back to `PluginMetadata::default()`.
-fn load_metadata_from_bytes(
-    wasm_bytes: &[u8],
-    allowed_hosts: &[String],
-    config: &std::collections::BTreeMap<String, String>,
-) -> anyhow::Result<PluginMetadata> {
-    let wasm = Wasm::data(wasm_bytes.to_vec());
-    let mut manifest = Manifest::new([wasm]);
-    if !allowed_hosts.is_empty() {
-        manifest.allowed_hosts = Some(allowed_hosts.to_vec());
+/// One plugin's load: the plugin, if it loaded, and what happened.
+pub struct PluginLoad {
+    pub name: String,
+    pub plugin: Option<LoadedPlugin>,
+    /// Size of the fetched binary (0 if the fetch failed).
+    pub wasm_size_bytes: usize,
+    /// Fetch, `metadata()` and version-check events.
+    pub events: Vec<PluginEvent>,
+    pub trace_id: Option<String>,
+}
+
+impl PluginLoad {
+    pub fn health(&self) -> Health {
+        if self.plugin.is_none() {
+            Health::Failing
+        } else {
+            Health::from_events(&self.events)
+        }
     }
-    manifest.config.extend(config.clone());
-    let mut p = Plugin::new(&manifest, [host_now_fn()], false)?;
-    let output = p.call::<&str, &str>("metadata", "")?;
-    Ok(serde_json::from_str(output)?)
+
+    /// The load as a status update for the plugin-wide row.
+    pub fn status_update(&self) -> crate::plugin_status::StatusUpdate {
+        let reports = self.reports();
+        let export = if reports.iter().any(|r| r.export == Export::Fetch.as_str()) {
+            Export::Fetch
+        } else {
+            Export::Metadata
+        };
+        crate::plugin_status::StatusUpdate {
+            key: crate::plugin_status::StatusKey::plugin_wide(&self.name),
+            export: export.as_str().to_string(),
+            trigger: Trigger::Load.as_str().to_string(),
+            health: self.health(),
+            events: reports,
+            trace_id: self.trace_id.clone(),
+            ..Default::default()
+        }
+    }
+
+    pub fn reports(&self) -> Vec<PluginEventReport> {
+        self.events
+            .iter()
+            .map(|event| PluginEventReport {
+                plugin: self.name.clone(),
+                export: if event.code == codes::FETCH_FAILED
+                    || event.code == codes::CHECKSUM_MISMATCH
+                {
+                    Export::Fetch.as_str().to_string()
+                } else {
+                    Export::Metadata.as_str().to_string()
+                },
+                event: event.clone(),
+                trace_id: self.trace_id.clone(),
+            })
+            .collect()
+    }
+}
+
+/// The downloaded binary doesn't match the configured checksum.
+#[derive(Debug)]
+struct ChecksumMismatch {
+    plugin: String,
+    expected: String,
+    actual: String,
+}
+
+impl std::fmt::Display for ChecksumMismatch {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "SHA-256 mismatch for plugin '{}': expected {}, got {}",
+            self.plugin, self.expected, self.actual
+        )
+    }
+}
+
+impl std::error::Error for ChecksumMismatch {}
+
+fn missing_export_message(export: Export) -> String {
+    format!("the plugin has no `{}` export", export.as_str())
+}
+
+/// Fetch, verify and load one plugin through the funnel: a `plugin fetch`
+/// span for the download, then `metadata()`, then the
+/// `min_deckwatch_version` check.
+async fn load_plugin(
+    cfg: &PluginConfig,
+    http: &reqwest::Client,
+    settings: &DeckwatchSettings,
+    state: &AppState,
+    trigger: Trigger,
+) -> PluginLoad {
+    let telemetry = &state.plugin_telemetry;
+    let call = PluginCall::new(telemetry, trigger);
+    let span = plugin_span(Export::Fetch, &cfg.name, "", &call);
+    let trace_id = plugin_events::trace_context(&span)
+        .as_deref()
+        .and_then(plugin_events::trace_id_of)
+        .map(str::to_string);
+    let start = Instant::now();
+    let fetched = fetch_bytes(cfg, http, settings, state)
+        .instrument(span.clone())
+        .await;
+    let (bytes, fetch_events, failed_status) = match fetched {
+        Ok(bytes) => (Some(bytes), Vec::new(), ""),
+        Err(e) => {
+            let (code, status) = if e.downcast_ref::<ChecksumMismatch>().is_some() {
+                (codes::CHECKSUM_MISMATCH, "checksum_mismatch")
+            } else {
+                (codes::FETCH_FAILED, "fetch_failed")
+            };
+            let event = host_event(
+                EventSeverity::Error,
+                code,
+                format!("{e:#}"),
+                &SecretScrubber::default(),
+            );
+            (None, vec![event], status)
+        }
+    };
+    span.in_scope(|| {
+        finish_call(
+            &cfg.name,
+            Export::Fetch,
+            bytes.is_some(),
+            start.elapsed(),
+            &fetch_events,
+            0,
+            telemetry,
+        )
+    });
+    let Some(bytes) = bytes else {
+        metrics::record_plugin_load(&cfg.name, failed_status);
+        return PluginLoad {
+            name: cfg.name.clone(),
+            plugin: None,
+            wasm_size_bytes: 0,
+            events: fetch_events,
+            trace_id,
+        };
+    };
+
+    let sha256 = sha256_hex(&bytes);
+    let wasm_size_bytes = bytes.len();
+    tracing::info!(plugin = %cfg.name, bytes = wasm_size_bytes, sha256 = %sha256, "loaded plugin");
+    let mut plugin = LoadedPlugin {
+        name: cfg.name.clone(),
+        wasm_bytes: Arc::new(bytes),
+        allowed_hosts: cfg.allowed_hosts.clone(),
+        config: cfg.config.clone(),
+        inherit_env_keys: cfg.inherit_env_keys.clone(),
+        inherit_env_file_keys: cfg.inherit_env_file_keys.clone(),
+        metadata: PluginMetadata {
+            name: cfg.name.clone(),
+            ..Default::default()
+        },
+        sha256,
+        loaded_at: now_rfc3339(),
+    };
+
+    // A plugin without a metadata() export gets defaults; one whose
+    // metadata() fails still loads with defaults, and the failure is
+    // reported.
+    let meta = run_metadata(&plugin, &call);
+    let mut events = meta.events;
+    if let Some(mut metadata) = meta.result {
+        if metadata.name.is_empty() {
+            metadata.name = cfg.name.clone();
+        }
+        plugin.metadata = metadata;
+    }
+
+    // Enforce min_deckwatch_version before accepting the plugin.
+    if let Some(ref min_ver) = plugin.metadata.min_deckwatch_version {
+        let host_ver = env!("CARGO_PKG_VERSION");
+        if !version_gte(host_ver, min_ver) {
+            let event = host_event(
+                EventSeverity::Error,
+                codes::LOAD_FAILED,
+                format!("the plugin requires deckwatch {min_ver} or newer; this is {host_ver}"),
+                &meta.scrubber,
+            );
+            metrics::record_plugin_load(&cfg.name, "version_incompatible");
+            metrics::record_plugin_error(&cfg.name, "version_incompatible");
+            telemetry.log_events(
+                &cfg.name,
+                Export::Metadata.as_str(),
+                std::slice::from_ref(&event),
+            );
+            events.push(event);
+            return PluginLoad {
+                name: cfg.name.clone(),
+                plugin: None,
+                wasm_size_bytes,
+                events,
+                trace_id,
+            };
+        }
+    }
+
+    metrics::record_plugin_load(&cfg.name, "loaded");
+    PluginLoad {
+        name: cfg.name.clone(),
+        plugin: Some(plugin),
+        wasm_size_bytes,
+        events,
+        trace_id,
+    }
 }
 
 /// Fetch and load all enabled plugins from their configured sources.
@@ -754,57 +1034,28 @@ pub async fn fetch_plugins(settings: &DeckwatchSettings, state: &AppState) -> Ve
             metrics::record_plugin_load(&cfg.name, "disabled");
             continue;
         }
-        let fetch_start = std::time::Instant::now();
-        match fetch_bytes(cfg, &http, settings, state).await {
-            Ok(bytes) => {
-                let sha256 = sha256_hex(&bytes);
-                tracing::info!(plugin = %cfg.name, bytes = bytes.len(), sha256 = %sha256, "loaded plugin");
-                let metadata = load_metadata_from_bytes(&bytes, &cfg.allowed_hosts, &cfg.config)
-                    .unwrap_or_else(|e| {
-                        tracing::debug!(plugin = %cfg.name, error = %e, "metadata() not exported or failed; using defaults");
-                        metrics::record_plugin_error(&cfg.name, "metadata_failed");
-                        PluginMetadata { name: cfg.name.clone(), ..Default::default() }
-                    });
-
-                // Enforce min_deckwatch_version before accepting the plugin.
-                if let Some(ref min_ver) = metadata.min_deckwatch_version {
-                    let host_ver = env!("CARGO_PKG_VERSION");
-                    if !version_gte(host_ver, min_ver) {
-                        tracing::error!(
-                            plugin = %cfg.name,
-                            required = %min_ver,
-                            running = %host_ver,
-                            "plugin requires newer deckwatch — skipping"
-                        );
-                        metrics::record_plugin_load(&cfg.name, "version_incompatible");
-                        metrics::record_plugin_error(&cfg.name, "version_incompatible");
-                        continue;
-                    }
-                }
-
-                loaded.push(LoadedPlugin {
-                    name: cfg.name.clone(),
-                    wasm_bytes: Arc::new(bytes),
-                    allowed_hosts: cfg.allowed_hosts.clone(),
-                    config: cfg.config.clone(),
-                    inherit_env_keys: cfg.inherit_env_keys.clone(),
-                    inherit_env_file_keys: cfg.inherit_env_file_keys.clone(),
-                    metadata,
-                    sha256,
-                    loaded_at: now_rfc3339(),
-                });
-                metrics::record_plugin_load(&cfg.name, "loaded");
-            }
-            Err(e) => {
-                tracing::error!(plugin = %cfg.name, error = %e, "failed to fetch plugin WASM");
-                metrics::record_plugin_load(&cfg.name, "fetch_failed");
-                metrics::record_plugin_error(&cfg.name, "fetch_failed");
-            }
+        let load = load_plugin(cfg, &http, settings, state, Trigger::Load).await;
+        state
+            .plugin_telemetry
+            .record_load(&load.name, load.reports());
+        state.plugin_telemetry.report(load.status_update());
+        if let Some(plugin) = load.plugin {
+            loaded.push(plugin);
         }
-        let _ = fetch_start;
     }
     metrics::set_plugins_loaded(loaded.len() as f64);
     loaded
+}
+
+/// The configured names of the enabled plugins, for pruning the status
+/// rows of plugins that were disabled or removed.
+pub fn enabled_plugin_names(settings: &DeckwatchSettings) -> Vec<String> {
+    settings
+        .plugins
+        .iter()
+        .filter(|p| p.enabled)
+        .map(|p| p.name.clone())
+        .collect()
 }
 
 /// Directory where uploaded WASM binaries are stored.
@@ -863,10 +1114,12 @@ async fn fetch_bytes(
         Some(expected_hex) => {
             let actual_hex = sha256_hex(&bytes);
             if actual_hex != *expected_hex {
-                return Err(anyhow::anyhow!(
-                    "SHA-256 mismatch for plugin '{}': expected {expected_hex}, got {actual_hex}",
-                    cfg.name
-                ));
+                return Err(ChecksumMismatch {
+                    plugin: cfg.name.clone(),
+                    expected: expected_hex.clone(),
+                    actual: actual_hex,
+                }
+                .into());
             }
             tracing::debug!(plugin = %cfg.name, "SHA-256 checksum verified");
         }
@@ -1066,23 +1319,71 @@ pub fn sort_by_dependencies(plugins: &[LoadedPlugin]) -> Vec<&LoadedPlugin> {
 
 // ── Applying ─────────────────────────────────────────────────────────────────
 
+/// A Kubernetes object a plugin returned for deckwatch to apply.
+#[derive(Debug, Clone)]
+pub struct PluginK8sResource {
+    pub plugin: String,
+    /// The export whose output contained the object.
+    pub export: Export,
+    pub manifest: serde_json::Value,
+    pub trace_id: Option<String>,
+    scrubber: Arc<SecretScrubber>,
+}
+
+impl<T> CallOutcome<T> {
+    /// Tag `manifests` from this call's output with the plugin, so a failure
+    /// to apply one is reported against it.
+    pub fn k8s_resources(&self, manifests: &[serde_json::Value]) -> Vec<PluginK8sResource> {
+        manifests
+            .iter()
+            .map(|manifest| PluginK8sResource {
+                plugin: self.plugin.clone(),
+                export: self.export,
+                manifest: manifest.clone(),
+                trace_id: self.trace_id.clone(),
+                scrubber: self.scrubber.clone(),
+            })
+            .collect()
+    }
+}
+
+/// What running every plugin's `apply()` produced.
+#[derive(Default)]
+pub struct PluginApplyReport {
+    /// Raw Kubernetes objects to apply with [`apply_kubernetes_resources`]
+    /// once the Deployment is committed.
+    pub kubernetes_resources: Vec<PluginK8sResource>,
+    /// Structured ServiceAccount requests for
+    /// [`apply_wanted_service_accounts`].
+    pub wanted_service_accounts: Vec<WantsServiceAccount>,
+    /// One outcome per plugin, in the order they ran.
+    pub outcomes: Vec<CallOutcome<()>>,
+}
+
+impl PluginApplyReport {
+    /// Every plugin's events, for the API response.
+    pub fn reports(&self) -> Vec<PluginEventReport> {
+        self.outcomes
+            .iter()
+            .flat_map(CallOutcome::reports)
+            .collect()
+    }
+}
+
 /// Run all loaded plugins against `ctx`, merging env vars and sidecars into
-/// `pod_spec`/`dep_annotations`. Returns a tuple of:
-/// - `Vec<serde_json::Value>` — raw Kubernetes resources emitted by plugins
-///   (applied via `apply_kubernetes_resources` after the deployment is committed)
-/// - `Vec<WantsServiceAccount>` — structured SA requests that should be
-///   handled via `apply_wanted_service_accounts` with create-or-patch retry
+/// `pod_spec`/`dep_annotations`.
 ///
 /// Plugins are sorted by declared dependency before execution. Each plugin
 /// receives the accumulated `outputs` from all prior plugins in its context.
+/// A failing plugin is skipped; its outcome says why.
 pub fn apply_plugins(
     plugins: &[LoadedPlugin],
     ctx: &PluginContext,
     pod_spec: &mut k8s_openapi::api::core::v1::PodSpec,
     dep_annotations: &mut BTreeMap<String, String>,
-) -> (Vec<serde_json::Value>, Vec<WantsServiceAccount>) {
-    let mut all_k8s_resources: Vec<serde_json::Value> = Vec::new();
-    let mut all_wanted_sas: Vec<WantsServiceAccount> = Vec::new();
+    call: &PluginCall<'_>,
+) -> PluginApplyReport {
+    let mut report = PluginApplyReport::default();
     let mut accumulated_outputs: std::collections::HashMap<
         String,
         std::collections::HashMap<String, String>,
@@ -1093,48 +1394,45 @@ pub fn apply_plugins(
         let mut enriched_ctx = ctx.clone();
         enriched_ctx.plugin_outputs = accumulated_outputs.clone();
 
-        let start = std::time::Instant::now();
-        match run_plugin(plugin, &enriched_ctx) {
-            Ok(result) => {
-                let elapsed = start.elapsed().as_secs_f64();
-                metrics::record_plugin_execution(&plugin.name, "apply", "ok", elapsed);
-
-                for _err in &result.errors {
-                    metrics::record_plugin_error(&plugin.name, "reported_error");
-                }
-
-                apply_env_vars(plugin, &result.env_vars, pod_spec, dep_annotations);
-                apply_sidecars(plugin, &result.sidecars, pod_spec, dep_annotations);
-                apply_init_containers(&result.init_containers, pod_spec);
-                all_k8s_resources.extend(result.kubernetes_resources.clone());
-                if let Some(sa) = result.service_account_name.clone() {
-                    apply_service_account(plugin, sa, pod_spec, dep_annotations);
-                }
-                if let Some(wanted_sa) = result.wants_service_account.clone() {
-                    // Set the SA name on the pod spec so pods bind to it immediately.
-                    apply_service_account(
-                        plugin,
-                        wanted_sa.name.clone(),
-                        pod_spec,
-                        dep_annotations,
-                    );
-                    all_wanted_sas.push(wanted_sa);
-                }
-                // Record this plugin's outputs for subsequent plugins.
-                if !result.outputs.is_empty() {
-                    accumulated_outputs.insert(plugin.name.clone(), result.outputs);
-                }
+        let (result, mut outcome) = run_plugin(plugin, &enriched_ctx, call).take_result();
+        if let Some(result) = result {
+            apply_env_vars(plugin, &result.env_vars, pod_spec, dep_annotations);
+            apply_sidecars(plugin, &result.sidecars, pod_spec, dep_annotations);
+            apply_init_containers(&result.init_containers, pod_spec);
+            report
+                .kubernetes_resources
+                .extend(outcome.k8s_resources(&result.kubernetes_resources));
+            let mut refusals = Vec::new();
+            if let Some(sa) = result.service_account_name.clone() {
+                refusals.extend(apply_service_account(
+                    plugin,
+                    sa,
+                    pod_spec,
+                    dep_annotations,
+                    &outcome.scrubber,
+                ));
             }
-            Err(e) => {
-                let elapsed = start.elapsed().as_secs_f64();
-                metrics::record_plugin_execution(&plugin.name, "apply", "error", elapsed);
-                metrics::record_plugin_error(&plugin.name, "apply_failed");
-                tracing::error!(plugin = %plugin.name, error = %e, "plugin apply() failed; skipping");
+            if let Some(wanted_sa) = result.wants_service_account.clone() {
+                // Set the SA name on the pod spec so pods bind to it immediately.
+                refusals.extend(apply_service_account(
+                    plugin,
+                    wanted_sa.name.clone(),
+                    pod_spec,
+                    dep_annotations,
+                    &outcome.scrubber,
+                ));
+                report.wanted_service_accounts.push(wanted_sa);
+            }
+            outcome.add_host_events(call.telemetry, refusals);
+            // Record this plugin's outputs for subsequent plugins.
+            if !result.outputs.is_empty() {
+                accumulated_outputs.insert(plugin.name.clone(), result.outputs);
             }
         }
+        report.outcomes.push(outcome);
     }
 
-    (all_k8s_resources, all_wanted_sas)
+    report
 }
 
 /// Create or patch ServiceAccounts declared via `WantsServiceAccount` plugin
@@ -1158,29 +1456,64 @@ pub async fn apply_wanted_service_accounts(
 }
 
 /// Apply a list of Kubernetes resources collected from plugins via server-side
-/// apply. Called after the deployment is committed; errors are logged but do
-/// not fail the request. Resources that reference CRDs not installed in the
-/// cluster will fail here with a clear log message.
+/// apply. Called after the deployment is committed; failures never fail the
+/// request. Each failure (a CRD that isn't installed, a rejected object) is
+/// returned as a `plugin.k8s_apply_failed` event against the plugin that
+/// asked for the object, and logged.
 pub async fn apply_kubernetes_resources(
-    resources: &[serde_json::Value],
+    resources: &[PluginK8sResource],
     kube_client: &kube::Client,
-) {
+    telemetry: &PluginTelemetry,
+) -> Vec<PluginEventReport> {
+    let mut failures = Vec::new();
     for resource in resources {
-        let kind = resource
-            .get("kind")
-            .and_then(|v| v.as_str())
-            .unwrap_or("unknown");
-        let name = resource
-            .pointer("/metadata/name")
-            .and_then(|v| v.as_str())
-            .unwrap_or("unknown");
-        if let Err(e) = apply_one_resource(resource, kube_client).await {
-            metrics::record_plugin_k8s_resource(kind, "error");
-            tracing::error!(kind, name, error = %e, "plugin kubernetes_resource apply failed");
-        } else {
-            metrics::record_plugin_k8s_resource(kind, "ok");
+        let manifest = &resource.manifest;
+        let field = |pointer: &str| {
+            manifest
+                .pointer(pointer)
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown")
+                .to_string()
+        };
+        let (api_version, kind, name) = (
+            field("/apiVersion"),
+            field("/kind"),
+            field("/metadata/name"),
+        );
+        match apply_one_resource(manifest, kube_client).await {
+            Ok(()) => metrics::record_plugin_k8s_resource(&kind, "ok"),
+            Err(e) => {
+                metrics::record_plugin_k8s_resource(&kind, "error");
+                metrics::record_plugin_error(&resource.plugin, "k8s_apply_failed");
+                let mut event = host_event(
+                    EventSeverity::Error,
+                    codes::K8S_APPLY_FAILED,
+                    format!("failed to apply {kind} {name}: {e:#}"),
+                    &resource.scrubber,
+                );
+                event.object = Some(plugin_events::sanitize_object_ref(
+                    &KubernetesObjectRef {
+                        api_version,
+                        kind,
+                        name,
+                    },
+                    &resource.scrubber,
+                ));
+                telemetry.log_events(
+                    &resource.plugin,
+                    resource.export.as_str(),
+                    std::slice::from_ref(&event),
+                );
+                failures.push(PluginEventReport {
+                    plugin: resource.plugin.clone(),
+                    export: resource.export.as_str().to_string(),
+                    event,
+                    trace_id: resource.trace_id.clone(),
+                });
+            }
         }
     }
+    failures
 }
 
 async fn apply_one_resource(
@@ -1257,341 +1590,830 @@ fn inherited_env_var_from(
     lookup(key)
 }
 
-pub fn run_provision(
-    plugin: &LoadedPlugin,
-    req: &ResourceProvisionRequest,
-) -> anyhow::Result<ResourceProvisionResult> {
-    tracing::info!(
-        plugin = %plugin.name,
-        namespace = %req.namespace,
-        application = %req.application_name,
-        resource_id = %req.resource_id,
-        "calling plugin provision()"
-    );
+// ── Plugin call funnel ───────────────────────────────────────────────────────
+//
+// Every plugin interaction goes through here: fetch and load (`load_plugin`),
+// `metadata`, validation, `apply` (deployment create/update and the
+// reconcile loop), `provision` (submit, refresh and status polling) and
+// `deprovision`. For each call the funnel:
+//
+// 1. opens a span `plugin {export}` carrying the plugin, its version, the
+//    export, what triggered the call, and the application, namespace,
+//    deployment and resource id it's for. extism turns the plugin's own
+//    `log_*` calls into `tracing` events (target `extism::pdk`) on the calling
+//    thread, so they land inside this span;
+// 2. records `deckwatch_plugin_executions_total`,
+//    `deckwatch_plugin_execution_duration_seconds` and
+//    `deckwatch_plugin_errors_total`, with labels from fixed host-side sets;
+// 3. normalizes what happened into `PluginEvent`s (`plugin_events`): the
+//    plugin's structured events, its legacy `errors`/`warnings`/`message`
+//    strings, and host-detected failures with the reserved `plugin.*` codes,
+//    all sanitized and with secret config values masked;
+// 4. logs those events inside the span, rate limited per plugin.
+//
+// Callers get a `CallOutcome` and route its events onward: to the API or MCP
+// response of the action that triggered the call, and to the background
+// sinks.
 
-    let start = std::time::Instant::now();
-
-    // Use as_slice() to borrow the Arc<Vec<u8>> as &[u8]; Wasm::data copies the
-    // bytes into its own Vec<u8> internally. The Arc avoids copying the full
-    // binary when LoadedPlugin itself is cloned.
-    let wasm = Wasm::data(plugin.wasm_bytes.as_slice());
-    let mut manifest = Manifest::new([wasm]);
-
-    if !plugin.allowed_hosts.is_empty() {
-        manifest.allowed_hosts = Some(plugin.allowed_hosts.clone());
-    }
-    manifest.config.extend(plugin.config.clone());
-
-    let now_ts = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-    manifest
-        .config
-        .insert("CURRENT_TIMESTAMP".to_string(), now_ts.to_string());
-
-    for key in &plugin.inherit_env_keys {
-        if let Some(val) = inherited_env_var(&plugin.name, key) {
-            manifest.config.insert(key.clone(), val);
-        }
-    }
-
-    for (config_key, env_var) in &plugin.inherit_env_file_keys {
-        if let Some(path) = inherited_env_var(&plugin.name, env_var) {
-            match std::fs::read_to_string(&path) {
-                Ok(content) => {
-                    manifest
-                        .config
-                        .insert(config_key.clone(), content.trim().to_string());
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        plugin = %plugin.name,
-                        config_key = %config_key,
-                        path = %path,
-                        error = %e,
-                        "inherit_env_file_keys: failed to read file"
-                    );
-                }
-            }
-        }
-    }
-
-    let mut p = match Plugin::new(&manifest, [host_now_fn()], false) {
-        Ok(p) => p,
-        Err(e) => {
-            let elapsed = start.elapsed().as_secs_f64();
-            metrics::record_plugin_execution(&plugin.name, "provision", "error", elapsed);
-            metrics::record_plugin_error(&plugin.name, "provision_failed");
-            return Err(e);
-        }
-    };
-    let input = serde_json::to_string(req)?;
-    let output = match p.call::<&str, &str>("provision", &input) {
-        Ok(o) => o,
-        Err(e) => {
-            let elapsed = start.elapsed().as_secs_f64();
-            metrics::record_plugin_execution(&plugin.name, "provision", "error", elapsed);
-            metrics::record_plugin_error(&plugin.name, "provision_failed");
-            return Err(e);
-        }
-    };
-    let result: ResourceProvisionResult = serde_json::from_str(output)?;
-
-    let elapsed = start.elapsed().as_secs_f64();
-    metrics::record_plugin_execution(&plugin.name, "provision", "ok", elapsed);
-
-    for err in &result.errors {
-        metrics::record_plugin_error(&plugin.name, "reported_error");
-        tracing::error!(
-            plugin = %plugin.name,
-            namespace = %req.namespace,
-            application = %req.application_name,
-            resource_id = %req.resource_id,
-            "plugin provision() reported error: {err}"
-        );
-    }
-
-    for warning in &result.warnings {
-        tracing::warn!(
-            plugin = %plugin.name,
-            namespace = %req.namespace,
-            application = %req.application_name,
-            resource_id = %req.resource_id,
-            "plugin provision() reported warning: {warning}"
-        );
-    }
-
-    tracing::info!(
-        plugin = %plugin.name,
-        namespace = %req.namespace,
-        application = %req.application_name,
-        resource_id = %req.resource_id,
-        state_keys = result.state.len(),
-        k8s_resources = result.kubernetes_resources.len(),
-        errors = result.errors.len(),
-        warnings = result.warnings.len(),
-        "plugin provision() completed"
-    );
-
-    Ok(result)
+/// A plugin export, or a host step with its own span (`fetch`, `validate`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Export {
+    Fetch,
+    Metadata,
+    Apply,
+    Provision,
+    Deprovision,
+    Validate,
 }
 
-/// Call the plugin's `deprovision()` WASM export with the given request.
-///
-/// Returns `Ok(ResourceDeprovisionResult)` even if the plugin reports errors —
-/// errors are surfaced to the caller for logging, but do not block DB record removal.
-/// Returns `Err` only if the WASM call itself fails (e.g. export not found).
-pub fn run_deprovision(
-    plugin: &LoadedPlugin,
-    req: &ResourceDeprovisionRequest,
-) -> anyhow::Result<ResourceDeprovisionResult> {
-    tracing::info!(
-        plugin = %plugin.name,
-        namespace = %req.namespace,
-        application = %req.application_name,
-        resource_id = %req.resource_id,
-        "calling plugin deprovision()"
-    );
-
-    let start = std::time::Instant::now();
-
-    let wasm = Wasm::data(plugin.wasm_bytes.as_slice());
-    let mut manifest = Manifest::new([wasm]);
-    if !plugin.allowed_hosts.is_empty() {
-        manifest.allowed_hosts = Some(plugin.allowed_hosts.clone());
-    }
-    manifest.config.extend(plugin.config.clone());
-
-    let now_ts = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-    manifest
-        .config
-        .insert("CURRENT_TIMESTAMP".to_string(), now_ts.to_string());
-
-    for key in &plugin.inherit_env_keys {
-        if let Some(val) = inherited_env_var(&plugin.name, key) {
-            manifest.config.insert(key.clone(), val);
-        }
-    }
-    for (config_key, env_var) in &plugin.inherit_env_file_keys {
-        if let Some(path) = inherited_env_var(&plugin.name, env_var) {
-            if let Ok(content) = std::fs::read_to_string(&path) {
-                manifest
-                    .config
-                    .insert(config_key.clone(), content.trim().to_string());
-            }
-        }
-    }
-
-    let mut p = match Plugin::new(&manifest, [host_now_fn()], false) {
-        Ok(p) => p,
-        Err(e) => {
-            let elapsed = start.elapsed().as_secs_f64();
-            metrics::record_plugin_execution(&plugin.name, "deprovision", "error", elapsed);
-            metrics::record_plugin_error(&plugin.name, "deprovision_failed");
-            return Err(e);
-        }
-    };
-    let input = serde_json::to_string(req)?;
-
-    let output = p.call::<&str, &str>("deprovision", &input).map_err(|e| {
-        if e.to_string().contains("not found") || e.to_string().contains("export") {
-            return anyhow::anyhow!("__no_deprovision_export__");
-        }
-        e
-    });
-
-    match output {
-        Ok(out) => {
-            let elapsed = start.elapsed().as_secs_f64();
-            let result: ResourceDeprovisionResult = serde_json::from_str(out)?;
-            metrics::record_plugin_execution(&plugin.name, "deprovision", "ok", elapsed);
-            for err in &result.errors {
-                metrics::record_plugin_error(&plugin.name, "reported_error");
-                tracing::error!(
-                    plugin = %plugin.name,
-                    resource_id = %req.resource_id,
-                    "plugin deprovision() reported error: {err}"
-                );
-            }
-            tracing::info!(
-                plugin = %plugin.name,
-                resource_id = %req.resource_id,
-                errors = result.errors.len(),
-                message = %result.message,
-                "plugin deprovision() completed"
-            );
-            Ok(result)
-        }
-        Err(e) if e.to_string().contains("__no_deprovision_export__") => {
-            tracing::debug!(plugin = %plugin.name, "plugin has no deprovision() export — skipping");
-            Ok(ResourceDeprovisionResult::default())
-        }
-        Err(e) => {
-            let elapsed = start.elapsed().as_secs_f64();
-            metrics::record_plugin_execution(&plugin.name, "deprovision", "error", elapsed);
-            metrics::record_plugin_error(&plugin.name, "deprovision_failed");
-            Err(e)
+impl Export {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Fetch => "fetch",
+            Self::Metadata => "metadata",
+            Self::Apply => "apply",
+            Self::Provision => "provision",
+            Self::Deprovision => "deprovision",
+            Self::Validate => "validate",
         }
     }
 }
 
-pub fn run_plugin(plugin: &LoadedPlugin, ctx: &PluginContext) -> anyhow::Result<PluginResult> {
-    tracing::info!(
-        plugin = %plugin.name,
-        namespace = %ctx.namespace,
-        deployment = %ctx.deployment_name,
-        "calling plugin apply()"
+/// What made deckwatch call a plugin. A fixed set, so it can go on spans,
+/// logs and (later) metrics.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Trigger {
+    /// Startup, a settings save, an upload or `enable_plugin`.
+    Load,
+    DeploymentCreate,
+    DeploymentUpdate,
+    /// The 10-second application reconcile loop.
+    Reconcile,
+    /// An operator or agent provisioning a resource.
+    Provision,
+    /// An operator or agent refreshing a resource.
+    Refresh,
+    /// The background re-poll of pending resources.
+    StatusPoll,
+    Deprovision,
+    /// MCP `validate_plugin`.
+    Validate,
+}
+
+impl Trigger {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Load => "load",
+            Self::DeploymentCreate => "deployment_create",
+            Self::DeploymentUpdate => "deployment_update",
+            Self::Reconcile => "reconcile",
+            Self::Provision => "provision",
+            Self::Refresh => "refresh",
+            Self::StatusPoll => "status_poll",
+            Self::Deprovision => "deprovision",
+            Self::Validate => "validate",
+        }
+    }
+}
+
+/// Who a plugin call is for. Empty strings mean "not applicable".
+#[derive(Clone, Copy)]
+pub struct PluginCall<'a> {
+    pub telemetry: &'a PluginTelemetry,
+    pub trigger: Trigger,
+    pub namespace: &'a str,
+    pub application: &'a str,
+    pub deployment: &'a str,
+    pub resource_id: &'a str,
+}
+
+impl<'a> PluginCall<'a> {
+    pub fn new(telemetry: &'a PluginTelemetry, trigger: Trigger) -> Self {
+        Self {
+            telemetry,
+            trigger,
+            namespace: "",
+            application: "",
+            deployment: "",
+            resource_id: "",
+        }
+    }
+
+    pub fn namespace(mut self, namespace: &'a str) -> Self {
+        self.namespace = namespace;
+        self
+    }
+
+    pub fn application(mut self, application: &'a str) -> Self {
+        self.application = application;
+        self
+    }
+
+    pub fn deployment(mut self, deployment: &'a str) -> Self {
+        self.deployment = deployment;
+        self
+    }
+
+    pub fn resource(mut self, resource_id: &'a str) -> Self {
+        self.resource_id = resource_id;
+        self
+    }
+}
+
+/// What one plugin call produced. `result` is `None` when the call failed
+/// (the events then say why); `events` are already normalized and safe to
+/// return, store or log.
+#[must_use = "route the events to the response and the sinks"]
+#[derive(Debug, Clone)]
+pub struct CallOutcome<T> {
+    /// The configured plugin name (never the plugin's self-reported one).
+    pub plugin: String,
+    pub export: Export,
+    pub result: Option<T>,
+    pub events: Vec<PluginEvent>,
+    /// Trace id of the call's span, when traces are exported.
+    pub trace_id: Option<String>,
+    /// Masks this call's secret config values in events added later, such as
+    /// a failure to apply a Kubernetes object the plugin returned.
+    pub scrubber: Arc<SecretScrubber>,
+    /// What triggered the call.
+    pub trigger: Trigger,
+}
+
+impl<T> CallOutcome<T> {
+    pub fn health(&self) -> Health {
+        if self.result.is_none() {
+            Health::Failing
+        } else {
+            Health::from_events(&self.events)
+        }
+    }
+
+    /// The events as returned to API and MCP clients.
+    pub fn reports(&self) -> Vec<PluginEventReport> {
+        self.events
+            .iter()
+            .map(|event| PluginEventReport {
+                plugin: self.plugin.clone(),
+                export: self.export.as_str().to_string(),
+                event: event.clone(),
+                trace_id: self.trace_id.clone(),
+            })
+            .collect()
+    }
+
+    /// This outcome as a status update for `key`.
+    pub fn status_update(
+        &self,
+        key: crate::plugin_status::StatusKey,
+    ) -> crate::plugin_status::StatusUpdate {
+        crate::plugin_status::StatusUpdate {
+            key,
+            export: self.export.as_str().to_string(),
+            trigger: self.trigger.as_str().to_string(),
+            health: self.health(),
+            events: self.reports(),
+            trace_id: self.trace_id.clone(),
+            ..Default::default()
+        }
+    }
+
+    /// `code: message` of the first error, for error replies.
+    pub fn failure_summary(&self) -> String {
+        plugin_events::failure_summary(&self.reports())
+            .unwrap_or_else(|| format!("{}() failed", self.export.as_str()))
+    }
+
+    /// Split off the result, keeping the events.
+    pub fn take_result(self) -> (Option<T>, CallOutcome<()>) {
+        let CallOutcome {
+            plugin,
+            export,
+            result,
+            events,
+            trace_id,
+            scrubber,
+            trigger,
+        } = self;
+        let failed = result.is_none();
+        let rest = CallOutcome {
+            plugin,
+            export,
+            result: if failed { None } else { Some(()) },
+            events,
+            trace_id,
+            scrubber,
+            trigger,
+        };
+        (result, rest)
+    }
+
+    /// Add events the host raised after the call (policy refusals, failed
+    /// Kubernetes applies). They're logged and counted like the call's own.
+    pub fn add_host_events(&mut self, telemetry: &PluginTelemetry, events: Vec<PluginEvent>) {
+        if events.is_empty() {
+            return;
+        }
+        for event in &events {
+            if plugin_events::effective_severity(event.severity) == EventSeverity::Error {
+                metrics::record_plugin_error(&self.plugin, codes::metric_label(&event.code));
+            }
+        }
+        telemetry.log_events(&self.plugin, self.export.as_str(), &events);
+        for event in events {
+            if self.events.len() >= plugin_events::MAX_EVENTS_PER_CALL {
+                metrics::record_plugin_events_dropped(&self.plugin, "over_cap", 1);
+                continue;
+            }
+            if !self.events.contains(&event) {
+                self.events.push(event);
+            }
+        }
+    }
+}
+
+/// A plugin result type the funnel can parse, with its legacy plain-string
+/// notices.
+pub trait PluginOutput: serde::de::DeserializeOwned + Default {
+    fn legacy(&self) -> LegacyNotices<'_> {
+        LegacyNotices::default()
+    }
+}
+
+impl PluginOutput for PluginResult {
+    fn legacy(&self) -> LegacyNotices<'_> {
+        LegacyNotices {
+            errors: &self.errors,
+            warnings: &self.warnings,
+            info: None,
+        }
+    }
+}
+
+impl PluginOutput for ResourceProvisionResult {
+    fn legacy(&self) -> LegacyNotices<'_> {
+        LegacyNotices {
+            errors: &self.errors,
+            warnings: &self.warnings,
+            info: None,
+        }
+    }
+}
+
+impl PluginOutput for ResourceDeprovisionResult {
+    fn legacy(&self) -> LegacyNotices<'_> {
+        LegacyNotices {
+            errors: &self.errors,
+            warnings: &[],
+            info: Some(self.message.as_str()).filter(|m| !m.trim().is_empty()),
+        }
+    }
+}
+
+impl PluginOutput for PluginMetadata {}
+
+/// Open the span for one plugin call. Span names must be literals, hence
+/// one arm per export.
+fn plugin_span(export: Export, plugin: &str, version: &str, call: &PluginCall<'_>) -> Span {
+    macro_rules! span {
+        ($name:literal) => {
+            tracing::info_span!(
+                $name,
+                "deckwatch.plugin.name" = plugin,
+                "deckwatch.plugin.version" = version,
+                "deckwatch.plugin.export" = export.as_str(),
+                "deckwatch.plugin.trigger" = call.trigger.as_str(),
+                "deckwatch.application" = call.application,
+                "k8s.namespace.name" = call.namespace,
+                "k8s.deployment.name" = call.deployment,
+                "deckwatch.plugin.resource_id" = call.resource_id,
+                "deckwatch.plugin.outcome" = tracing::field::Empty,
+                "deckwatch.plugin.events" = tracing::field::Empty,
+                "otel.status_code" = tracing::field::Empty,
+                "error.type" = tracing::field::Empty,
+                "exception.type" = tracing::field::Empty,
+                "exception.message" = tracing::field::Empty,
+            )
+        };
+    }
+    match export {
+        Export::Fetch => span!("plugin fetch"),
+        Export::Metadata => span!("plugin metadata"),
+        Export::Apply => span!("plugin apply"),
+        Export::Provision => span!("plugin provision"),
+        Export::Deprovision => span!("plugin deprovision"),
+        Export::Validate => span!("plugin validate"),
+    }
+}
+
+/// Record a call's outcome on its span (OpenTelemetry reads `otel.*`,
+/// `error.type` and `exception.*`).
+fn finish_span(span: &Span, health: Health, events: &[PluginEvent]) {
+    span.record("deckwatch.plugin.outcome", health.as_str());
+    span.record("deckwatch.plugin.events", events.len());
+    if health == Health::Failing {
+        span.record("otel.status_code", "error");
+        if let Some(e) = events
+            .iter()
+            .find(|e| plugin_events::effective_severity(e.severity) == EventSeverity::Error)
+        {
+            span.record("error.type", e.code.as_str());
+            span.record("exception.type", e.code.as_str());
+            span.record("exception.message", e.message.as_str());
+        }
+    }
+}
+
+/// Count, log and trace a finished call. Runs inside the call's span, which
+/// it records the outcome on.
+fn finish_call(
+    plugin: &str,
+    export: Export,
+    succeeded: bool,
+    elapsed: Duration,
+    events: &[PluginEvent],
+    over_cap: usize,
+    telemetry: &PluginTelemetry,
+) -> Health {
+    let health = if succeeded {
+        Health::from_events(events)
+    } else {
+        Health::Failing
+    };
+    metrics::record_plugin_execution(
+        plugin,
+        export.as_str(),
+        if succeeded { "ok" } else { "error" },
+        elapsed.as_secs_f64(),
     );
+    for event in events {
+        if plugin_events::effective_severity(event.severity) != EventSeverity::Error {
+            continue;
+        }
+        // Host failures count under their code, everything the plugin
+        // reported as `reported_error`: labels stay a fixed set.
+        metrics::record_plugin_error(plugin, codes::metric_label(&event.code));
+    }
+    if over_cap > 0 {
+        metrics::record_plugin_events_dropped(plugin, "over_cap", over_cap as u64);
+    }
+    finish_span(&Span::current(), health, events);
+    telemetry.log_events(plugin, export.as_str(), events);
+    health
+}
 
-    let wasm = Wasm::data(plugin.wasm_bytes.as_slice());
-    let mut manifest = Manifest::new([wasm]);
+/// The manifest for one call, and what the plugin was given.
+struct BuiltManifest {
+    manifest: Manifest,
+    /// The config the plugin receives, after inherited env and files.
+    config: BTreeMap<String, String>,
+    /// Config keys filled from files (`inherit_env_file_keys`).
+    file_keys: Vec<String>,
+    /// `inherit_env*` keys refused because they name deckwatch's own secrets.
+    refused: Vec<String>,
+}
 
+/// Build the extism manifest for a call. `runtime_config` adds
+/// `CURRENT_TIMESTAMP` and the inherited env vars and files; `metadata()`
+/// runs with the static config only, as it always has.
+fn build_manifest(
+    plugin: &LoadedPlugin,
+    runtime_config: bool,
+    timeout: Option<Duration>,
+) -> BuiltManifest {
+    // as_slice() borrows the Arc<Vec<u8>>; Wasm::data copies the bytes into
+    // its own Vec. The Arc keeps cloning a LoadedPlugin cheap.
+    let mut manifest = Manifest::new([Wasm::data(plugin.wasm_bytes.as_slice())]);
     // Allow the plugin to reach configured hosts via extism's HTTP host function.
     if !plugin.allowed_hosts.is_empty() {
         manifest.allowed_hosts = Some(plugin.allowed_hosts.clone());
     }
-
-    // Inject operator-supplied config (credentials, endpoints, etc.).
-    // Cloud-specific values live here, not in deckwatch core.
-    // Plugins read these via `extism_pdk::config::get("KEY")`.
+    if let Some(timeout) = timeout {
+        manifest = manifest.with_timeout(timeout);
+    }
+    // Operator-supplied config (credentials, endpoints, etc.). Cloud-specific
+    // values live here, not in deckwatch core. Plugins read these via
+    // `extism_pdk::config::get("KEY")`.
     manifest.config.extend(plugin.config.clone());
 
-    // Fresh timestamp for AWS signing (same as run_plugin).
-    let now_ts = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
-    manifest
-        .config
-        .insert("CURRENT_TIMESTAMP".to_string(), now_ts.to_string());
+    let mut file_keys = Vec::new();
+    let mut refused = Vec::new();
+    if runtime_config {
+        // Fresh timestamp for AWS request signing.
+        let now_ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        manifest
+            .config
+            .insert("CURRENT_TIMESTAMP".to_string(), now_ts.to_string());
 
-    // Inject inherited env vars from the deckwatch process environment.
-    // Applied after static config so live/rotated values override static entries.
-    for key in &plugin.inherit_env_keys {
-        if let Some(val) = inherited_env_var(&plugin.name, key) {
-            manifest.config.insert(key.clone(), val);
+        // Inherited env vars override static config so live/rotated values win.
+        for key in &plugin.inherit_env_keys {
+            if NON_INHERITABLE_ENV.contains(&key.as_str()) {
+                refused.push(key.clone());
+            }
+            if let Some(val) = inherited_env_var(&plugin.name, key) {
+                manifest.config.insert(key.clone(), val);
+            }
         }
-    }
 
-    // Inject file contents from paths stored in env vars.
-    // Cloud-agnostic: deckwatch reads the file; the plugin decides what to do
-    // with the content (e.g. exchange a workload identity token for credentials).
-    // Applied last so file contents take final precedence.
-    for (config_key, env_var) in &plugin.inherit_env_file_keys {
-        if let Some(path) = inherited_env_var(&plugin.name, env_var) {
-            match std::fs::read_to_string(&path) {
-                Ok(content) => {
-                    manifest
-                        .config
-                        .insert(config_key.clone(), content.trim().to_string());
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        plugin = %plugin.name,
-                        config_key = %config_key,
-                        path = %path,
-                        error = %e,
-                        "inherit_env_file_keys: failed to read file"
-                    );
+        // File contents from paths stored in env vars take final precedence.
+        // Cloud-agnostic: deckwatch reads the file; the plugin decides what
+        // to do with it (e.g. exchange a workload identity token).
+        for (config_key, env_var) in &plugin.inherit_env_file_keys {
+            if NON_INHERITABLE_ENV.contains(&env_var.as_str()) {
+                refused.push(env_var.clone());
+            }
+            if let Some(path) = inherited_env_var(&plugin.name, env_var) {
+                match std::fs::read_to_string(&path) {
+                    Ok(content) => {
+                        manifest
+                            .config
+                            .insert(config_key.clone(), content.trim().to_string());
+                        file_keys.push(config_key.clone());
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            plugin = %plugin.name,
+                            config_key = %config_key,
+                            path = %path,
+                            error = %e,
+                            "inherit_env_file_keys: failed to read file"
+                        );
+                    }
                 }
             }
         }
     }
 
-    // WASI is disabled; plugins use extism's HTTP host function for outbound
-    // network calls, scoped to allowed_hosts above.
-    let mut p = Plugin::new(&manifest, [host_now_fn()], false)?;
-    let input = serde_json::to_string(ctx)?;
-    let output = p.call::<&str, &str>("apply", &input).map_err(|e| {
-        tracing::error!(
-            plugin = %plugin.name,
-            namespace = %ctx.namespace,
-            deployment = %ctx.deployment_name,
-            error = %e,
-            "plugin apply() failed"
-        );
-        e
+    let config = manifest.config.clone();
+    BuiltManifest {
+        manifest,
+        config,
+        file_keys,
+        refused,
+    }
+}
+
+/// The scrubber for a call: every value passed for a `secret` field of the
+/// plugin's config schema, plus file-sourced values.
+fn secret_scrubber(plugin: &LoadedPlugin, built: &BuiltManifest, key: &str) -> SecretScrubber {
+    let secret_keys = plugin
+        .metadata
+        .config_schema
+        .iter()
+        .filter(|f| f.field_type == ConfigFieldType::Secret)
+        .map(|f| f.key.as_str());
+    let values = secret_keys
+        .chain(built.file_keys.iter().map(String::as_str))
+        .filter_map(|k| built.config.get(k));
+    SecretScrubber::new(values, key)
+}
+
+/// What extism did with a call.
+enum Invocation {
+    Output(String),
+    MissingExport,
+    Failed { code: &'static str, message: String },
+}
+
+fn invoke(manifest: &Manifest, export: &str, input: &str) -> Invocation {
+    // WASI is disabled; plugins reach the network only through extism's
+    // HTTP host function, scoped to allowed_hosts.
+    let mut plugin = match Plugin::new(manifest, [host_now_fn()], false) {
+        Ok(p) => p,
+        Err(e) => {
+            return Invocation::Failed {
+                code: codes::LOAD_FAILED,
+                message: format!("the WASM module failed to load: {e:#}"),
+            }
+        }
+    };
+    match plugin.call::<&str, &str>(export, input) {
+        Ok(output) => Invocation::Output(output.to_string()),
+        Err(e) => classify_call_error(&e, export),
+    }
+}
+
+/// Map an extism call error to a host code. extism reports a timeout as
+/// the bare message `timeout`, a missing export as `Function not found: X`,
+/// and a trap with a `wasm trap: ...` cause; anything else is text the
+/// plugin set itself through `error_set` (a `#[plugin_fn]` returning `Err`).
+fn classify_call_error(e: &anyhow::Error, export: &str) -> Invocation {
+    let root = e.root_cause().to_string();
+    let full = format!("{e:#}");
+    if root == "timeout" {
+        return Invocation::Failed {
+            code: codes::TIMEOUT,
+            message: format!("{export}() was stopped after running past its time limit"),
+        };
+    }
+    if full.starts_with("Function not found:") {
+        return Invocation::MissingExport;
+    }
+    if root.contains("ran out of fuel") {
+        return Invocation::Failed {
+            code: codes::TIMEOUT,
+            message: format!("{export}() ran out of fuel"),
+        };
+    }
+    if root == "oom" {
+        return Invocation::Failed {
+            code: codes::TRAP,
+            message: format!("{export}() ran out of memory"),
+        };
+    }
+    if full.contains("wasm trap") || full.contains("wasm backtrace") {
+        let reason = e
+            .chain()
+            .map(|c| c.to_string())
+            .find(|m| m.starts_with("wasm trap"))
+            .unwrap_or(root);
+        return Invocation::Failed {
+            code: codes::TRAP,
+            message: format!("{export}() trapped: {reason}"),
+        };
+    }
+    Invocation::Failed {
+        code: codes::UNSPECIFIED,
+        message: format!("{export}() returned an error: {full}"),
+    }
+}
+
+/// Most structured events read from one output; the rest are ignored.
+const MAX_RAW_EVENTS: usize = 100;
+
+struct ParsedOutput<T> {
+    result: T,
+    events: Vec<PluginEvent>,
+    /// One message per event that didn't parse, with its path.
+    bad_events: Vec<String>,
+}
+
+/// Parse a plugin's JSON output. `events` are read one by one, so a single
+/// malformed event costs only itself; any other problem fails the whole
+/// output with the serde path of the offending field.
+fn parse_output<T: serde::de::DeserializeOwned>(raw: &str) -> Result<ParsedOutput<T>, String> {
+    let mut value: serde_json::Value =
+        serde_json::from_str(raw).map_err(|e| format!("not valid JSON ({e})"))?;
+    let mut events = Vec::new();
+    let mut bad_events = Vec::new();
+    if let Some(obj) = value.as_object_mut() {
+        match obj.remove("events") {
+            None | Some(serde_json::Value::Null) => {}
+            Some(serde_json::Value::Array(items)) => {
+                let total = items.len();
+                for (i, item) in items.into_iter().enumerate().take(MAX_RAW_EVENTS) {
+                    match serde_path_to_error::deserialize::<_, PluginEvent>(item) {
+                        Ok(e) => events.push(e),
+                        Err(e) => {
+                            let path = e.path().to_string();
+                            let at = if path == "." {
+                                format!("events[{i}]")
+                            } else {
+                                format!("events[{i}].{path}")
+                            };
+                            bad_events.push(format!("{at}: {}", e.inner()));
+                        }
+                    }
+                }
+                if total > MAX_RAW_EVENTS {
+                    bad_events.push(format!(
+                        "events: {total} events; only the first {MAX_RAW_EVENTS} are read"
+                    ));
+                }
+            }
+            Some(_) => bad_events.push("events: expected an array".to_string()),
+        }
+    }
+    let result = serde_path_to_error::deserialize::<_, T>(value).map_err(|e| {
+        let path = e.path().to_string();
+        if path == "." {
+            e.inner().to_string()
+        } else {
+            format!("{path}: {}", e.inner())
+        }
     })?;
-    let result: PluginResult = serde_json::from_str(output)?;
+    Ok(ParsedOutput {
+        result,
+        events,
+        bad_events,
+    })
+}
 
-    // Drain any errors the plugin reported via result.errors. These replace
-    // extism_pdk::log!() calls, which cannot reach deckwatch's tracing subscriber.
-    for err in &result.errors {
-        tracing::error!(
-            plugin = %plugin.name,
-            namespace = %ctx.namespace,
-            deployment = %ctx.deployment_name,
-            "plugin reported error: {err}"
+/// Call one export of `plugin` through the funnel. `optional` exports
+/// (`metadata`, `deprovision`) that the plugin lacks succeed with
+/// `T::default()`. `input` builds the request JSON, given the call's
+/// `traceparent`.
+fn call_export<T: PluginOutput>(
+    plugin: &LoadedPlugin,
+    export: Export,
+    call: &PluginCall<'_>,
+    optional: bool,
+    input: impl FnOnce(Option<String>) -> serde_json::Result<String>,
+) -> CallOutcome<T> {
+    let span = plugin_span(export, &plugin.name, &plugin.metadata.version, call);
+    let start = Instant::now();
+    span.in_scope(|| {
+        tracing::debug!(plugin = %plugin.name, export = export.as_str(), "calling plugin");
+        let trace_context = plugin_events::trace_context(&span);
+        let trace_id = trace_context
+            .as_deref()
+            .and_then(plugin_events::trace_id_of)
+            .map(str::to_string);
+        let built = build_manifest(
+            plugin,
+            export != Export::Metadata,
+            call.telemetry.call_timeout(),
         );
-    }
+        let scrubber = secret_scrubber(plugin, &built, call.telemetry.encryption_key());
 
-    // Drain warnings logged by the plugin.
-    for warning in &result.warnings {
-        tracing::warn!(
-            plugin = %plugin.name,
-            namespace = %ctx.namespace,
-            deployment = %ctx.deployment_name,
-            "plugin reported warning: {warning}"
+        let mut host: Vec<PluginEvent> = built
+            .refused
+            .iter()
+            .map(|key| {
+                host_event(
+                    EventSeverity::Warning,
+                    codes::POLICY_REJECTED,
+                    format!("deckwatch did not pass {key} to the plugin: it is one of deckwatch's own secrets"),
+                    &scrubber,
+                )
+            })
+            .collect();
+
+        let fail = |code: &str, message: String, host: &mut Vec<PluginEvent>| {
+            host.push(host_event(EventSeverity::Error, code, message, &scrubber));
+        };
+
+        let (result, structured): (Option<T>, Vec<PluginEvent>) = match input(trace_context) {
+            Err(e) => {
+                fail(
+                    codes::LOAD_FAILED,
+                    format!("deckwatch could not encode the {}() input: {e}", export.as_str()),
+                    &mut host,
+                );
+                (None, Vec::new())
+            }
+            Ok(input) => match invoke(&built.manifest, export.as_str(), &input) {
+                Invocation::Output(raw) => match parse_output::<T>(&raw) {
+                    Ok(parsed) => {
+                        for bad in parsed.bad_events {
+                            host.push(host_event(
+                                EventSeverity::Warning,
+                                codes::OUTPUT_INVALID,
+                                format!("ignored a malformed event: {bad}"),
+                                &scrubber,
+                            ));
+                        }
+                        (Some(parsed.result), parsed.events)
+                    }
+                    Err(err) => {
+                        fail(
+                            codes::OUTPUT_INVALID,
+                            format!(
+                                "{}() returned output deckwatch can't read: {err}",
+                                export.as_str()
+                            ),
+                            &mut host,
+                        );
+                        (None, Vec::new())
+                    }
+                },
+                Invocation::MissingExport if optional => (Some(T::default()), Vec::new()),
+                Invocation::MissingExport => {
+                    fail(
+                        codes::LOAD_FAILED,
+                        format!("the plugin has no `{}` export", export.as_str()),
+                        &mut host,
+                    );
+                    (None, Vec::new())
+                }
+                Invocation::Failed { code, message } => {
+                    fail(code, message, &mut host);
+                    (None, Vec::new())
+                }
+            },
+        };
+
+        let legacy = result.as_ref().map(T::legacy).unwrap_or_default();
+        let (events, over_cap) =
+            plugin_events::normalize(&plugin.name, host, &structured, legacy, &scrubber);
+        finish_call(
+            &plugin.name,
+            export,
+            result.is_some(),
+            start.elapsed(),
+            &events,
+            over_cap,
+            call.telemetry,
         );
-    }
+        CallOutcome {
+            plugin: plugin.name.clone(),
+            export,
+            result,
+            events,
+            trace_id,
+            scrubber: Arc::new(scrubber),
+            trigger: call.trigger,
+        }
+    })
+}
 
-    tracing::info!(
-        plugin = %plugin.name,
-        namespace = %ctx.namespace,
-        deployment = %ctx.deployment_name,
-        env_vars = result.env_vars.len(),
-        sidecars = result.sidecars.len(),
-        k8s_resources = result.kubernetes_resources.len(),
-        service_account = ?result.service_account_name,
-        errors = result.errors.len(),
-        warnings = result.warnings.len(),
-        "plugin apply() completed"
+/// Call the plugin's `provision()` export.
+pub fn run_provision(
+    plugin: &LoadedPlugin,
+    req: &ResourceProvisionRequest,
+    call: &PluginCall<'_>,
+) -> CallOutcome<ResourceProvisionResult> {
+    let outcome = call_export::<ResourceProvisionResult>(
+        plugin,
+        Export::Provision,
+        call,
+        false,
+        |trace_context| {
+            let mut req = req.clone();
+            req.trace_context = trace_context;
+            serde_json::to_string(&req)
+        },
     );
-    Ok(result)
+    if let Some(result) = &outcome.result {
+        tracing::info!(
+            plugin = %plugin.name,
+            namespace = %req.namespace,
+            application = %req.application_name,
+            resource_id = %req.resource_id,
+            state_keys = result.state.len(),
+            k8s_resources = result.kubernetes_resources.len(),
+            events = outcome.events.len(),
+            "plugin provision() completed"
+        );
+    }
+    outcome
+}
+
+/// Call the plugin's `deprovision()` export. A plugin without one succeeds
+/// with an empty result. Errors never block removal of the resource record;
+/// callers return the events to the operator.
+pub fn run_deprovision(
+    plugin: &LoadedPlugin,
+    req: &ResourceDeprovisionRequest,
+    call: &PluginCall<'_>,
+) -> CallOutcome<ResourceDeprovisionResult> {
+    let outcome = call_export::<ResourceDeprovisionResult>(
+        plugin,
+        Export::Deprovision,
+        call,
+        true,
+        |trace_context| {
+            let mut req = req.clone();
+            req.trace_context = trace_context;
+            serde_json::to_string(&req)
+        },
+    );
+    if outcome.result.is_some() {
+        tracing::info!(
+            plugin = %plugin.name,
+            resource_id = %req.resource_id,
+            events = outcome.events.len(),
+            "plugin deprovision() completed"
+        );
+    }
+    outcome
+}
+
+/// Call the plugin's `apply()` export.
+pub fn run_plugin(
+    plugin: &LoadedPlugin,
+    ctx: &PluginContext,
+    call: &PluginCall<'_>,
+) -> CallOutcome<PluginResult> {
+    let outcome =
+        call_export::<PluginResult>(plugin, Export::Apply, call, false, |trace_context| {
+            let mut ctx = ctx.clone();
+            ctx.trace_context = trace_context;
+            serde_json::to_string(&ctx)
+        });
+    if let Some(result) = &outcome.result {
+        tracing::debug!(
+            plugin = %plugin.name,
+            namespace = %ctx.namespace,
+            deployment = %ctx.deployment_name,
+            env_vars = result.env_vars.len(),
+            sidecars = result.sidecars.len(),
+            k8s_resources = result.kubernetes_resources.len(),
+            service_account = ?result.service_account_name,
+            events = outcome.events.len(),
+            "plugin apply() completed"
+        );
+    }
+    outcome
+}
+
+/// Call the plugin's `metadata()` export. A plugin without one gets the
+/// default metadata.
+fn run_metadata(plugin: &LoadedPlugin, call: &PluginCall<'_>) -> CallOutcome<PluginMetadata> {
+    call_export::<PluginMetadata>(plugin, Export::Metadata, call, true, |_| Ok(String::new()))
 }
 
 fn apply_env_vars(
@@ -1839,17 +2661,25 @@ fn volume_spec_to_k8s(v: &VolumeSpec) -> Volume {
     }
 }
 
+/// Bind the pod to the ServiceAccount a plugin asked for, unless it already
+/// uses another non-default one. A refusal is returned as a
+/// `plugin.policy_rejected` warning.
 fn apply_service_account(
     plugin: &LoadedPlugin,
     sa_name: String,
     pod_spec: &mut k8s_openapi::api::core::v1::PodSpec,
     dep_annotations: &mut BTreeMap<String, String>,
-) {
+    scrubber: &SecretScrubber,
+) -> Option<PluginEvent> {
     let current = pod_spec
         .service_account_name
         .as_deref()
         .unwrap_or("default");
     if current != "default" {
+        // On update the pod usually already runs as the plugin's own SA.
+        if current == sa_name {
+            return None;
+        }
         tracing::debug!(
             plugin = %plugin.name,
             current_sa = current,
@@ -1857,10 +2687,19 @@ fn apply_service_account(
             "skipping service_account_name — pod already has a non-default service account"
         );
         metrics::record_plugin_error(&plugin.name, "sa_conflict");
-        return;
+        return Some(host_event(
+            EventSeverity::Warning,
+            codes::POLICY_REJECTED,
+            format!(
+                "kept service account {current}: the plugin asked for {sa_name}, and deckwatch \
+                 never replaces a non-default service account"
+            ),
+            scrubber,
+        ));
     }
     pod_spec.service_account_name = Some(sa_name.clone());
     dep_annotations.insert(format!("deckwatch.plugin-sa/{}", plugin.name), sa_name);
+    None
 }
 
 fn build_resources(
@@ -2390,12 +3229,14 @@ mod tests {
         };
         let mut annotations = BTreeMap::new();
 
-        apply_service_account(
+        let refusal = apply_service_account(
             &plugin,
             "my-sa".to_string(),
             &mut pod_spec,
             &mut annotations,
+            &SecretScrubber::default(),
         );
+        assert!(refusal.is_none());
 
         assert_eq!(
             pod_spec.service_account_name.as_deref(),
@@ -2418,12 +3259,14 @@ mod tests {
         };
         let mut annotations = BTreeMap::new();
 
-        apply_service_account(
+        let refusal = apply_service_account(
             &plugin,
             "new-sa".to_string(),
             &mut pod_spec,
             &mut annotations,
+            &SecretScrubber::default(),
         );
+        assert_eq!(refusal.unwrap().code, codes::POLICY_REJECTED);
 
         assert_eq!(
             pod_spec.service_account_name.as_deref(),
@@ -2533,3 +3376,7 @@ mod tests {
         assert_eq!(inherited_env_var_from("aws", "UNSET", |_| None), None);
     }
 }
+
+#[cfg(test)]
+#[path = "plugins_funnel_tests.rs"]
+mod funnel_tests;

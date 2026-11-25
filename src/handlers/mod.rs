@@ -25,6 +25,7 @@ pub mod mcp_telemetry;
 pub mod monitoring;
 pub mod namespaces;
 pub mod nodes;
+pub mod plugin_status;
 pub mod plugins;
 pub mod pods;
 pub mod portforward;

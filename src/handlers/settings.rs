@@ -815,6 +815,10 @@ pub async fn put_settings(
     upsert_settings_to_db(&state.db, &settings)
         .await
         .map_err(|e| AppError::BadRequest(format!("failed to save settings: {e}")))?;
+    // Disabled and removed plugins no longer have a status.
+    state
+        .plugin_telemetry
+        .keep_plugins(crate::plugins::enabled_plugin_names(&settings));
 
     for change in &endpoint_changes {
         if let Err(e) = crate::audit::log_action(

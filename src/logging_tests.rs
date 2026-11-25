@@ -42,6 +42,9 @@ fn default_filter_keeps_plugin_and_mcp_k8s_logs() {
         tracing::info!(target: "mcp_k8s::resources::secret", "secret values decoded");
         tracing::info!(target: "deckwatch::handlers::mcp", "mcp tool call");
         tracing::info!(target: "tower_http::trace::on_response", "finished processing request");
+        // The OpenTelemetry SDK's export errors (its crates' names are the targets).
+        tracing::error!(target: "opentelemetry_sdk", "BatchSpanProcessor.ExportError");
+        tracing::warn!(target: "opentelemetry-otlp", "export failed");
     });
     assert_eq!(
         kept,
@@ -51,6 +54,8 @@ fn default_filter_keeps_plugin_and_mcp_k8s_logs() {
             "mcp_k8s::resources::secret",
             "deckwatch::handlers::mcp",
             "tower_http::trace::on_response",
+            "opentelemetry_sdk",
+            "opentelemetry-otlp",
         ]
     );
 }
@@ -64,6 +69,7 @@ fn default_filter_drops_debug_and_other_targets() {
         tracing::info!(target: "extism::plugin", "extism internals");
         tracing::info!(target: "kube_client::client", "dependency");
         tracing::info!(target: "hyper_util::client::legacy", "dependency");
+        tracing::info!(target: "opentelemetry_sdk", "BatchSpanProcessor.ThreadStarted");
     });
     assert!(kept.is_empty(), "unexpected events kept: {kept:?}");
 }
