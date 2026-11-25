@@ -65,6 +65,11 @@ pub async fn run() {
     )
     .init();
     telemetry.log();
+    // Plugins get the trace context of their call (`trace_context`), so
+    // their own API calls join the trace, only while traces are exported.
+    if telemetry.telemetry().is_some_and(|t| t.signals().traces) {
+        plugin_events::install_trace_context_provider(plugin_events::otel_traceparent);
+    }
 
     metrics::init();
 
