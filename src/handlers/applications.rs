@@ -404,6 +404,7 @@ pub async fn delete(
         .exec(&state.db)
         .await
         .map_err(|e| AppError::BadRequest(format!("database error: {e}")))?;
+    state.plugin_telemetry.forget_application(&app_id);
 
     Ok(StatusCode::NO_CONTENT)
 }

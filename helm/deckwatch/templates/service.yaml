@@ -24,3 +24,4 @@ spec:
       name: http
   selector:
     {{- include "deckwatch.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: server

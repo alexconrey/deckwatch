@@ -9,6 +9,10 @@ separately:
 | **Collector sidecar** | Receives spans from the application and forwards them to the backend | The [`deckwatch-plugin-otel`](https://github.com/alexconrey/deckwatch-plugin-otel) plugin ([§5](#5-the-opentelemetry-collector-plugin)) |
 | **Trace queries** | Lets deckwatch list recent traces and link into the backend's UI | The `tracing` block of deckwatch's settings ([§6](#6-trace-queries-and-deep-links)) |
 
+These parts are about your workloads' traces. deckwatch can also export its **own** traces, log
+lines and metrics over OTLP. That export is separate and off by default; see
+[§10](#10-deckwatchs-own-telemetry).
+
 ```
  pod ──────────────────────────────────────────┐
  │ app container ──OTLP──▶ otel-collector       │──OTLP──▶ Tempo / Jaeger
@@ -267,7 +271,7 @@ An empty `ui_url` hides the link.
 | `backend_kind` | Deep links | `tempo` or `jaeger`. Blank or unknown means `tempo`. |
 | `query_url` | Query proxy | HTTP base URL of a Jaeger query API, such as `http://<jaeger>:16686`. Empty disables queries. Tempo does not serve this API ([§6.1](#61-trace-query-proxy)). |
 | `ui_url` | Deep links | Public base URL of Grafana (for Tempo) or the Jaeger UI. |
-| `otlp_endpoint` | Operators | Where the backend receives OTLP. deckwatch itself does not use it, and plugins cannot read it, so copy it into the plugin's `OTLP_ENDPOINT`. |
+| `otlp_endpoint` | Operators | Where the backend receives OTLP. deckwatch itself does not use it, and plugins cannot read it, so copy it into the plugin's `OTLP_ENDPOINT`. deckwatch's own export is configured separately ([§10](#10-deckwatchs-own-telemetry)). |
 | `otlp_insecure` | Operators | `true` when that endpoint is plaintext. Copy it into the plugin's `OTLP_INSECURE`. |
 
 Set these through Helm under `settings.defaults.tracing`. The chart renders them into the
@@ -346,7 +350,159 @@ match.
 - **Trace queries** go only to the configured `query_url`, with a strict allowlist on the
   service name and a capped result size.
 
-## 10. Known limitations (deckwatch 0.6.x)
+## 10. deckwatch's own telemetry
+
+deckwatch can export what it records about itself over OTLP: its own traces, its log lines and
+metrics. This includes the embedded mcp-k8s library, which implements most MCP tools, and plugin
+log lines. It is unrelated to the collector sidecar in [§5](#5-the-opentelemetry-collector-plugin),
+which handles your workloads' telemetry. Export is **off** unless an OTLP endpoint is configured,
+and with no endpoint deckwatch behaves exactly as before.
+
+### 10.1 What is exported
+
+| Signal | What | Notes |
+|---|---|---|
+| Traces | One span per HTTP request (`http`, with `method`, `path` and `version` attributes), plus any span deckwatch or a library opens. Each MCP request also gets a SERVER span from mcp-k8s, named `tools/call <tool>` (or the method), with the OpenTelemetry MCP attributes (see [§10.5](#105-mcp-requests)) | Requests include MCP calls (`POST /mcp`), health probes and `/metrics` scrapes. Drop the latter in your collector if you don't want them. |
+| Logs | Every log line that passes the log filter, as an OTLP log record carrying the trace and span id of the span it was logged in | Includes mcp-k8s's `tool call finished` / `request finished` line for every MCP request (never argument values outside the allowlist), other mcp-k8s library lines and plugin lines (target `extism::pdk`, attribute `plugin` = the extism instance id). Lines from background tasks (GitOps poller, plugin reconciler) have no span, so no trace id. |
+| Metrics | Log events with fields named `monotonic_counter.*`, `counter.*` or `histogram.*` | mcp-k8s's `mcp.server.operation.duration` histogram (seconds), one observation per MCP request. Prometheus `/metrics` is unchanged and separate. |
+
+- **One filter for both outputs.** The log filter (`RUST_LOG`, Helm `logFilter`) decides what is
+  recorded, for stdout and OTLP alike.
+- **No self-export.** Events from the HTTP and TLS stack used for the export (`hyper`, `h2`,
+  `reqwest`, `rustls`) and from the OpenTelemetry SDK are never exported, even with
+  `RUST_LOG=trace`. They still go to stdout.
+- **Traces-only backends.** When logs are not exported, log lines inside a span are attached to it
+  as span events instead, so a backend that accepts only traces still shows them. Error lines also
+  mark their span as failed.
+- **Resource:** `service.name=deckwatch` (`OTEL_SERVICE_NAME` overrides it) and `service.version`
+  (the deckwatch version). The chart adds `k8s.namespace.name` and `k8s.pod.name`.
+- **Telemetry carries no sensitive values.** Keep it that way: never put tool arguments, Secret
+  data, environment values or manifest bodies in log or span fields.
+
+### 10.2 Configuration
+
+deckwatch reads the standard OpenTelemetry environment variables once, at startup.
+
+| Variable | Effect |
+|---|---|
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | OTLP/HTTP base URL; deckwatch appends `/v1/traces`, `/v1/logs` and `/v1/metrics`. **Setting it (or a per-signal endpoint) turns export on.** |
+| `OTEL_EXPORTER_OTLP_{TRACES,METRICS,LOGS}_ENDPOINT` | Full URL for one signal. On its own, it turns on only that signal. |
+| `OTEL_{TRACES,METRICS,LOGS}_EXPORTER` | `otlp` (default) or `none`. |
+| `OTEL_EXPORTER_OTLP_PROTOCOL` (and per signal) | Must be unset or `http/protobuf`. `grpc` and `http/json` are refused with an error in the log, and that signal is not exported. |
+| `OTEL_EXPORTER_OTLP_HEADERS` (and per signal) | Headers such as credentials, `name=value,...`. |
+| `OTEL_EXPORTER_OTLP_TIMEOUT`, `OTEL_EXPORTER_OTLP_COMPRESSION` | Export deadline (default 10 s) and `gzip`. |
+| `OTEL_SERVICE_NAME`, `OTEL_RESOURCE_ATTRIBUTES` | Resource attributes. |
+| `OTEL_TRACES_SAMPLER`, `OTEL_TRACES_SAMPLER_ARG` | Sampling. The default, `parentbased_always_on`, keeps every trace. |
+| `OTEL_BSP_*`, `OTEL_BLRP_*`, `OTEL_METRIC_EXPORT_INTERVAL` | Batching (5 s for spans and logs) and the metric interval (60 s). |
+| `OTEL_SDK_DISABLED=true` | Turns export off. |
+
+**TLS and proxies.** Export goes through deckwatch's shared outbound HTTP client
+([docs/TLS.md](TLS.md)). It trusts the system roots plus `DECKWATCH_EXTRA_CA_FILE` (Helm
+`outbound.extraCaBundle`) and honours `HTTPS_PROXY`/`NO_PROXY`, with a 5 s connect and 10 s total
+timeout. `OTEL_EXPORTER_OTLP_CERTIFICATE`, `..._CLIENT_CERTIFICATE` and `..._CLIENT_KEY` are
+ignored with a warning; mutual TLS is not supported.
+
+In the chart, set `telemetry.otlp`:
+
+```yaml
+telemetry:
+  otlp:
+    enabled: true
+    endpoint: http://otel-collector.observability:4318   # OTLP/HTTP, not the gRPC port
+    headers:                       # optional: OTEL_EXPORTER_OTLP_HEADERS from a Secret
+      secretName: otlp-credentials
+      key: headers
+    traces: true
+    metrics: true
+    logs: true
+    serviceName: deckwatch
+    resourceAttributes:
+      deployment.environment: production
+    sampler: ""                    # e.g. parentbased_traceidratio
+    samplerArg: ""                 # e.g. "0.25"
+```
+
+| Value | Default | Sets |
+|---|---|---|
+| `telemetry.otlp.enabled` | `false` | Renders the variables below. Rendering fails if neither an endpoint nor `tracing.enabled` is set. |
+| `telemetry.otlp.endpoint` | `""` | `OTEL_EXPORTER_OTLP_ENDPOINT`. Empty with `tracing.enabled` means the bundled backend ([§10.3](#103-with-the-otel-plugin-and-the-bundled-backend)). |
+| `telemetry.otlp.headers.secretName`, `.key` | `""`, `headers` | `OTEL_EXPORTER_OTLP_HEADERS` from that Secret key. |
+| `telemetry.otlp.traces`, `.metrics`, `.logs` | `true` | `OTEL_{TRACES,METRICS,LOGS}_EXPORTER` (`otlp` or `none`). |
+| `telemetry.otlp.serviceName` | `deckwatch` | `OTEL_SERVICE_NAME`. |
+| `telemetry.otlp.resourceAttributes` | `{}` | Added to `OTEL_RESOURCE_ATTRIBUTES` after `k8s.namespace.name` and `k8s.pod.name`. Values must not contain commas or `=`. |
+| `telemetry.otlp.sampler`, `.samplerArg` | `""` | `OTEL_TRACES_SAMPLER`, `OTEL_TRACES_SAMPLER_ARG`. |
+
+**Why not `tracing.otlp_endpoint`?** deckwatch's export does not fall back to the
+`tracing.otlp_endpoint` setting ([§6.3](#63-settings-and-valuesyaml)), for four reasons:
+
+- **Different format.** That setting is documented as a gRPC `host:port` for collectors.
+  deckwatch exports OTLP/HTTP, which needs a URL and usually a different port (4318, not 4317).
+- **Exfiltration risk.** Settings can be changed at runtime through `PUT /api/settings`, and that
+  API is not authenticated yet. An export endpoint read from settings would let anyone who can
+  reach deckwatch redirect its telemetry, and any credential headers, to a host of their choosing.
+  The endpoint is therefore deployment configuration (environment variables), like
+  `DECKWATCH_ALLOW_INSECURE_ENDPOINTS` ([docs/TLS.md](TLS.md)).
+- **Startup only.** The pipeline is built at startup, before the database is read; a settings
+  change would not take effect without a restart.
+- **Settings are already split.** The query proxy reads the `tracing` block from the ConfigMap,
+  not the database. Coupling export to that block would inherit the confusion.
+
+Point both at the same backend when that is what you want ([§10.3](#103-with-the-otel-plugin-and-the-bundled-backend)).
+
+### 10.3 With the otel plugin and the bundled backend
+
+- **The otel plugin** (§5) adds a collector sidecar to *your workloads*. deckwatch doesn't use it.
+  To see deckwatch next to your applications, export both to the same backend or central
+  collector. Remember that deckwatch needs that backend's **OTLP/HTTP** port (4318), while the
+  plugin is often configured for gRPC (4317).
+- **The bundled Tempo or Jaeger** ([§4.2](#42-bundled-backend-helm)) accepts traces only. Enable
+  `telemetry.otlp` with an empty `endpoint` and `tracing.enabled: true`. The chart then points
+  deckwatch at `http://<release>-<backend>:4318` and turns metrics and logs off, so deckwatch's log
+  lines arrive as span events. In Jaeger, pick the `deckwatch` service; in Grafana, query Tempo
+  for `{resource.service.name="deckwatch"}`.
+- **For logs and metrics,** send to an OpenTelemetry Collector that forwards traces to Tempo or
+  Jaeger, logs to Loki or similar, and metrics to Prometheus or Mimir. Log records carry trace ids,
+  so a log line links to its trace.
+
+### 10.4 Troubleshooting and limitations
+
+| Symptom or limitation | Explanation |
+|---|---|
+| Startup logs `exporting deckwatch's telemetry over OTLP (http/protobuf)` | Export is on; the line lists the signals and the endpoint (without credentials). No such line means export is off. |
+| `OTLP export request failed` with a reason (unknown issuer, connection refused, `HTTP 401`, `HTTP 404`) | Logged once per signal each time the failure changes, and `OTLP export requests succeed again` once it recovers. Unknown issuer: add the CA with `outbound.extraCaBundle`. `HTTP 404` on logs or metrics: the backend accepts traces only, so turn those signals off. |
+| `BatchSpanProcessor.ExportError` / `Export.Failed.Exhausted` (target `opentelemetry_sdk`, `opentelemetry-otlp`) | The SDK's own report for each failed batch, which is then dropped. Telemetry never blocks requests: when the backend is down, data is lost, not queued without bound. |
+| `OTEL_EXPORTER_OTLP_PROTOCOL=grpc is not supported` | deckwatch exports `http/protobuf` only. Use the backend's OTLP/HTTP port. |
+| HTTP spans are named `http`, with kind `internal` | MCP requests have semantic-convention SERVER spans ([§10.5](#105-mcp-requests)); HTTP ones come with the HTTP instrumentation planned next. An MCP request with a remote parent has its SERVER span in the caller's trace, apart from the `http` span. |
+| The last few seconds of telemetry are lost on shutdown | deckwatch has no graceful shutdown yet, so the final batch (up to 5 s) is not flushed. |
+| The `plugin` attribute is an instance id, not the plugin name | That is what extism records. The plugin's message usually names it. |
+
+### 10.5 MCP requests
+
+Every `POST /mcp` request is one SERVER span, one `mcp.server.operation.duration` observation and
+one log line, whether the tool is deckwatch's own or one of mcp-k8s's. The names follow the
+OpenTelemetry GenAI MCP conventions (status *Development*), implemented in
+`mcp_k8s::telemetry::semconv`.
+
+- **Span:** `tools/call <tool>`, or just the method for other requests. A tool name deckwatch
+  doesn't serve never appears in a span name. Attributes include `mcp.method.name`,
+  `gen_ai.tool.name`, `jsonrpc.request.id`, `mcp.session.id`, `mcp_k8s.action` (`read`, `write`,
+  `delete` or `exec`), `mcp_k8s.decision`, `mcp_k8s.outcome`, `error.type`, the target
+  (`k8s.namespace.name`, `mcp_k8s.resource.kind`, `mcp_k8s.resource.name`), the argument keys
+  and the allowlisted argument values (`mcp_k8s.tool.arguments`).
+- **Client:** in a session started by `initialize`, `mcp_k8s.client.name` and
+  `mcp_k8s.client.version`. The client reports these itself: a label, never an identity.
+- **Trace context:** the caller's `params._meta.traceparent` (and `tracestate`) is the span's
+  parent, as the MCP conventions specify; the HTTP `traceparent` header is the fallback, or a link
+  when both are present. The span's trace id is also recorded as `trace_id`, so the JSON log lines
+  of the request carry it.
+- **Metric:** `mcp.server.operation.duration`, in seconds, with the conventions' buckets and only
+  `mcp.method.name`, `gen_ai.tool.name`, `gen_ai.operation.name`, `error.type`, `mcp_k8s.action` and
+  `mcp_k8s.decision` as attributes. The namespace, resource, client and session are never metric
+  attributes.
+- mcp-k8s reports the metric as log events on the target `mcp_k8s::telemetry::metrics`. deckwatch
+  keeps them out of stdout and OTLP logs; only the metrics pipeline reads them.
+
+## 11. Known limitations (deckwatch 0.6.x)
 
 | Limitation | Effect | Workaround |
 |---|---|---|

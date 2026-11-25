@@ -114,13 +114,21 @@ paths:
     post:
       tags: [Deployments]
       summary: Create a deployment
+      description: |
+        Plugins run before the Deployment is created. Their events (warnings
+        included, even on success) are returned in `plugin_events`; a failing
+        plugin is skipped and never fails the request.
       requestBody:
         required: true
         content:
           application/json:
             schema: { $ref: "#/components/schemas/CreateDeploymentRequest" }
       responses:
-        "201": { description: Created }
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DeploymentWriteResponse" }
 
   /api/namespaces/{ns}/deployments/{name}:
     parameters:
@@ -138,13 +146,18 @@ paths:
     put:
       tags: [Deployments]
       summary: Update a deployment (image, replicas, env, resources, probes)
+      description: Plugins run on the updated Deployment; see `plugin_events`.
       requestBody:
         required: true
         content:
           application/json:
             schema: { $ref: "#/components/schemas/UpdateDeploymentRequest" }
       responses:
-        "200": { description: Updated }
+        "200":
+          description: Updated
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DeploymentWriteResponse" }
     delete:
       tags: [Deployments]
       summary: Delete a deployment
@@ -731,6 +744,157 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/OutboundStatus" }
 
+  # ------------------------------------------- plugin-provisioned resources
+  /api/namespaces/{ns}/applications/{name}/resources:
+    parameters:
+      - $ref: "#/components/parameters/Namespace"
+      - $ref: "#/components/parameters/Name"
+    get:
+      tags: [Plugins]
+      summary: List an application's plugin-provisioned resources
+      responses:
+        "200":
+          description: Provisioned resources
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/ProvisionedResource" }
+
+  /api/namespaces/{ns}/applications/{name}/resources/{plugin}/{resource_id}:
+    parameters:
+      - $ref: "#/components/parameters/Namespace"
+      - $ref: "#/components/parameters/Name"
+      - in: path
+        name: plugin
+        required: true
+        schema: { type: string }
+        description: Configured plugin name
+      - in: path
+        name: resource_id
+        required: true
+        schema: { type: string }
+        description: A resource id the plugin declares in `metadata().resources`
+    post:
+      tags: [Plugins]
+      summary: Provision a resource through its plugin
+      description: |
+        Calls the plugin's `provision()` and stores the result. What the plugin
+        reported (warnings included) is returned in `plugin_events`. If the call
+        fails outright, nothing is stored and the reply is 502 with the events.
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ProvisionRequest" }
+      responses:
+        "201":
+          description: Provisioned
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ProvisionedResource" }
+        "502":
+          description: The plugin call failed
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PluginFailedError" }
+    patch:
+      tags: [Plugins]
+      summary: Re-run provision() with the stored fields and update the record
+      responses:
+        "200":
+          description: Refreshed
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ProvisionedResource" }
+        "502":
+          description: The plugin call failed
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PluginFailedError" }
+    delete:
+      tags: [Plugins]
+      summary: Deprovision a resource and remove its record
+      description: |
+        Calls the plugin's `deprovision()` (if it has one), then removes the
+        record whatever the outcome. Returns the plugin's message about what it
+        did and didn't clean up, and its events.
+      responses:
+        "200":
+          description: Record removed
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DeprovisionResponse" }
+
+  # ----------------------------------------------------------- plugin status
+  /api/plugin-status:
+    get:
+      tags: [Plugins]
+      summary: Current state of every plugin call target
+      description: |
+        One row per target: a provisioned resource, a plugin's `apply()` for an
+        application (`resource_id` empty), or the plugin itself (`namespace`
+        and `application` empty; fetch and load). Current state only: the
+        latest events, not a history. Most severe first, then most recently
+        updated. Rows in namespaces outside the allowlist are omitted.
+      parameters:
+        - in: query
+          name: health
+          required: false
+          schema: { type: string }
+          description: Comma-separated healths to include, e.g. `failing,degraded`
+        - in: query
+          name: plugin
+          required: false
+          schema: { type: string }
+        - in: query
+          name: namespace
+          required: false
+          schema: { type: string }
+      responses:
+        "200":
+          description: Plugin status rows
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/PluginStatus" }
+
+  /api/namespaces/{ns}/applications/{name}/plugin-status:
+    parameters:
+      - $ref: "#/components/parameters/Namespace"
+      - $ref: "#/components/parameters/Name"
+    get:
+      tags: [Plugins]
+      summary: Plugin status rows for one application
+      responses:
+        "200":
+          description: Plugin status rows
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/PluginStatus" }
+
+  /api/plugins/{name}/status:
+    parameters:
+      - in: path
+        name: name
+        required: true
+        schema: { type: string }
+        description: Configured plugin name
+    get:
+      tags: [Plugins]
+      summary: Plugin status rows for one plugin, its load included
+      responses:
+        "200":
+          description: Plugin status rows
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/PluginStatus" }
+
   # -------------------------------------------------------------- plugins
   /api/plugins:
     get:
@@ -1025,6 +1189,139 @@ components:
             ingresses:
               type: array
               items: { $ref: "#/components/schemas/IngressSummary" }
+
+    DeploymentWriteResponse:
+      description: A created or updated Deployment, plus what its plugins reported.
+      allOf:
+        - $ref: "#/components/schemas/DeploymentDetailResponse"
+        - type: object
+          properties:
+            plugin_events:
+              type: array
+              description: Omitted when no plugin reported anything.
+              items: { $ref: "#/components/schemas/PluginEventReport" }
+
+    PluginEventReport:
+      type: object
+      description: |
+        A notice, warning or error from a plugin call: the SDK's `PluginEvent`
+        plus the plugin and export that reported it. All text is plugin-supplied
+        and untrusted; deckwatch caps it (2 KB per message, 20 events per call),
+        strips control characters, puts it on one line and masks the plugin's
+        secret config values before returning it. Render it as text only.
+      required: [plugin, export, severity, code, message, retryable]
+      properties:
+        plugin: { type: string, description: Configured plugin name, example: aws }
+        export:
+          type: string
+          description: The call that reported it
+          enum: [fetch, metadata, apply, provision, deprovision, validate]
+        severity: { type: string, enum: [info, warning, error] }
+        code:
+          type: string
+          description: |
+            `<plugin>.<code>` for plugin events. Host codes: `plugin.unspecified`
+            (a plugin message without a code, including legacy `errors`,
+            `warnings` and `message` strings), `plugin.fetch_failed`,
+            `plugin.checksum_mismatch`, `plugin.load_failed`, `plugin.trap`,
+            `plugin.timeout`, `plugin.output_invalid`, `plugin.k8s_apply_failed`,
+            `plugin.policy_rejected`, and the informational
+            `plugin.fields_released`.
+          example: aws.assume_role_failed
+        message: { type: string }
+        resource_id: { type: string, description: The plugin resource id the event is about }
+        object: { $ref: "#/components/schemas/KubernetesObjectRef" }
+        retryable: { type: boolean, description: Whether retrying unchanged may succeed }
+        hint: { type: string, description: A suggested fix }
+        trace_id: { type: string, description: Trace id of the call, when deckwatch exports traces }
+
+    KubernetesObjectRef:
+      type: object
+      description: A Kubernetes object in the application's namespace.
+      properties:
+        api_version: { type: string, example: v1 }
+        kind: { type: string, example: ServiceAccount }
+        name: { type: string }
+
+    ProvisionRequest:
+      type: object
+      properties:
+        fields:
+          type: object
+          additionalProperties: { type: string }
+          description: Values for the resource's declared fields
+
+    ProvisionedResource:
+      type: object
+      properties:
+        id: { type: string }
+        application_id: { type: string, example: shop/web }
+        plugin_name: { type: string }
+        resource_id: { type: string }
+        fields: { type: object, additionalProperties: { type: string } }
+        state: { type: object, additionalProperties: { type: string } }
+        annotations: { type: object, additionalProperties: { type: string } }
+        sidecars: { type: array, items: { type: object } }
+        created_at: { type: string }
+        updated_at: { type: string }
+        plugin_events:
+          type: array
+          description: What the plugin reported on this provision or refresh. Omitted in lists.
+          items: { $ref: "#/components/schemas/PluginEventReport" }
+
+    DeprovisionResponse:
+      type: object
+      required: [message, plugin_events, kubernetes_resource_deletions]
+      properties:
+        message:
+          type: string
+          description: What the plugin says it did and didn't clean up; empty if nothing.
+        plugin_events:
+          type: array
+          items: { $ref: "#/components/schemas/PluginEventReport" }
+        kubernetes_resource_deletions:
+          type: array
+          description: The objects the plugin's deprovision() asked deckwatch to delete, and what happened to each.
+          items:
+            type: object
+            properties:
+              api_version: { type: string }
+              kind: { type: string }
+              name: { type: string }
+              namespace: { type: string }
+              outcome: { type: string, enum: [deleted, not_found, refused, failed] }
+              reason: { type: string, description: Why it was refused or failed }
+
+    PluginStatus:
+      type: object
+      required: [namespace, application, plugin, resource_id, health, last_export, last_events, consecutive_failures, last_changed_at, updated_at]
+      properties:
+        namespace: { type: string, description: Empty for plugin-wide rows }
+        application: { type: string, description: Empty for plugin-wide rows }
+        plugin: { type: string }
+        resource_id: { type: string, description: The plugin resource id; empty for apply() and plugin-wide rows }
+        health: { type: string, enum: [healthy, degraded, failing] }
+        last_export: { type: string, description: The export of the last recorded call }
+        last_events:
+          type: array
+          description: The latest call's events (at most 10)
+          items: { $ref: "#/components/schemas/PluginEventReport" }
+        trace_id: { type: string }
+        first_failure_at: { type: string, format: date-time, nullable: true, description: When the current run of failures started }
+        consecutive_failures: { type: integer }
+        last_success_at: { type: string, format: date-time, nullable: true }
+        last_changed_at: { type: string, format: date-time, description: When the health last changed }
+        updated_at: { type: string, format: date-time }
+
+    PluginFailedError:
+      type: object
+      required: [error, message, plugin_events]
+      properties:
+        error: { type: string, enum: [plugin_failed] }
+        message: { type: string, description: "The first error, as `code: message`" }
+        plugin_events:
+          type: array
+          items: { $ref: "#/components/schemas/PluginEventReport" }
 
     PodSummary:
       type: object

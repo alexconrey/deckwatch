@@ -61,6 +61,41 @@ export interface ProbeConfig {
 export interface DeploymentDetailResponse extends DeploymentDetail {
   pods: PodSummary[];
   ingresses: IngressSummary[];
+  /** What the plugins that ran on a create or update reported. */
+  plugin_events?: PluginEventReport[];
+}
+
+// --- Plugin events ---
+
+/** Severity of a plugin event. The backend reports unknown ones as warnings. */
+export type PluginEventSeverity = "info" | "warning" | "error";
+
+/** A Kubernetes object named by a plugin (always in the app's namespace). */
+export interface KubernetesObjectRef {
+  api_version: string;
+  kind: string;
+  name: string;
+}
+
+/**
+ * A notice, warning or error from a plugin call, as returned by the API.
+ * Mirrors `plugin_events::PluginEventReport` (a flattened `PluginEvent`).
+ * All text is plugin-supplied: render it as text, never as HTML.
+ */
+export interface PluginEventReport {
+  /** Configured plugin name. */
+  plugin: string;
+  /** The call that reported it: fetch, metadata, apply, provision, deprovision. */
+  export: string;
+  severity: PluginEventSeverity;
+  /** `<plugin>.<code>`, or a host code such as `plugin.trap`. */
+  code: string;
+  message: string;
+  resource_id?: string;
+  object?: KubernetesObjectRef;
+  retryable: boolean;
+  hint?: string;
+  trace_id?: string;
 }
 
 export interface ReplicaCounts {
@@ -1059,7 +1094,9 @@ export type NotificationEventType =
   | "deployment_scaled"
   | "pod_crash_loop"
   | "application_created"
-  | "application_deleted";
+  | "application_deleted"
+  | "plugin_failing"
+  | "plugin_recovered";
 
 export interface DiagnosticHistoryItem {
   job_name: string;
@@ -1176,6 +1213,52 @@ export interface ProvisionedResource {
   state: Record<string, string>;
   created_at: string;
   updated_at: string;
+  /** What the plugin reported on a provision or refresh (absent in lists). */
+  plugin_events?: PluginEventReport[];
+}
+
+/** What happened to one Kubernetes object a plugin asked deckwatch to delete. */
+export interface KubernetesObjectDeletion {
+  api_version: string;
+  kind: string;
+  name: string;
+  namespace: string;
+  outcome: "deleted" | "not_found" | "refused" | "failed";
+  /** Why it was refused or failed. */
+  reason?: string;
+}
+
+/** Health of a plugin call target. */
+export type PluginHealth = "healthy" | "degraded" | "failing";
+
+/**
+ * Current state of one plugin call target: a provisioned resource, a
+ * plugin's apply() for an application (`resource_id` ""), or the plugin
+ * itself (`namespace` and `application` ""). From /api/plugin-status.
+ */
+export interface PluginStatus {
+  namespace: string;
+  application: string;
+  plugin: string;
+  resource_id: string;
+  health: PluginHealth;
+  last_export: string;
+  last_events: PluginEventReport[];
+  trace_id?: string;
+  first_failure_at: string | null;
+  consecutive_failures: number;
+  last_success_at: string | null;
+  last_changed_at: string;
+  updated_at: string;
+}
+
+/** Body of DELETE …/resources/{plugin}/{resource_id}. */
+export interface DeprovisionResponse {
+  /** What the plugin says it did and didn't clean up ("" if nothing). */
+  message: string;
+  plugin_events: PluginEventReport[];
+  /** The objects the plugin asked deckwatch to delete, and what happened. */
+  kubernetes_resource_deletions: KubernetesObjectDeletion[];
 }
 
 export interface ProvisionRequest {

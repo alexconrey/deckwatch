@@ -1,0 +1,604 @@
+//! Current plugin state: one `plugin_status` row per call target.
+//!
+//! A target is an (application, plugin, resource id) triple:
+//!
+//! - a provisioned resource: (`"{ns}/{app}"`, plugin, resource id), from
+//!   provision, refresh and status polling;
+//! - a plugin's `apply()` for an application: (`"{ns}/{app}"`, plugin, `""`),
+//!   from deployment create/update and the reconcile loop (aggregated over
+//!   the application's Deployments, so one failing Deployment makes it
+//!   failing without the row flapping);
+//! - the plugin itself: (`""`, plugin, `""`), from fetch and load.
+//!
+//! Each row holds the health (`healthy`, `degraded`, `failing`), the latest
+//! events (at most [`MAX_STORED_EVENTS`]), when the current run of failures
+//! started, how many calls in a row failed, and the last success. It is
+//! current state, not a log: rows are replaced, removed with their resource,
+//! application or plugin, and never accumulate history.
+//!
+//! Plugin calls never touch the database themselves. Callers hand a
+//! [`StatusUpdate`] to `PluginTelemetry::report`, which queues it without
+//! waiting (a full queue drops the update and counts it). One worker task
+//! ([`spawn_worker`]) applies updates in order, so a transition into or out
+//! of `failing` is seen exactly once.
+
+use std::collections::BTreeMap;
+
+use sea_orm::prelude::DateTimeUtc;
+use sea_orm::ActiveValue::Set;
+use sea_orm::{ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter};
+use tokio::sync::{mpsc, oneshot};
+
+use crate::entities::plugin_status;
+use crate::plugin_events::{Health, PluginEventReport};
+use crate::plugin_k8s_events::{KubeEventRequest, KubeEventSink};
+use crate::state::AppState;
+
+/// Most events kept on a row.
+pub const MAX_STORED_EVENTS: usize = 10;
+/// Updates waiting for the worker. Past this, updates are dropped.
+pub const QUEUE_CAPACITY: usize = 1024;
+/// A row whose health and events haven't changed is rewritten at most this
+/// often, so a healthy plugin on the 10-second reconcile loop doesn't write
+/// every cycle. Failing rows are written every time (their failure count
+/// moves).
+pub const UNCHANGED_REWRITE_SECS: i64 = 300;
+
+/// Which row an update is for.
+#[derive(Debug, Clone, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct StatusKey {
+    /// `"{ns}/{app}"`, or `""` for plugin-wide state.
+    pub application_id: String,
+    pub plugin: String,
+    /// The plugin resource id, or `""`.
+    pub resource_id: String,
+}
+
+impl StatusKey {
+    pub fn plugin_wide(plugin: &str) -> Self {
+        Self {
+            application_id: String::new(),
+            plugin: plugin.to_string(),
+            resource_id: String::new(),
+        }
+    }
+
+    pub fn apply(application_id: &str, plugin: &str) -> Self {
+        Self {
+            application_id: application_id.to_string(),
+            plugin: plugin.to_string(),
+            resource_id: String::new(),
+        }
+    }
+
+    pub fn resource(application_id: &str, plugin: &str, resource_id: &str) -> Self {
+        Self {
+            application_id: application_id.to_string(),
+            plugin: plugin.to_string(),
+            resource_id: resource_id.to_string(),
+        }
+    }
+}
+
+/// The outcome of one call (or one reconcile cycle) for a target.
+#[derive(Debug, Clone, Default)]
+pub struct StatusUpdate {
+    pub key: StatusKey,
+    /// The export that produced it.
+    pub export: String,
+    /// What triggered the call (`plugins::Trigger::as_str`).
+    pub trigger: String,
+    /// The workloads it's about, for Kubernetes Events. Empty means every
+    /// Deployment of the application (or none, for plugin-wide rows).
+    pub targets: Vec<crate::plugin_k8s_events::WorkloadRef>,
+    pub health: Health,
+    pub events: Vec<PluginEventReport>,
+    pub trace_id: Option<String>,
+    /// Add to the current row instead of replacing it: for host events that
+    /// belong to a call already recorded (a Kubernetes object the call
+    /// returned failed to apply afterwards). Health only gets worse.
+    pub merge: bool,
+}
+
+/// A change into or out of `failing`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Transition {
+    /// From healthy, degraded or no row at all, to failing.
+    Failing,
+    /// From failing to healthy or degraded.
+    Recovered,
+}
+
+/// Messages for the worker.
+pub(crate) enum SinkMsg {
+    Status(StatusUpdate),
+    /// The target is gone (a deprovisioned resource).
+    Forget(StatusKey),
+    /// The application is gone.
+    ForgetApplication(String),
+    /// Keep only these plugins' rows (disabled or removed plugins go).
+    KeepPlugins(Vec<String>),
+    /// Publish a Kubernetes Event that isn't tied to a status change.
+    KubeEvent(KubeEventRequest),
+    /// Reply once everything queued before has been applied.
+    Flush(oneshot::Sender<()>),
+}
+
+/// The row an update leads to, before it is written.
+#[derive(Debug, Clone, PartialEq)]
+pub struct NextRow {
+    pub health: Health,
+    pub last_export: String,
+    pub last_events: Vec<PluginEventReport>,
+    pub trace_id: Option<String>,
+    pub first_failure_at: Option<DateTimeUtc>,
+    pub consecutive_failures: i32,
+    pub last_success_at: Option<DateTimeUtc>,
+    pub last_changed_at: DateTimeUtc,
+}
+
+fn stored_events(row: &plugin_status::Model) -> Vec<PluginEventReport> {
+    serde_json::from_str(&row.last_events).unwrap_or_default()
+}
+
+fn stored_health(row: &plugin_status::Model) -> Health {
+    match row.health.as_str() {
+        "failing" => Health::Failing,
+        "degraded" => Health::Degraded,
+        _ => Health::Healthy,
+    }
+}
+
+/// Work out the next state of a target. Pure, so the transition rules are
+/// unit tested on their own.
+///
+/// - `failing` counts a failure and keeps (or starts) `first_failure_at`;
+///   anything else resets both and moves `last_success_at`.
+/// - A transition is reported when health crosses into or out of
+///   `failing`; a target seen for the first time and already failing counts
+///   as a transition, one that starts healthy doesn't.
+/// - A `merge` update adds its events to the row's and can only make health
+///   worse; it doesn't count as another call.
+pub fn next_row(
+    prev: Option<&plugin_status::Model>,
+    update: &StatusUpdate,
+    now: DateTimeUtc,
+) -> (NextRow, Option<Transition>) {
+    let prev_health = prev.map(stored_health);
+    let (health, mut events, export, trace_id) = match (update.merge, prev) {
+        (true, Some(row)) => {
+            let mut events = stored_events(row);
+            for e in &update.events {
+                if !events.contains(e) {
+                    events.push(e.clone());
+                }
+            }
+            (
+                stored_health(row).max(update.health),
+                events,
+                row.last_export.clone(),
+                row.trace_id.clone().or_else(|| update.trace_id.clone()),
+            )
+        }
+        _ => (
+            update.health,
+            update.events.clone(),
+            update.export.clone(),
+            update.trace_id.clone(),
+        ),
+    };
+    events.truncate(MAX_STORED_EVENTS);
+
+    let failing = health == Health::Failing;
+    let was_failing = prev_health == Some(Health::Failing);
+    let counted_call = !(update.merge && prev.is_some());
+    let consecutive_failures = match (failing, prev) {
+        (false, _) => 0,
+        (true, Some(row)) if was_failing => row.consecutive_failures + i32::from(counted_call),
+        (true, _) => 1,
+    };
+    let first_failure_at = if failing {
+        prev.filter(|_| was_failing)
+            .and_then(|row| row.first_failure_at)
+            .or(Some(now))
+    } else {
+        None
+    };
+    let last_success_at = if failing {
+        prev.and_then(|row| row.last_success_at)
+    } else {
+        Some(now)
+    };
+    let last_changed_at = match prev {
+        Some(row) if prev_health == Some(health) => row.last_changed_at,
+        _ => now,
+    };
+    let transition = match (was_failing, failing) {
+        (false, true) => Some(Transition::Failing),
+        (true, false) => Some(Transition::Recovered),
+        _ => None,
+    };
+    (
+        NextRow {
+            health,
+            last_export: export,
+            last_events: events,
+            trace_id,
+            first_failure_at,
+            consecutive_failures,
+            last_success_at,
+            last_changed_at,
+        },
+        transition,
+    )
+}
+
+/// Whether `next` needs writing over `prev`: always for a new row, a
+/// failing row or a change; otherwise once every
+/// [`UNCHANGED_REWRITE_SECS`], to keep `last_success_at` roughly current.
+pub fn needs_write(prev: Option<&plugin_status::Model>, next: &NextRow, now: DateTimeUtc) -> bool {
+    let Some(row) = prev else {
+        return true;
+    };
+    next.health == Health::Failing
+        || stored_health(row) != next.health
+        || stored_events(row) != next.last_events
+        || row.last_export != next.last_export
+        || (now - row.updated_at).num_seconds() >= UNCHANGED_REWRITE_SECS
+}
+
+async fn find_row(
+    db: &DatabaseConnection,
+    key: &StatusKey,
+) -> Result<Option<plugin_status::Model>, sea_orm::DbErr> {
+    plugin_status::Entity::find()
+        .filter(plugin_status::Column::ApplicationId.eq(&key.application_id))
+        .filter(plugin_status::Column::PluginName.eq(&key.plugin))
+        .filter(plugin_status::Column::ResourceId.eq(&key.resource_id))
+        .one(db)
+        .await
+}
+
+/// Apply one update to the database. Returns the transition it caused.
+pub async fn apply_update(
+    db: &DatabaseConnection,
+    update: &StatusUpdate,
+    now: DateTimeUtc,
+) -> Result<Option<Transition>, sea_orm::DbErr> {
+    let prev = find_row(db, &update.key).await?;
+    let (next, transition) = next_row(prev.as_ref(), update, now);
+    if !needs_write(prev.as_ref(), &next, now) {
+        return Ok(transition);
+    }
+    let events_json = serde_json::to_string(&next.last_events).unwrap_or_else(|_| "[]".into());
+    match prev {
+        Some(row) => {
+            let mut active: plugin_status::ActiveModel = row.into();
+            active.health = Set(next.health.as_str().to_string());
+            active.last_export = Set(next.last_export);
+            active.last_events = Set(events_json);
+            active.trace_id = Set(next.trace_id);
+            active.first_failure_at = Set(next.first_failure_at);
+            active.consecutive_failures = Set(next.consecutive_failures);
+            active.last_success_at = Set(next.last_success_at);
+            active.last_changed_at = Set(next.last_changed_at);
+            active.updated_at = Set(now);
+            active.update(db).await?;
+        }
+        None => {
+            plugin_status::ActiveModel {
+                id: Set(uuid::Uuid::new_v4().to_string()),
+                application_id: Set(update.key.application_id.clone()),
+                plugin_name: Set(update.key.plugin.clone()),
+                resource_id: Set(update.key.resource_id.clone()),
+                health: Set(next.health.as_str().to_string()),
+                last_export: Set(next.last_export),
+                last_events: Set(events_json),
+                trace_id: Set(next.trace_id),
+                first_failure_at: Set(next.first_failure_at),
+                consecutive_failures: Set(next.consecutive_failures),
+                last_success_at: Set(next.last_success_at),
+                last_changed_at: Set(next.last_changed_at),
+                updated_at: Set(now),
+            }
+            .insert(db)
+            .await?;
+        }
+    }
+    Ok(transition)
+}
+
+fn now_utc() -> DateTimeUtc {
+    let d = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default();
+    DateTimeUtc::from_timestamp(d.as_secs() as i64, d.subsec_nanos()).unwrap_or_default()
+}
+
+/// A failing notification for a target is suppressed if one was sent less
+/// than this long ago, so a plugin that flaps between failing and working
+/// can't flood the webhook. The matching recovery is then suppressed too.
+pub const NOTIFY_FLAP_GUARD: std::time::Duration = std::time::Duration::from_secs(600);
+/// Notifications being sent at once; more are dropped.
+const MAX_NOTIFICATIONS_IN_FLIGHT: usize = 8;
+
+/// Sends `plugin_failing` and `plugin_recovered` notifications on
+/// transitions, and only on transitions: the worker computes each
+/// transition exactly once, in order.
+struct TransitionNotifier {
+    client: crate::notifications::NotificationClient,
+    last_failing: std::collections::HashMap<StatusKey, std::time::Instant>,
+    suppressed: std::collections::HashSet<StatusKey>,
+    in_flight: std::sync::Arc<tokio::sync::Semaphore>,
+}
+
+impl TransitionNotifier {
+    fn new(state: &AppState) -> Self {
+        Self {
+            client: crate::notifications::NotificationClient::new(state.clone()),
+            last_failing: Default::default(),
+            suppressed: Default::default(),
+            in_flight: std::sync::Arc::new(tokio::sync::Semaphore::new(
+                MAX_NOTIFICATIONS_IN_FLIGHT,
+            )),
+        }
+    }
+
+    fn on_transition(&mut self, update: &StatusUpdate, transition: Transition) {
+        let key = &update.key;
+        let (namespace, application) = key
+            .application_id
+            .split_once('/')
+            .map(|(ns, app)| (ns.to_string(), app.to_string()))
+            .unwrap_or_default();
+        let event = match transition {
+            Transition::Failing => {
+                let now = std::time::Instant::now();
+                self.last_failing
+                    .retain(|_, at| now.duration_since(*at) < NOTIFY_FLAP_GUARD);
+                if self.last_failing.contains_key(key) {
+                    self.suppressed.insert(key.clone());
+                    tracing::info!(plugin = %key.plugin, "plugin failing again within the flap guard; not notifying");
+                    return;
+                }
+                self.last_failing.insert(key.clone(), now);
+                let first_error = update.events.iter().find(|r| {
+                    crate::plugin_events::effective_severity(r.event.severity)
+                        == crate::plugins::EventSeverity::Error
+                });
+                crate::notifications::NotificationEvent::PluginFailing {
+                    namespace,
+                    application,
+                    plugin: key.plugin.clone(),
+                    resource_id: key.resource_id.clone(),
+                    export: update.export.clone(),
+                    code: first_error
+                        .map(|r| r.event.code.clone())
+                        .unwrap_or_else(|| crate::plugin_events::codes::UNSPECIFIED.into()),
+                    message: first_error
+                        .map(|r| r.event.message.clone())
+                        .unwrap_or_else(|| "failed".into()),
+                }
+            }
+            Transition::Recovered => {
+                if self.suppressed.remove(key) {
+                    return;
+                }
+                crate::notifications::NotificationEvent::PluginRecovered {
+                    namespace,
+                    application,
+                    plugin: key.plugin.clone(),
+                    resource_id: key.resource_id.clone(),
+                    export: update.export.clone(),
+                }
+            }
+        };
+        let Ok(permit) = self.in_flight.clone().try_acquire_owned() else {
+            tracing::warn!(plugin = %key.plugin, "too many plugin notifications in flight; dropped one");
+            return;
+        };
+        let client = self.client.clone();
+        tokio::spawn(async move {
+            if let Err(e) = client.send_now(event).await {
+                tracing::warn!(error = %e, "plugin notification failed");
+            }
+            drop(permit);
+        });
+    }
+
+    /// Wait until every notification being sent has been.
+    async fn idle(&self) {
+        let _ = self
+            .in_flight
+            .acquire_many(MAX_NOTIFICATIONS_IN_FLIGHT as u32)
+            .await;
+    }
+}
+
+/// Start the worker that applies status updates and publishes Kubernetes
+/// Events, and connect it to `state.plugin_telemetry`. Call once, after
+/// `AppState` is built. Until then (and in tests that don't call it),
+/// updates are discarded.
+pub fn spawn_worker(state: &AppState) {
+    spawn_worker_with(state, KubeEventSink::new(state.kube_client.clone()));
+}
+
+/// [`spawn_worker`] with a given Kubernetes Event sink (tests use a short
+/// republish interval).
+pub(crate) fn spawn_worker_with(state: &AppState, kube: KubeEventSink) {
+    let (tx, rx) = mpsc::channel(QUEUE_CAPACITY);
+    if !state.plugin_telemetry.connect(tx) {
+        tracing::warn!("plugin status worker already running");
+        return;
+    }
+    tokio::spawn(run_worker(state.clone(), rx, kube));
+}
+
+async fn run_worker(state: AppState, mut rx: mpsc::Receiver<SinkMsg>, kube: KubeEventSink) {
+    let mut notifier = TransitionNotifier::new(&state);
+    while let Some(msg) = rx.recv().await {
+        match msg {
+            SinkMsg::Status(update) => {
+                let transition = match apply_update(&state.db, &update, now_utc()).await {
+                    Ok(transition) => transition,
+                    Err(e) => {
+                        tracing::warn!(
+                            plugin = %update.key.plugin,
+                            error = %e,
+                            "failed to record plugin status"
+                        );
+                        None
+                    }
+                };
+                if let Some(transition) = transition {
+                    tracing::info!(
+                        plugin = %update.key.plugin,
+                        application = %update.key.application_id,
+                        resource_id = %update.key.resource_id,
+                        transition = ?transition,
+                        "plugin status changed"
+                    );
+                    notifier.on_transition(&update, transition);
+                }
+                if let Some(event) = crate::plugin_k8s_events::event_for(&update, transition) {
+                    kube.spawn_publish(KubeEventRequest {
+                        application_id: update.key.application_id.clone(),
+                        targets: update.targets.clone(),
+                        event,
+                    });
+                }
+            }
+            SinkMsg::KubeEvent(request) => kube.spawn_publish(request),
+            SinkMsg::Forget(key) => {
+                let result = plugin_status::Entity::delete_many()
+                    .filter(plugin_status::Column::ApplicationId.eq(&key.application_id))
+                    .filter(plugin_status::Column::PluginName.eq(&key.plugin))
+                    .filter(plugin_status::Column::ResourceId.eq(&key.resource_id))
+                    .exec(&state.db)
+                    .await;
+                if let Err(e) = result {
+                    tracing::warn!(error = %e, "failed to remove plugin status");
+                }
+            }
+            SinkMsg::ForgetApplication(application_id) => {
+                let result = plugin_status::Entity::delete_many()
+                    .filter(plugin_status::Column::ApplicationId.eq(&application_id))
+                    .exec(&state.db)
+                    .await;
+                if let Err(e) = result {
+                    tracing::warn!(error = %e, "failed to remove application plugin status");
+                }
+            }
+            SinkMsg::KeepPlugins(plugins) => {
+                let result = plugin_status::Entity::delete_many()
+                    .filter(plugin_status::Column::PluginName.is_not_in(plugins))
+                    .exec(&state.db)
+                    .await;
+                if let Err(e) = result {
+                    tracing::warn!(error = %e, "failed to prune plugin status");
+                }
+            }
+            SinkMsg::Flush(done) => {
+                kube.idle().await;
+                notifier.idle().await;
+                let _ = done.send(());
+            }
+        }
+    }
+}
+
+/// Combine one reconcile cycle's `apply()` outcomes for an application into
+/// one update per plugin: the worst health, every event once, and the first
+/// trace id. Keeps the `apply` row steady when only some Deployments fail.
+#[derive(Debug, Default)]
+pub struct ApplyAggregate {
+    by_plugin: BTreeMap<String, StatusUpdate>,
+    /// Each plugin's health on each workload, to pick the Event targets.
+    healths: BTreeMap<String, Vec<(crate::plugin_k8s_events::WorkloadRef, Health)>>,
+}
+
+impl ApplyAggregate {
+    /// Add one plugin's `apply()` outcome on one workload.
+    pub fn add(
+        &mut self,
+        application_id: &str,
+        plugin: &str,
+        target: Option<crate::plugin_k8s_events::WorkloadRef>,
+        health: Health,
+        events: Vec<PluginEventReport>,
+        trace_id: Option<String>,
+    ) {
+        let entry = self
+            .by_plugin
+            .entry(plugin.to_string())
+            .or_insert_with(|| StatusUpdate {
+                key: StatusKey::apply(application_id, plugin),
+                export: "apply".to_string(),
+                trigger: "reconcile".to_string(),
+                ..Default::default()
+            });
+        entry.health = entry.health.max(health);
+        for e in events {
+            if entry.events.len() < MAX_STORED_EVENTS && !entry.events.contains(&e) {
+                entry.events.push(e);
+            }
+        }
+        if entry.trace_id.is_none() {
+            entry.trace_id = trace_id;
+        }
+        if let Some(target) = target {
+            self.healths
+                .entry(plugin.to_string())
+                .or_default()
+                .push((target, health));
+        }
+    }
+
+    /// One update per plugin. Its targets are the workloads where the plugin
+    /// did worst (all of them when it was healthy everywhere), so a failure
+    /// on one Deployment isn't reported on the others.
+    pub fn into_updates(mut self) -> impl Iterator<Item = StatusUpdate> {
+        for (plugin, update) in self.by_plugin.iter_mut() {
+            update.targets = self
+                .healths
+                .remove(plugin)
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|(_, h)| update.health == Health::Healthy || *h == update.health)
+                .map(|(t, _)| t)
+                .collect();
+        }
+        self.by_plugin.into_values()
+    }
+}
+
+/// Turn Kubernetes apply failures reported after a call into one `merge`
+/// update per plugin for that plugin's `apply` row in `application_id`.
+pub fn failures_by_plugin(
+    application_id: &str,
+    failures: Vec<PluginEventReport>,
+) -> Vec<StatusUpdate> {
+    let mut by_plugin: BTreeMap<String, Vec<PluginEventReport>> = BTreeMap::new();
+    for failure in failures {
+        by_plugin
+            .entry(failure.plugin.clone())
+            .or_default()
+            .push(failure);
+    }
+    by_plugin
+        .into_iter()
+        .map(|(plugin, events)| StatusUpdate {
+            key: StatusKey::apply(application_id, &plugin),
+            export: "apply".to_string(),
+            health: Health::Failing,
+            trace_id: events.first().and_then(|e| e.trace_id.clone()),
+            events,
+            merge: true,
+            ..Default::default()
+        })
+        .collect()
+}
+
+#[cfg(test)]
+#[path = "plugin_status_tests.rs"]
+mod tests;

@@ -5,15 +5,19 @@
 //!
 //! Wire up: `POST /mcp` in the public API router.
 
+use std::cell::Cell;
 use std::time::Instant;
 
 use axum::extract::State;
-use axum::http::{header, StatusCode};
+use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
 use axum::response::IntoResponse;
 use axum::Json;
+use mcp_k8s::telemetry::{self, semconv, ClientInfo, ToolCall, W3cTraceContext};
 use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder, QuerySelect};
 use serde::{Deserialize, Serialize};
+use tracing::{Instrument, Span};
 
+use super::mcp_telemetry::{self, DeckwatchTool, RequestContext};
 use crate::audit;
 use crate::entities::applications as apps_entity;
 use crate::entities::{
@@ -58,36 +62,122 @@ pub struct JsonRpcError {
 // Main handler
 // ---------------------------------------------------------------------------
 
+/// The MCP protocol version deckwatch implements.
+const PROTOCOL_VERSION: &str = "2025-11-25";
+
+/// The prompts `prompts/list` offers.
+const PROMPTS: &[&str] = &["pre-deployment-check", "deployment-readiness-check"];
+
+/// `POST /mcp`. Each request runs in one SERVER span (see
+/// `handlers::mcp_telemetry`) and ends with one duration metric event and one
+/// log line.
 pub async fn handle_mcp(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Json(request): Json<JsonRpcRequest>,
 ) -> impl IntoResponse {
     let start = Instant::now();
-    let method = request.method.clone();
-
-    if request.method == "notifications/initialized" {
-        crate::metrics::record_mcp_request(&method, "ok", start.elapsed().as_secs_f64());
-        return StatusCode::OK.into_response();
+    let ctx = RequestContext::from_headers(&headers);
+    let span = mcp_telemetry::request_span(
+        &request.method,
+        span_target(&request),
+        request.id.as_ref(),
+        &ctx,
+    );
+    // The remote parent must be set before the span is first entered, and
+    // reading the trace id starts the span, so this order matters.
+    crate::telemetry::set_remote_parent(
+        &span,
+        W3cTraceContext::from_meta(&request.params).as_ref(),
+        ctx.http_trace.as_ref(),
+    );
+    if let Some(trace_id) = crate::telemetry::trace_id(&span) {
+        span.record(semconv::TRACE_ID, trace_id.as_str());
     }
+    let request_span = span.clone();
 
-    let response = match request.method.as_str() {
-        "initialize" => handle_initialize(&state, &request).await,
-        "ping" => success_response(&request, serde_json::json!({})),
-        "tools/list" => handle_tools_list(&state, &request).await,
-        "tools/call" => handle_tool_call(&state, &request).await,
-        "prompts/list" => handle_prompts_list(&request),
-        "prompts/get" => handle_prompts_get(&request),
-        _ => method_not_found(&request),
+    async move {
+        let mut session_id = None;
+        let response = match request.method.as_str() {
+            "notifications/initialized" => None,
+            "initialize" => {
+                let response = handle_initialize(&state, &request).await;
+                if response.error.is_none() {
+                    session_id = Some(start_session(&request, &request_span));
+                }
+                Some(response)
+            }
+            "ping" => Some(success_response(&request, serde_json::json!({}))),
+            "tools/list" => Some(handle_tools_list(&state, &request).await),
+            "tools/call" => Some(handle_tool_call(&state, &request).await),
+            "prompts/list" => Some(handle_prompts_list(&request)),
+            "prompts/get" => Some(handle_prompts_get(&request)),
+            _ => Some(method_not_found(&request)),
+        };
+
+        let error = response.as_ref().and_then(|r| r.error.as_ref());
+        if let Some(error) = error {
+            telemetry::record_rpc_status(&request_span, i64::from(error.code));
+        }
+        // handle_tool_call reports its request itself: through the ToolCall,
+        // or with finish_operation when no tool ran.
+        if request.method != "tools/call" {
+            let error_type = error.map(|e| e.code.to_string());
+            telemetry::finish_operation(&request.method, start.elapsed(), error_type.as_deref());
+        }
+        let status = if error.is_some() { "error" } else { "ok" };
+        crate::metrics::record_mcp_request(
+            mcp_telemetry::metric_method(&request.method),
+            status,
+            start.elapsed().as_secs_f64(),
+        );
+
+        let Some(response) = response else {
+            return StatusCode::OK.into_response();
+        };
+        let mut http =
+            ([(header::CONTENT_TYPE, "application/json")], Json(response)).into_response();
+        if let Some(value) = session_id.and_then(|id| HeaderValue::from_str(&id).ok()) {
+            http.headers_mut()
+                .insert(mcp_telemetry::SESSION_HEADER, value);
+        }
+        http
+    }
+    .instrument(span)
+    .await
+}
+
+/// The tool or prompt name for the request span's name, only if deckwatch
+/// serves it: a client-supplied name is unbounded.
+fn span_target(request: &JsonRpcRequest) -> Option<&str> {
+    let name = request.params["name"].as_str()?;
+    let served = match request.method.as_str() {
+        "tools/call" => {
+            mcp_telemetry::deckwatch_tool(name).is_some() || telemetry::is_known_tool(name)
+        }
+        "prompts/get" => PROMPTS.contains(&name),
+        _ => false,
     };
+    served.then_some(name)
+}
 
-    let status = if response.error.is_some() {
-        "error"
-    } else {
-        "ok"
-    };
-    crate::metrics::record_mcp_request(&method, status, start.elapsed().as_secs_f64());
-
-    ([(header::CONTENT_TYPE, "application/json")], Json(response)).into_response()
+/// Start a session for the client that just initialized, and record its
+/// self-reported name and version on the request span. Returns the
+/// `Mcp-Session-Id` for the response.
+fn start_session(request: &JsonRpcRequest, span: &Span) -> String {
+    // Self-reported by the client: a label, never an identity.
+    let client = ClientInfo::from_initialize(&request.params);
+    client.record(span);
+    span.record(semconv::MCP_PROTOCOL_VERSION, PROTOCOL_VERSION);
+    tracing::info!(
+        { semconv::MCP_K8S_CLIENT_NAME } = client.name.as_deref(),
+        { semconv::MCP_K8S_CLIENT_VERSION } = client.version.as_deref(),
+        requested_protocol_version = client.protocol_version.as_deref(),
+        "mcp client initialized"
+    );
+    let id = mcp_telemetry::sessions().start(client);
+    span.record(semconv::MCP_SESSION_ID, id.as_str());
+    id
 }
 
 // ---------------------------------------------------------------------------
@@ -100,7 +190,7 @@ async fn handle_initialize(state: &AppState, request: &JsonRpcRequest) -> JsonRp
     let agent_feedback_enabled = loaded.agent_feedback_enabled;
 
     let mut result = serde_json::json!({
-        "protocolVersion": "2025-11-25",
+        "protocolVersion": PROTOCOL_VERSION,
         "capabilities": { "tools": {}, "prompts": {} },
         "serverInfo": { "name": "deckwatch", "version": env!("CARGO_PKG_VERSION") }
     });
@@ -671,7 +761,7 @@ fn deckwatch_tool_definitions() -> Vec<serde_json::Value> {
         }),
         serde_json::json!({
             "name": "enable_plugin",
-            "description": "Enable a configured plugin by name. Updates settings immediately and triggers a background refetch of the WASM binary so subsequent deployments use it.",
+            "description": "Enable a configured plugin by name and load it. Updates settings, fetches the WASM binary and calls its metadata(), then returns whether it loaded. Fetch, checksum, metadata and version problems come back as plugin events, in a fenced block of untrusted plugin output.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -800,6 +890,7 @@ fn deckwatch_tool_definitions() -> Vec<serde_json::Value> {
             "name": "deprovision_resource",
             "description": "Deprovision (tear down) a plugin-managed infrastructure resource from an application. \
         WARNING: This calls the plugin's deprovision() function, which tears down the underlying cloud infrastructure (e.g. deletes an RDS instance or S3 bucket) and removes the injected env vars from all application deployments. \
+        Deckwatch also deletes the Kubernetes objects the plugin asks for (ServiceAccounts and Jobs in the application's namespace only; a ServiceAccount still used by a workload is kept) and reports each one in kubernetes_resource_deletions. \
         This action is destructive and may result in data loss — confirm with the user before proceeding.",
             "inputSchema": {
                 "type": "object",
@@ -948,82 +1039,25 @@ async fn handle_tool_call(state: &AppState, request: &JsonRpcRequest) -> JsonRpc
     let args = &params["arguments"];
     let start = Instant::now();
 
-    let deckwatch_result = match tool_name {
-        "create_application" => Some(tool_create_application(state, args).await),
-        "list_applications" => Some(tool_list_applications(state, args).await),
-        "get_application" => Some(tool_get_application(state, args).await),
-        "restart_application" => Some(tool_restart_application(state, args).await),
-        "scale_application" => Some(tool_scale_application(state, args).await),
-        "list_templates" => Some(tool_list_templates(state).await),
-        "set_gitops" => Some(tool_configure_gitops(state, args).await),
-        "get_gitops" => Some(tool_get_gitops_status(state, args).await),
-        "trigger_build" => Some(tool_trigger_gitops_build(state, args).await),
-        "create_ingress" => Some(tool_create_ingress(state, args).await),
-        "update_ingress" => Some(tool_update_ingress(state, args).await),
-        "list_ingress_templates" => Some(tool_list_ingress_templates(state).await),
-        "create_ingress_template" => Some(tool_create_ingress_template(state, args).await),
-        "update_ingress_template" => Some(tool_update_ingress_template(state, args).await),
-        "delete_ingress_template" => Some(tool_delete_ingress_template(state, args).await),
-        "list_builds" => Some(tool_list_builds(state, args).await),
-        "get_build_log" => Some(tool_get_build_log(state, args).await),
-        "watch_build" => Some(tool_watch_build(state, args).await),
-        "generate_local_build" => Some(tool_generate_local_build(state, args).await),
-        "get_monitoring" => Some(tool_get_monitoring(state, args).await),
-        "enable_monitoring" => Some(tool_enable_monitoring(state, args).await),
-        "disable_monitoring" => Some(tool_disable_monitoring(state, args).await),
-        "list_plugins" => Some(tool_list_plugins(state).await),
-        "enable_plugin" => Some(tool_enable_plugin(state, args).await),
-        "disable_plugin" => Some(tool_disable_plugin(state, args).await),
-        "update_plugin_config" => Some(tool_update_plugin_config(state, args).await),
-        "get_plugin_config" => Some(tool_get_plugin_config(state, args).await),
-        "validate_plugin" => Some(tool_validate_plugin(state, args).await),
-        "associate_plugin" => Some(tool_associate_plugin(state, args).await),
-        "disassociate_plugin" => Some(tool_disassociate_plugin(state, args).await),
-        "list_application_resources" => Some(tool_list_application_resources(state, args).await),
-        "provision_resource" => Some(tool_provision_resource(state, args).await),
-        "deprovision_resource" => Some(tool_deprovision_resource(state, args).await),
-        "refresh_resource" => Some(tool_refresh_resource(state, args).await),
-        "submit_agent_feedback" => Some(tool_submit_agent_feedback(state, args).await),
-        // Intercept k8s deployment mutation tools so they are audit-logged.
-        "create_deployment" => Some(tool_mcp_create_deployment(state, args).await),
-        "delete_deployment" => Some(tool_mcp_delete_deployment(state, args).await),
-        "scale_deployment" => Some(tool_mcp_scale_deployment(state, args).await),
-        "restart_deployment" => Some(tool_mcp_restart_deployment(state, args).await),
-        // Intercept update_deployment and create_pod to add service_account support.
-        "update_deployment" => Some(tool_mcp_update_deployment(state, args).await),
-        "create_pod" => Some(tool_mcp_create_pod(state, args).await),
-        // Intercept apply_manifest to accept YAML or JSON (upstream only handles JSON).
-        "apply_manifest" => Some(tool_mcp_apply_manifest(state, args).await),
-        // Intercept exec_pod to avoid WebSocket upgrade failures in MCP context.
-        "exec_pod" => Some(tool_mcp_exec_pod(state, args).await),
-        _ => None,
-    };
-
-    let result = if let Some(r) = deckwatch_result {
-        let status = if r.is_ok() { "ok" } else { "error" };
-        crate::metrics::record_mcp_tool_call(tool_name, status, start.elapsed().as_secs_f64());
-        r
+    let result = if let Some(tool) = mcp_telemetry::deckwatch_tool(tool_name) {
+        Some(call_deckwatch_tool(state, tool, args).await)
+    } else if telemetry::is_known_tool(tool_name) {
+        // mcp-k8s instruments its own tools: span attributes, the duration
+        // metric and log events, and mcp_k8s_tool_calls_total.
+        mcp_k8s::mcp::handle_tool(&mcp_k8s_client(state), tool_name, args).await
     } else {
-        // mcp-k8s library instruments its own tools via mcp_k8s_tool_calls_total;
-        // no duplicate recording needed here.
-        let k8s_client = mcp_k8s::K8sClient::new(
-            state.kube_client.clone(),
-            state.allowed_namespaces.clone(),
-            mcp_k8s::permissions::ActionPermissions::default(),
-        );
-        mcp_k8s::mcp::handle_tool(&k8s_client, tool_name, args)
-            .await
-            .unwrap_or_else(|| Err(format!("Unknown tool: {tool_name}")))
+        None
     };
-
-    // One event per tool call. Never log the arguments or the error text:
-    // they can carry Secret data, env values, manifests and exec commands.
-    tracing::info!(
-        tool = logged_tool_name(tool_name),
-        status = if result.is_ok() { "ok" } else { "error" },
-        duration_ms = u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX),
-        "mcp tool call"
-    );
+    // No tool ran, so nothing reported the request yet. The client's tool
+    // name stays out of telemetry: it is unbounded input.
+    let result = result.unwrap_or_else(|| {
+        telemetry::finish_operation(
+            semconv::TOOLS_CALL,
+            start.elapsed(),
+            Some(semconv::error_type::UNKNOWN_TOOL),
+        );
+        Err(format!("Unknown tool: {tool_name}"))
+    });
 
     // Apply prompt-injection sanitization to pod log content before it is
     // embedded in the MCP response and potentially fed into an LLM context.
@@ -1031,6 +1065,10 @@ async fn handle_tool_call(state: &AppState, request: &JsonRpcRequest) -> JsonRpc
     // print adversarial text into it. See src/log_sanitize.rs for details.
     let result = if tool_name == "get_pod_logs" {
         result.map(|text| crate::log_sanitize::sanitize_logs(&text))
+    } else if tool_name == "get_events" {
+        // Event messages are untrusted too: deckwatch publishes plugin text
+        // as Events, and any controller or workload with RBAC can write one.
+        result.map(|text| fence_events(&text))
     } else {
         result
     };
@@ -1044,13 +1082,120 @@ async fn handle_tool_call(state: &AppState, request: &JsonRpcRequest) -> JsonRpc
     }
 }
 
-/// The tool name as logged. The client chooses it, so an unknown name is cut
-/// to 128 characters, the longest tool name the MCP spec recommends.
-fn logged_tool_name(name: &str) -> &str {
-    match name.char_indices().nth(128) {
-        Some((end, _)) => &name[..end],
-        None => name,
+/// `get_events` output inside the untrusted-content fence, one line per
+/// event as mcp-k8s formats it.
+fn fence_events(text: &str) -> String {
+    crate::log_sanitize::fence_untrusted(
+        "KUBERNETES EVENTS",
+        "the Kubernetes API (event messages can come from plugins, controllers and workloads)",
+        &crate::log_sanitize::sanitize_logs(text),
+    )
+}
+
+tokio::task_local! {
+    /// Set by [`mcp_k8s_tool`] when a deckwatch tool hands its call to
+    /// mcp-k8s, which counts it in `mcp_k8s_tool_calls_total`.
+    static DELEGATED: Cell<bool>;
+}
+
+/// Run one of deckwatch's own tools in a `ToolCall`, so it gets the span
+/// attributes, duration metric event and log line mcp-k8s tools get. A call
+/// it hands to mcp-k8s's `handle_tool` reports into this one, so it is
+/// still one call.
+async fn call_deckwatch_tool(
+    state: &AppState,
+    tool: &DeckwatchTool,
+    args: &serde_json::Value,
+) -> Result<String, String> {
+    let start = Instant::now();
+    let call = ToolCall::start_with_action(
+        tool.name,
+        &mcp_telemetry::telemetry_arguments(tool.name, args),
+        tool.action,
+    );
+    let (result, delegated) = DELEGATED
+        .scope(Cell::new(false), async {
+            let result = call
+                .run(dispatch_deckwatch_tool(state, tool.name, args))
+                .await;
+            (result, DELEGATED.with(Cell::get))
+        })
+        .await;
+    call.finish(&result);
+    // deckwatch_mcp_tool_calls_total counts the calls deckwatch served
+    // itself; one it handed to mcp-k8s is in mcp_k8s_tool_calls_total.
+    if !delegated {
+        let status = if result.is_ok() { "ok" } else { "error" };
+        crate::metrics::record_mcp_tool_call(tool.name, status, start.elapsed().as_secs_f64());
     }
+    result
+}
+
+/// Dispatch one of deckwatch's own tools (`mcp_telemetry::DECKWATCH_TOOLS`).
+async fn dispatch_deckwatch_tool(
+    state: &AppState,
+    name: &str,
+    args: &serde_json::Value,
+) -> Result<String, String> {
+    match name {
+        "create_application" => tool_create_application(state, args).await,
+        "list_applications" => tool_list_applications(state, args).await,
+        "get_application" => tool_get_application(state, args).await,
+        "restart_application" => tool_restart_application(state, args).await,
+        "scale_application" => tool_scale_application(state, args).await,
+        "list_templates" => tool_list_templates(state).await,
+        "set_gitops" => tool_configure_gitops(state, args).await,
+        "get_gitops" => tool_get_gitops_status(state, args).await,
+        "trigger_build" => tool_trigger_gitops_build(state, args).await,
+        "create_ingress" => tool_create_ingress(state, args).await,
+        "update_ingress" => tool_update_ingress(state, args).await,
+        "list_ingress_templates" => tool_list_ingress_templates(state).await,
+        "create_ingress_template" => tool_create_ingress_template(state, args).await,
+        "update_ingress_template" => tool_update_ingress_template(state, args).await,
+        "delete_ingress_template" => tool_delete_ingress_template(state, args).await,
+        "list_builds" => tool_list_builds(state, args).await,
+        "get_build_log" => tool_get_build_log(state, args).await,
+        "watch_build" => tool_watch_build(state, args).await,
+        "generate_local_build" => tool_generate_local_build(state, args).await,
+        "get_monitoring" => tool_get_monitoring(state, args).await,
+        "enable_monitoring" => tool_enable_monitoring(state, args).await,
+        "disable_monitoring" => tool_disable_monitoring(state, args).await,
+        "list_plugins" => tool_list_plugins(state).await,
+        "enable_plugin" => tool_enable_plugin(state, args).await,
+        "disable_plugin" => tool_disable_plugin(state, args).await,
+        "update_plugin_config" => tool_update_plugin_config(state, args).await,
+        "get_plugin_config" => tool_get_plugin_config(state, args).await,
+        "validate_plugin" => tool_validate_plugin(state, args).await,
+        "associate_plugin" => tool_associate_plugin(state, args).await,
+        "disassociate_plugin" => tool_disassociate_plugin(state, args).await,
+        "list_application_resources" => tool_list_application_resources(state, args).await,
+        "provision_resource" => tool_provision_resource(state, args).await,
+        "deprovision_resource" => tool_deprovision_resource(state, args).await,
+        "refresh_resource" => tool_refresh_resource(state, args).await,
+        "submit_agent_feedback" => tool_submit_agent_feedback(state, args).await,
+        // Intercept k8s deployment mutation tools so they are audit-logged.
+        "create_deployment" => tool_mcp_create_deployment(state, args).await,
+        "delete_deployment" => tool_mcp_delete_deployment(state, args).await,
+        "scale_deployment" => tool_mcp_scale_deployment(state, args).await,
+        "restart_deployment" => tool_mcp_restart_deployment(state, args).await,
+        // Intercept update_deployment and create_pod to add service_account support.
+        "update_deployment" => tool_mcp_update_deployment(state, args).await,
+        "create_pod" => tool_mcp_create_pod(state, args).await,
+        // Intercept apply_manifest to accept YAML or JSON (upstream only handles JSON).
+        "apply_manifest" => tool_mcp_apply_manifest(state, args).await,
+        // Intercept exec_pod to avoid WebSocket upgrade failures in MCP context.
+        "exec_pod" => tool_mcp_exec_pod(state, args).await,
+        _ => Err(format!("Unknown tool: {name}")),
+    }
+}
+
+/// An mcp-k8s client for one call, with deckwatch's namespace allowlist.
+fn mcp_k8s_client(state: &AppState) -> mcp_k8s::K8sClient {
+    mcp_k8s::K8sClient::new(
+        state.kube_client.clone(),
+        state.allowed_namespaces.clone(),
+        mcp_k8s::permissions::ActionPermissions::default(),
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -2111,21 +2256,32 @@ async fn tool_enable_plugin(state: &AppState, args: &serde_json::Value) -> Resul
         return Ok(format!("plugin '{name}' is already enabled"));
     }
     cfg.enabled = true;
+    let enabled_cfg = cfg.clone();
 
     settings::upsert_settings_to_db_pub(&state.db, &s)
         .await
         .map_err(|e| format!("failed to save settings: {e}"))?;
 
-    // Trigger background refetch so the plugin is live immediately.
-    let state_clone = state.clone();
-    let plugins_cfg = s.plugins.clone();
-    tokio::spawn(async move {
-        let snap = settings::plugin_fetch_settings(&state_clone, plugins_cfg).await;
-        let loaded = crate::plugins::fetch_plugins(&snap, &state_clone).await;
-        tracing::info!(count = loaded.len(), "plugins reloaded after enable");
-        *state_clone.plugins.write().await = loaded;
-        state_clone.plugin_patch_fingerprints.lock().await.clear();
-    });
+    // Load the plugin now, so the result says whether it works: fetch,
+    // checksum, metadata() and version-check problems come back as events.
+    // Other loaded plugins are left alone.
+    let snap = settings::plugin_fetch_settings(state, vec![enabled_cfg]).await;
+    let reloaded = crate::plugins::fetch_plugins(&snap, state).await;
+    let loaded = !reloaded.is_empty();
+    {
+        let mut plugins = state.plugins.write().await;
+        crate::plugins::merge_reloaded_plugin(&mut plugins, name, reloaded);
+        // fetch_plugins set the gauge from the single-plugin load.
+        crate::metrics::set_plugins_loaded(plugins.len() as f64);
+        tracing::info!(
+            plugin = name,
+            loaded,
+            count = plugins.len(),
+            "plugin loaded after enable"
+        );
+    }
+    state.plugin_patch_fingerprints.lock().await.clear();
+    let events = state.plugin_telemetry.last_load(name).unwrap_or_default();
 
     audit::log_action(
         &state.db,
@@ -2139,12 +2295,18 @@ async fn tool_enable_plugin(state: &AppState, args: &serde_json::Value) -> Resul
     .await
     .ok();
 
-    Ok(serde_json::json!({
+    let text = serde_json::json!({
         "name": name,
         "enabled": true,
-        "status": "enabled — WASM binary fetch triggered in background"
+        "loaded": loaded,
+        "status": if loaded {
+            "enabled and loaded"
+        } else {
+            "enabled, but the plugin failed to load; see the plugin events below"
+        },
     })
-    .to_string())
+    .to_string();
+    Ok(with_plugin_output(text, &events))
 }
 
 async fn tool_disable_plugin(state: &AppState, args: &serde_json::Value) -> Result<String, String> {
@@ -2171,6 +2333,9 @@ async fn tool_disable_plugin(state: &AppState, args: &serde_json::Value) -> Resu
     {
         let mut loaded = state.plugins.write().await;
         loaded.retain(|p| p.name != name);
+        state
+            .plugin_telemetry
+            .keep_plugins(crate::plugins::enabled_plugin_names(&s));
     }
     // Clearing fingerprints forces a fresh reconcile on the next cycle so
     // resources injected by this plugin are no longer applied.
@@ -2466,6 +2631,7 @@ async fn tool_validate_plugin(
             .unwrap_or_default(),
         plugin_outputs: Default::default(),
         provisioned_resources: Default::default(),
+        trace_context: None,
     };
 
     let vr = crate::plugins::fetch_and_validate(&cfg, test_ctx, state).await;
@@ -2508,10 +2674,50 @@ async fn tool_validate_plugin(
             "annotations": vr.test_context.annotations,
         },
         "result": result_summary,
-        "error": vr.error,
+        // Only the host-assigned code here: the message is plugin text and
+        // goes in the fenced block below.
+        "error": vr.error.as_ref().map(|_| failure_note(&vr.events)),
     });
 
-    serde_json::to_string_pretty(&output).map_err(|e| e.to_string())
+    let text = serde_json::to_string_pretty(&output).map_err(|e| e.to_string())?;
+    Ok(with_plugin_output(text, &vr.events))
+}
+
+/// Append what plugins reported to a tool result, inside the untrusted-content
+/// fence. Plugin text never goes into the JSON part of a result.
+fn with_plugin_output(text: String, events: &[crate::plugin_events::PluginEventReport]) -> String {
+    if events.is_empty() {
+        return text;
+    }
+    format!(
+        "{text}\n\nPlugin events ({}):\n{}",
+        events.len(),
+        crate::plugin_events::fence_for_llm(events)
+    )
+}
+
+/// A one-line, host-written note naming the first error's code.
+fn failure_note(events: &[crate::plugin_events::PluginEventReport]) -> String {
+    let code = events
+        .iter()
+        .find(|r| {
+            crate::plugin_events::effective_severity(r.event.severity)
+                == crate::plugins::EventSeverity::Error
+        })
+        .map(|r| r.event.code.as_str())
+        .unwrap_or(crate::plugin_events::codes::UNSPECIFIED);
+    format!("plugin call failed ({code}); see the plugin events below")
+}
+
+/// The MCP error text for a failed handler call. A plugin failure carries
+/// plugin text, so its events are fenced instead of quoted.
+fn handler_error(e: crate::error::AppError) -> String {
+    match e {
+        crate::error::AppError::PluginFailed { events, .. } => {
+            with_plugin_output(failure_note(&events), &events)
+        }
+        other => other.to_string(),
+    }
 }
 
 // ── Plugin resource management tools ────────────────────────────────────────
@@ -2568,10 +2774,12 @@ async fn tool_provision_resource(
         Some(Json(req_body)),
     )
     .await
-    .map_err(|e| format!("{e}"))?;
+    .map_err(handler_error)?;
 
-    let (_status, Json(detail)) = result;
-    serde_json::to_string_pretty(&detail).map_err(|e| e.to_string())
+    let (_status, Json(mut detail)) = result;
+    let events = std::mem::take(&mut detail.plugin_events);
+    let text = serde_json::to_string_pretty(&detail).map_err(|e| e.to_string())?;
+    Ok(with_plugin_output(text, &events))
 }
 
 async fn tool_deprovision_resource(
@@ -2589,26 +2797,35 @@ async fn tool_deprovision_resource(
         .as_str()
         .ok_or("resource_id is required")?;
 
-    application_resources::deprovision(
-        State(state.clone()),
-        axum::extract::Path((
-            ns.to_string(),
-            app_name.to_string(),
-            plugin_name.to_string(),
-            resource_id.to_string(),
-        )),
+    let response = application_resources::deprovision_resource(
+        state,
+        &application_resources::DeprovisionTarget {
+            namespace: ns,
+            application: app_name,
+            plugin: plugin_name,
+            resource_id,
+        },
     )
     .await
-    .map_err(|e| format!("{e}"))?;
+    .map_err(handler_error)?;
 
-    Ok(serde_json::json!({
+    // The plugin's message is plugin text: it's in the fenced events (as an
+    // `info` event), not in the JSON.
+    let text = serde_json::json!({
         "status": "deprovisioned",
         "namespace": ns,
         "application_name": app_name,
         "plugin_name": plugin_name,
-        "resource_id": resource_id
+        "resource_id": resource_id,
+        "plugin_message": if response.message.is_empty() {
+            "none"
+        } else {
+            "see the plugin events below"
+        },
+        "kubernetes_resource_deletions": response.kubernetes_resource_deletions,
     })
-    .to_string())
+    .to_string();
+    Ok(with_plugin_output(text, &response.plugin_events))
 }
 
 async fn tool_refresh_resource(
@@ -2626,7 +2843,7 @@ async fn tool_refresh_resource(
         .as_str()
         .ok_or("resource_id is required")?;
 
-    let response = application_resources::refresh(
+    let Json(mut detail) = application_resources::refresh(
         State(state.clone()),
         axum::extract::Path((
             ns.to_string(),
@@ -2636,24 +2853,25 @@ async fn tool_refresh_resource(
         )),
     )
     .await
-    .map_err(|e| format!("{e}"))?;
+    .map_err(handler_error)?;
 
-    serde_json::to_string_pretty(&response.0).map_err(|e| e.to_string())
+    let events = std::mem::take(&mut detail.plugin_events);
+    let text = serde_json::to_string_pretty(&detail).map_err(|e| e.to_string())?;
+    Ok(with_plugin_output(text, &events))
 }
 
 // ── Deployment mutation tools (intercepted from mcp-k8s for audit logging) ──
 
+/// Hand a call of an intercepted tool to mcp-k8s. Inside
+/// [`call_deckwatch_tool`], mcp-k8s reports into the running `ToolCall` and
+/// counts the call in `mcp_k8s_tool_calls_total`.
 async fn mcp_k8s_tool(
     state: &AppState,
     tool_name: &str,
     args: &serde_json::Value,
 ) -> Result<String, String> {
-    let k8s_client = mcp_k8s::K8sClient::new(
-        state.kube_client.clone(),
-        state.allowed_namespaces.clone(),
-        mcp_k8s::permissions::ActionPermissions::default(),
-    );
-    mcp_k8s::mcp::handle_tool(&k8s_client, tool_name, args)
+    let _ = DELEGATED.try_with(|delegated| delegated.set(true));
+    mcp_k8s::mcp::handle_tool(&mcp_k8s_client(state), tool_name, args)
         .await
         .unwrap_or_else(|| Err(format!("unknown tool: {tool_name}")))
 }
@@ -3441,3 +3659,11 @@ fn method_not_found(request: &JsonRpcRequest) -> JsonRpcResponse {
 #[cfg(test)]
 #[path = "mcp_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "mcp_plugin_events_tests.rs"]
+mod plugin_events_tests;
+
+#[cfg(test)]
+#[path = "mcp_tool_telemetry_tests.rs"]
+mod tool_telemetry_tests;

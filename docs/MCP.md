@@ -249,6 +249,12 @@ using Streamable HTTP transport:
 - **Protocol:** JSON-RPC 2.0
 - **Content-Type:** `application/json`
 - **Methods:** `initialize`, `notifications/initialized`, `tools/list`, `tools/call`
+- **Sessions:** a successful `initialize` returns an `Mcp-Session-Id` header,
+  which clients send back on later requests. Deckwatch only uses it to label
+  those requests with the name and version the client gave in `initialize`
+  (see [Which tools were called](#which-tools-were-called)). A missing,
+  unknown or expired session id is never refused; sessions are kept in memory
+  (up to 1024, forgotten after 7 days unused).
 
 ### Testing with curl
 
@@ -321,13 +327,39 @@ variable on the deckwatch deployment.
 
 ### Which tools were called
 
-Deckwatch logs one line per `tools/call`, with the message `mcp tool call`,
-the `tool` name, `status` (`ok` or `error`) and `duration_ms`. Arguments and
-error text are never logged.
+Every MCP request is one span and one log line, written by the embedded
+mcp-k8s library with the target `mcp_k8s::telemetry`. Deckwatch's own tools
+report exactly like the mcp-k8s tools. A `tools/call` logs
+`tool call finished` with:
+
+- `gen_ai.tool.name`, `mcp_k8s.outcome` (`ok`, `error`, `denied` or
+  `cancelled`) and `duration_ms`;
+- `mcp_k8s.action` (`read`, `write`, `delete` or `exec`) and
+  `mcp_k8s.decision` (`allowed` or `denied`);
+- the target: `k8s.namespace.name`, `mcp_k8s.resource.kind` and
+  `mcp_k8s.resource.name`.
+
+Other methods log `request finished`. Argument values and error text are
+never logged, except the allowlisted target fields (such as the namespace,
+name, kind, image and container): the request span also carries the
+argument keys (`mcp_k8s.tool.argument_keys`) and those allowlisted values
+(`mcp_k8s.tool.arguments`).
 
 ```bash
-kubectl logs -n deckwatch deploy/deckwatch | grep '"mcp tool call"'
+kubectl logs -n deckwatch deploy/deckwatch | grep '"tool call finished"'
 ```
+
+Each JSON line includes the fields of its request span. In a session, that
+includes the client's name and version from `initialize`
+(`mcp_k8s.client.name` and `mcp_k8s.client.version`). The client reports
+these itself, so treat them as a label, not as the caller's identity.
+
+Prometheus `/metrics` counts each tool call once:
+`deckwatch_mcp_tool_calls_total{tool,status}` counts the calls deckwatch
+serves itself, and `mcp_k8s_tool_calls_total{tool,status}` counts the ones
+mcp-k8s runs, including those deckwatch intercepts and then hands on (such as
+`create_deployment`). `deckwatch_mcp_requests_total{method,status}` labels
+methods outside the MCP specification as `_OTHER`.
 
 ---
 

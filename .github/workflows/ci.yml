@@ -20,6 +20,48 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  # Decides whether Docker Build runs. Every PR already builds what the image
+  # contains, each in its own job: the backend (Rust Check, with the toolchain
+  # guard below), the frontend (Frontend Build, same Node major through
+  # frontend/.nvmrc) and the docs (Docs Build, same pinned mdBook). A PR only
+  # needs the image itself when it changes something those jobs can't see:
+  #   - the Dockerfile or .dockerignore;
+  #   - dependency manifests, since native libraries and musl bindings resolve
+  #     inside the image's own base images;
+  #   - the toolchain pin or the docs build tooling;
+  #   - this workflow.
+  # Pushes to main always build it, so anything else that breaks the image
+  # shows up before a release tag (images are only published from tags).
+  changes:
+    name: Detect changes
+    runs-on: ubuntu-latest
+    outputs:
+      docker: ${{ steps.filter.outputs.docker }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # A PR checks out GitHub's merge commit. Depth 2 brings its first
+          # parent, the base branch tip, so the diff below is the PR's change.
+          fetch-depth: 2
+
+      - name: Does this change affect the image build?
+        id: filter
+        run: |
+          if [ "$GITHUB_EVENT_NAME" != "pull_request" ]; then
+            echo "docker=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          git diff --name-only HEAD^1 HEAD > "$RUNNER_TEMP/changed.txt"
+          pattern='^(Dockerfile|\.dockerignore|Cargo\.(toml|lock)|rust-toolchain\.toml|build\.rs|frontend/(package\.json|pnpm-lock\.yaml|pnpm-workspace\.yaml|\.nvmrc)|scripts/build-docs\.sh|docs/book/book\.toml|\.github/workflows/ci\.yml)$'
+          if matched=$(grep -E "$pattern" "$RUNNER_TEMP/changed.txt"); then
+            echo "Docker Build runs; image-relevant changes:"
+            echo "$matched"
+            echo "docker=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "No image-relevant changes; Docker Build is skipped."
+            echo "docker=false" >> "$GITHUB_OUTPUT"
+          fi
+
   rust-check:
     name: Rust Check
     runs-on: ubuntu-latest
@@ -63,7 +105,12 @@ jobs:
           done
           exit "$rc"
 
+      # Restore the cache main saved, but save only from main. Each PR used to
+      # save its own (about 1.1 GiB), which filled the repo's 10 GiB Actions
+      # cache quota and evicted main's caches, the ones every PR restores.
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.event_name == 'push' }}
 
       # --all-targets type-checks and lints every target, test code included,
       # so a separate `cargo check` step would only repeat this work.
@@ -187,6 +234,35 @@ jobs:
             frontend/test-results/
           retention-days: 14
 
+  docs:
+    name: Docs Build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      # The same mdBook release and checksum as the Dockerfile's docs stage,
+      # read from its ARGs so the two can't drift.
+      - name: Install mdBook (pinned, checksum verified)
+        run: |
+          version=$(sed -n 's/^ARG MDBOOK_VERSION=//p' Dockerfile)
+          sha256=$(sed -n 's/^ARG MDBOOK_SHA256_X86_64=//p' Dockerfile)
+          if [ -z "$version" ] || [ -z "$sha256" ]; then
+            echo "::error file=Dockerfile::ARG MDBOOK_VERSION or MDBOOK_SHA256_X86_64 not found"
+            exit 1
+          fi
+          curl --fail --silent --show-error --location --output "$RUNNER_TEMP/mdbook.tar.gz" \
+            "https://github.com/rust-lang/mdBook/releases/download/${version}/mdbook-${version}-x86_64-unknown-linux-gnu.tar.gz"
+          echo "${sha256}  $RUNNER_TEMP/mdbook.tar.gz" | sha256sum --check --strict
+          mkdir -p "$RUNNER_TEMP/bin"
+          tar -xzf "$RUNNER_TEMP/mdbook.tar.gz" -C "$RUNNER_TEMP/bin" mdbook
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+
+      - name: Build the docs as the image does
+        run: |
+          mdbook --version
+          bash scripts/build-docs.sh --copy
+          test -f docs/book/book/index.html
+
   helm-lint:
     name: Helm Lint
     runs-on: ubuntu-latest
@@ -201,6 +277,10 @@ jobs:
 
   docker-build:
     name: Docker Build
+    # Always on pushes to main; on PRs only when `changes` found image-relevant
+    # files. A skipped job reports success, so it can still be a required check.
+    needs: changes
+    if: needs.changes.outputs.docker == 'true'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7

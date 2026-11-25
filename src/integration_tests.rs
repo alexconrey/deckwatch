@@ -62,6 +62,7 @@ async fn build_state() -> AppState {
         plugin_patch_fingerprints: std::sync::Arc::new(tokio::sync::Mutex::new(
             std::collections::HashMap::new(),
         )),
+        plugin_telemetry: Default::default(),
     }
 }
 
