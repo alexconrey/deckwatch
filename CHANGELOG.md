@@ -17,7 +17,7 @@ Changes merged since the last release are listed under `[Unreleased]`.
 
 ## [Unreleased]
 
-## [0.7.0] - 2026-11-24
+## [0.7.0] - 2026-11-25
 
 A security and hardening release. It also moves to kube 5, which requires
 Kubernetes 1.33 or newer; makes outbound HTTPS configurable (extra trusted
