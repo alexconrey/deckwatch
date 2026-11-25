@@ -4,6 +4,7 @@
 import type {
   AuditEntry,
   LabeledSeries,
+  McpActivitySource,
   McpActivityWindow,
   McpAuditDetail,
   TimePoint,
@@ -79,6 +80,44 @@ const OUTCOMES: Record<string, OutcomeMeta> = {
 
 export function outcomeMeta(outcome: string): OutcomeMeta {
   return OUTCOMES[outcome] ?? { label: outcome || "unknown", icon: "mdi-help-circle", color: "secondary" };
+}
+
+export interface SourceMeta {
+  label: string;
+  icon: string;
+  color: string;
+  // One sentence on where the figures come from.
+  detail: string;
+}
+
+/** How the page shows where its tool call figures come from. */
+export function sourceMeta(source: McpActivitySource | null): SourceMeta {
+  switch (source) {
+    case "otlp":
+      return {
+        label: "OTLP",
+        icon: "mdi-chart-timeline-variant",
+        color: "primary",
+        detail:
+          "From mcp_server_operation_duration_seconds, the histogram of MCP requests that deckwatch exports over OTLP.",
+      };
+    case "scrape":
+      return {
+        label: "/metrics fallback",
+        icon: "mdi-backup-restore",
+        color: "warning",
+        detail:
+          "Prometheus has no OTLP series from deckwatch for this window, so these come from its /metrics counters. This fallback is temporary: export deckwatch's metrics over OTLP.",
+      };
+    default:
+      return {
+        label: "No data",
+        icon: "mdi-database-off-outline",
+        color: "secondary",
+        detail:
+          "Prometheus has no tool call series from deckwatch for this window, neither over OTLP nor from /metrics.",
+      };
+  }
 }
 
 export const ACTIONS = ["write", "delete", "exec", "read"] as const;

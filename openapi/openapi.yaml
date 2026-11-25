@@ -1088,11 +1088,17 @@ paths:
       tags: [MCP, Metrics]
       summary: MCP tool call metrics for the MCP activity page
       description: |
-        deckwatch's own MCP metrics (`deckwatch_mcp_tool_calls_total`,
-        `mcp_k8s_tool_calls_total` and their duration histograms) from the Prometheus
-        at `PROMETHEUS_URL`, through fixed queries. Without Prometheus, or when a
-        query fails, the response is 200 with `unavailable_reason` set and no data.
-        Sums every deckwatch instance that Prometheus scrapes.
+        deckwatch's MCP tool call metrics from the Prometheus at `PROMETHEUS_URL`,
+        through fixed queries. The primary source is the
+        `mcp_server_operation_duration_seconds` histogram that deckwatch exports
+        over OTLP (through Prometheus's OTLP receiver, default translation). When
+        Prometheus has none of it for the window, the fallback is deckwatch's own
+        counters on `/metrics` (`deckwatch_mcp_tool_calls_total` and
+        `deckwatch_mcp_passthrough_tool_calls_total`, and their duration
+        histograms). `source` says which one the figures come from. Without
+        Prometheus, or when a query fails, the response is 200 with
+        `unavailable_reason` set and no data. Sums every deckwatch instance that
+        Prometheus has metrics from.
       parameters:
         - { name: window, in: query, schema: { type: string, enum: [1h, 24h, 7d], default: 24h } }
       responses:
@@ -1199,10 +1205,19 @@ components:
         p95_seconds: { type: number, nullable: true }
     McpActivityResponse:
       type: object
-      required: [window_seconds, step_seconds, calls_per_minute, apply_manifest_per_minute, p95_seconds, tools]
+      required: [window_seconds, step_seconds, source, calls_per_minute, apply_manifest_per_minute, p95_seconds, tools]
       properties:
         window_seconds: { type: integer }
         step_seconds: { type: integer }
+        source:
+          type: string
+          nullable: true
+          enum: [otlp, scrape, null]
+          description: >-
+            Where the figures come from: `otlp` (deckwatch's OTLP histogram) or
+            `scrape` (the `/metrics` counters, the fallback). Null when
+            Prometheus has neither for the window (the figures are then
+            empty), or with `unavailable_reason`.
         calls_per_minute: { type: array, items: { $ref: "#/components/schemas/LabeledSeries" } }
         apply_manifest_per_minute: { type: array, items: { $ref: "#/components/schemas/LabeledSeries" } }
         p95_seconds: { type: array, items: { $ref: "#/components/schemas/TimePoint" } }

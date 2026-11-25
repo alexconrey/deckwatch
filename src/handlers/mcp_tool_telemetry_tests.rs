@@ -303,6 +303,72 @@ async fn an_unknown_tool_is_reported_without_its_name() {
     assert!(!haystack.contains("canary47"), "{haystack}");
 }
 
+/// The MCP activity page's primary source reads tool calls from the
+/// duration metric alone (`super::prometheus_query`): every tool call,
+/// served by deckwatch or run by mcp-k8s, is a `tools/call` observation that
+/// names its tool, with its outcome in `error.type` and `mcp_k8s.decision`.
+#[tokio::test]
+async fn the_duration_metric_names_every_tool_call_and_its_outcome() {
+    let mut state = echo_state().await;
+    state.allowed_namespaces = vec!["prod".to_string()];
+    let manifest =
+        "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: web\n  namespace: prod\n";
+    // (tool, arguments, error.type, mcp_k8s.decision)
+    let cases = [
+        // deckwatch serves these
+        ("list_templates", json!({}), None, "allowed"),
+        (
+            "exec_pod",
+            json!({"namespace": "prod", "pod_name": "web-1", "command": "ls"}),
+            Some("tool_error"),
+            "allowed",
+        ),
+        // mcp-k8s runs this one (the echo API fails it)
+        (
+            "list_pods",
+            json!({"namespace": "prod"}),
+            Some("tool_error"),
+            "allowed",
+        ),
+        // deckwatch hands this one to mcp-k8s
+        (
+            "apply_manifest",
+            json!({ "manifest": manifest }),
+            Some("tool_error"),
+            "allowed",
+        ),
+        // a guardrail refuses these before any tool runs
+        (
+            "list_pods",
+            json!({"namespace": "kube-system"}),
+            Some("permission_denied"),
+            "denied",
+        ),
+        (
+            "get_monitoring",
+            json!({"namespace": "kube-system", "deployment_name": "web"}),
+            Some("permission_denied"),
+            "denied",
+        ),
+    ];
+    for (tool, args, error_type, decision) in cases {
+        let (_, captured) = capture(post(&state, HeaderMap::new(), call(tool, args))).await;
+        let r = one_request(&captured, tool);
+        assert_eq!(
+            r.metric_field(semconv::MCP_METHOD_NAME),
+            Some(semconv::TOOLS_CALL),
+            "{tool}"
+        );
+        assert_eq!(r.metric_field(semconv::GEN_AI_TOOL_NAME), Some(tool));
+        assert_eq!(r.metric_field(semconv::ERROR_TYPE), error_type, "{tool}");
+        assert_eq!(
+            r.metric_field(semconv::MCP_K8S_DECISION),
+            Some(decision),
+            "{tool}"
+        );
+    }
+}
+
 #[tokio::test]
 async fn other_methods_are_one_span_one_metric_event_one_log_line() {
     let state = echo_state().await;
@@ -448,9 +514,9 @@ async fn a_failed_initialize_starts_no_session() {
 // ---------------------------------------------------------------------------
 
 /// The Prometheus exposition after running `calls` against a recorder of
-/// their own.
-fn prometheus_after(calls: Vec<Value>) -> String {
-    let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+/// their own, with `allowed` as the namespace allowlist (empty: all).
+fn prometheus_after(allowed: &[&str], calls: Vec<Value>) -> String {
+    let recorder = crate::metrics::exporter().build_recorder();
     let handle = recorder.handle();
     metrics::with_local_recorder(&recorder, || {
         tokio::runtime::Builder::new_current_thread()
@@ -458,7 +524,8 @@ fn prometheus_after(calls: Vec<Value>) -> String {
             .build()
             .unwrap()
             .block_on(async {
-                let state = echo_state().await;
+                let mut state = echo_state().await;
+                state.allowed_namespaces = allowed.iter().map(|ns| ns.to_string()).collect();
                 for call in calls {
                     post(&state, HeaderMap::new(), call).await;
                 }
@@ -478,68 +545,104 @@ fn counter(exposition: &str, series: &str) -> Option<u64> {
 
 #[test]
 fn a_tool_call_is_counted_once() {
-    let text = prometheus_after(vec![
-        // Interceptors that hand the call to mcp-k8s: counted by mcp-k8s.
-        call(
-            "create_deployment",
-            json!({"namespace": "prod", "name": "web", "image": "nginx"}),
-        ),
-        call(
-            "restart_deployment",
-            json!({"namespace": "prod", "name": "web"}),
-        ),
-        // deckwatch serves these itself: counted by deckwatch.
-        call(
-            "exec_pod",
-            json!({"namespace": "prod", "pod_name": "web-1", "command": "ls"}),
-        ),
-        call(
-            "update_deployment",
-            json!({"namespace": "prod", "name": "web", "service_account": "builder"}),
-        ),
-        call("list_templates", json!({})),
-        // Forwarded to mcp-k8s.
-        call("list_pods", json!({"namespace": "prod"})),
-    ]);
-    let deckwatch = |tool: &str, status: &str| {
+    let manifest =
+        "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: web\n  namespace: prod\n";
+    let text = prometheus_after(
+        &["prod"],
+        vec![
+            // Interceptors that hand the call to mcp-k8s: passthrough calls.
+            call(
+                "create_deployment",
+                json!({"namespace": "prod", "name": "web", "image": "nginx"}),
+            ),
+            call(
+                "restart_deployment",
+                json!({"namespace": "prod", "name": "web"}),
+            ),
+            call("apply_manifest", json!({ "manifest": manifest })),
+            // deckwatch serves these itself.
+            call(
+                "exec_pod",
+                json!({"namespace": "prod", "pod_name": "web-1", "command": "ls"}),
+            ),
+            call(
+                "update_deployment",
+                json!({"namespace": "prod", "name": "web", "service_account": "builder"}),
+            ),
+            call("list_templates", json!({})),
+            // Forwarded to mcp-k8s: a passthrough call.
+            call("list_pods", json!({"namespace": "prod"})),
+            // Refused by a guardrail before mcp-k8s sees it: deckwatch's.
+            call("list_secrets", json!({"namespace": "kube-system"})),
+        ],
+    );
+    let series = |metric: &str, tool: &str, status: &str| {
         counter(
             &text,
-            &format!("deckwatch_mcp_tool_calls_total{{tool=\"{tool}\",status=\"{status}\"}}"),
+            &format!("{metric}{{tool=\"{tool}\",status=\"{status}\"}}"),
         )
     };
-    let library = |tool: &str, status: &str| {
-        counter(
-            &text,
-            &format!("mcp_k8s_tool_calls_total{{tool=\"{tool}\",status=\"{status}\"}}"),
-        )
+    let deckwatch =
+        |tool: &str, status: &str| series("deckwatch_mcp_tool_calls_total", tool, status);
+    let passthrough = |tool: &str, status: &str| {
+        series("deckwatch_mcp_passthrough_tool_calls_total", tool, status)
     };
-    assert_eq!(library("create_deployment", "error"), Some(1), "{text}");
-    assert_eq!(library("restart_deployment", "error"), Some(1), "{text}");
-    assert_eq!(library("list_pods", "error"), Some(1), "{text}");
-    assert_eq!(deckwatch("exec_pod", "error"), Some(1), "{text}");
-    assert_eq!(deckwatch("update_deployment", "error"), Some(1), "{text}");
-    assert_eq!(deckwatch("list_templates", "ok"), Some(1), "{text}");
-    for tool in ["create_deployment", "restart_deployment", "list_pods"] {
+    // mcp-k8s's own counter (deprecated in mcp-k8s v0.7.0), for comparison.
+    let library = |tool: &str, status: &str| series("mcp_k8s_tool_calls_total", tool, status);
+
+    let passed_through = [
+        "create_deployment",
+        "restart_deployment",
+        "apply_manifest",
+        "list_pods",
+    ];
+    for tool in passed_through {
+        assert_eq!(passthrough(tool, "error"), Some(1), "{tool}:\n{text}");
+        // The same calls mcp-k8s counts itself.
+        assert_eq!(library(tool, "error"), Some(1), "{tool}:\n{text}");
+        assert!(
+            text.contains(&format!(
+                "deckwatch_mcp_passthrough_tool_call_duration_seconds_count{{tool=\"{tool}\"}} 1"
+            )),
+            "{tool} has no duration:\n{text}"
+        );
         assert!(
             !text.contains(&format!("deckwatch_mcp_tool_calls_total{{tool=\"{tool}\"")),
             "{tool} counted twice:\n{text}"
         );
     }
-    for tool in ["exec_pod", "update_deployment", "list_templates"] {
-        assert!(
-            !text.contains(&format!("mcp_k8s_tool_calls_total{{tool=\"{tool}\"")),
-            "{tool} counted twice:\n{text}"
-        );
+    assert_eq!(deckwatch("exec_pod", "error"), Some(1), "{text}");
+    assert_eq!(deckwatch("update_deployment", "error"), Some(1), "{text}");
+    assert_eq!(deckwatch("list_templates", "ok"), Some(1), "{text}");
+    assert_eq!(deckwatch("list_secrets", "denied"), Some(1), "{text}");
+    for tool in [
+        "exec_pod",
+        "update_deployment",
+        "list_templates",
+        "list_secrets",
+    ] {
+        for metric in [
+            "deckwatch_mcp_passthrough_tool_calls_total",
+            "mcp_k8s_tool_calls_total",
+        ] {
+            assert!(
+                !text.contains(&format!("{metric}{{tool=\"{tool}\"")),
+                "{tool} counted twice:\n{text}"
+            );
+        }
     }
 }
 
 #[test]
 fn request_method_labels_are_bounded() {
-    let text = prometheus_after(vec![
-        message("evil/canary-method-4714", json!({})),
-        message("ping", json!({})),
-        call("no_such_tool_canary4715", json!({})),
-    ]);
+    let text = prometheus_after(
+        &[],
+        vec![
+            message("evil/canary-method-4714", json!({})),
+            message("ping", json!({})),
+            call("no_such_tool_canary4715", json!({})),
+        ],
+    );
     assert_eq!(
         counter(
             &text,

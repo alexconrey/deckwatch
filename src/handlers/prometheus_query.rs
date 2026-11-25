@@ -25,8 +25,11 @@
 //! - Prometheus unreachable / non-2xx -> 200 with `unavailable_reason` set
 //!   to a human-readable message. UI renders a callout, not a red banner.
 
+use std::sync::LazyLock;
+
 use axum::extract::{Query, State};
 use axum::Json;
+use mcp_k8s::telemetry::semconv;
 use serde::{Deserialize, Serialize};
 
 use crate::error::AppError;
@@ -478,8 +481,27 @@ async fn post_query(
 }
 
 // ---------------------------------------------------------------------------
-// MCP activity: deckwatch's own MCP metrics
+// MCP activity: deckwatch's MCP tool call metrics
 // ---------------------------------------------------------------------------
+//
+// The page reads one of two sources, the first that Prometheus has tool call
+// series from in the window (`detect_source`):
+//
+// 1. OTLP, the primary source: the `mcp.server.operation.duration` histogram
+//    deckwatch exports over OTLP (src/telemetry.rs), as Prometheus's OTLP
+//    receiver stores it with its default translation
+//    (`UnderscoreEscapingWithSuffixes`):
+//    `mcp_server_operation_duration_seconds_{bucket,sum,count}`. Every tool
+//    call is one observation, whether deckwatch serves the tool or mcp-k8s
+//    runs it (`super::mcp_telemetry`).
+// 2. Scrape, the fallback for one release: deckwatch's own counters on
+//    `/metrics`. `deckwatch_mcp_tool_calls_total` counts the calls deckwatch
+//    serves itself and the ones a guardrail refuses, and
+//    `deckwatch_mcp_passthrough_tool_calls_total` the ones it hands to
+//    mcp-k8s, so each call is in exactly one of them.
+//
+// Neither reads mcp-k8s's own `mcp_k8s_*` metrics, which mcp-k8s v0.7.0
+// deprecated.
 
 /// The time windows the MCP activity page offers.
 #[derive(Debug, Deserialize, Clone, Copy, PartialEq, Eq, Default)]
@@ -555,10 +577,36 @@ pub struct ToolActivity {
     pub p95_seconds: Option<f64>,
 }
 
+/// Where the MCP activity page's tool call figures come from.
+#[derive(Debug, Serialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ActivitySource {
+    /// `mcp_server_operation_duration_seconds_*`: deckwatch's OTLP metrics,
+    /// through Prometheus's OTLP receiver.
+    Otlp,
+    /// deckwatch's own counters, scraped from `/metrics`: the fallback.
+    Scrape,
+}
+
+impl ActivitySource {
+    /// The label that names the tool in this source's series.
+    fn tool_label(self) -> &'static str {
+        match self {
+            Self::Otlp => OTLP_TOOL,
+            Self::Scrape => "tool",
+        }
+    }
+}
+
 #[derive(Debug, Serialize)]
 pub struct McpActivityResponse {
     pub window_seconds: i64,
     pub step_seconds: u32,
+    /// Where the figures come from: `otlp` when Prometheus has deckwatch's
+    /// OTLP tool call series for the window, otherwise `scrape` when it has
+    /// the `/metrics` counters. `None` when it has neither (the figures are
+    /// then empty), or with `unavailable_reason`.
+    pub source: Option<ActivitySource>,
     /// Tool calls per minute by outcome.
     pub calls_per_minute: Vec<LabeledSeries>,
     /// `apply_manifest` calls per minute by outcome.
@@ -576,28 +624,95 @@ pub struct McpActivityResponse {
 /// The most tools [`McpActivityResponse::tools`] lists.
 pub const MAX_TOOLS: usize = 25;
 
-/// Tool call counters: the calls deckwatch serves itself, and the ones
-/// mcp-k8s runs. Each call is counted in exactly one of them.
-const CALL_COUNTERS: [&str; 2] = ["deckwatch_mcp_tool_calls_total", "mcp_k8s_tool_calls_total"];
-/// The matching duration histograms (same buckets, one recorder).
-const DURATION_BUCKETS: [&str; 2] = [
+/// mcp-k8s's duration histogram (`semconv::MCP_SERVER_OPERATION_DURATION`,
+/// unit `s`) as Prometheus's OTLP receiver names it.
+const OTLP_DURATION: &str = "mcp_server_operation_duration_seconds";
+/// Labels of [`OTLP_DURATION`]: mcp-k8s's metric attributes with `.` turned
+/// into `_` (`semconv::GEN_AI_TOOL_NAME` and so on; the tests check them).
+const OTLP_TOOL: &str = "gen_ai_tool_name";
+const OTLP_METHOD: &str = "mcp_method_name";
+const OTLP_ERROR_TYPE: &str = "error_type";
+const OTLP_DECISION: &str = "mcp_k8s_decision";
+
+/// The fallback's tool call counters (`crate::metrics::MCP_TOOL_CALLS` and
+/// `MCP_PASSTHROUGH_TOOL_CALLS`). Each call is counted in exactly one.
+const SCRAPE_COUNTERS: [&str; 2] = [
+    "deckwatch_mcp_tool_calls_total",
+    "deckwatch_mcp_passthrough_tool_calls_total",
+];
+/// The matching duration histograms' buckets (same buckets, one recorder).
+const SCRAPE_DURATION_BUCKETS: [&str; 2] = [
     "deckwatch_mcp_tool_call_duration_seconds_bucket",
-    "mcp_k8s_tool_call_duration_seconds_bucket",
+    "deckwatch_mcp_passthrough_tool_call_duration_seconds_bucket",
 ];
 
-/// `inner` applied to both metric families, each marked with its own
-/// `family` label so `or` keeps the series of both and `sum` adds them up.
+/// `inner` applied to both fallback metric families, each marked with its
+/// own `family` label so `or` keeps the series of both and `sum` adds them
+/// up. A tool can be in both: an mcp-k8s tool's refused calls are
+/// deckwatch's.
 fn both_families(metrics: [&str; 2], inner: impl Fn(&str) -> String) -> String {
     format!(
         "label_replace({}, \"family\", \"deckwatch\", \"\", \"\") or \
-         label_replace({}, \"family\", \"mcp_k8s\", \"\", \"\")",
+         label_replace({}, \"family\", \"passthrough\", \"\", \"\")",
         inner(metrics[0]),
         inner(metrics[1])
     )
 }
 
-/// The PromQL for the MCP activity page. Fixed queries: only the window,
-/// a server-side enum, varies.
+/// `s` inside a double-quoted PromQL string.
+fn promql_escape(s: &str) -> String {
+    s.replace('\\', r"\\")
+        .replace('"', r#"\""#)
+        .replace('\n', r"\n")
+}
+
+/// deckwatch's tool calls in the OTLP histogram's `series` (`count` or
+/// `bucket`): the `tools/call` observations with deckwatch's `job` whose tool
+/// name matches `tool` (`!=""`, or `="apply_manifest"`). Calls of a tool
+/// deckwatch doesn't have carry no tool name; the fallback doesn't count them
+/// either.
+fn otlp_selector(series: &str, job: &str, tool: &str) -> String {
+    format!(
+        "{OTLP_DURATION}_{series}{{job=\"{}\",{OTLP_METHOD}=\"{}\",{OTLP_TOOL}{tool}}}",
+        promql_escape(job),
+        semconv::TOOLS_CALL,
+    )
+}
+
+/// `inner`, OTLP series, with the fallback's `status` label: `denied` for the
+/// calls a guardrail refused (`mcp_k8s_decision="denied"`), `error` for the
+/// other calls with an `error_type`, `ok` for the rest. A refused call has an
+/// `error_type` too (`permission_denied`), so the denial rule comes last.
+fn with_status(inner: &str) -> String {
+    format!(
+        "label_replace(label_replace(label_replace({inner}, \
+         \"status\", \"ok\", \"\", \"\"), \
+         \"status\", \"error\", \"{OTLP_ERROR_TYPE}\", \".+\"), \
+         \"status\", \"denied\", \"{OTLP_DECISION}\", \"denied\")"
+    )
+}
+
+/// An instant query that returns one sample when Prometheus has any tool call
+/// series of `source` in `window`, and none otherwise. It only checks for
+/// series: no rates, no histogram buckets.
+fn has_data_query(source: ActivitySource, window: ActivityWindow, job: &str) -> String {
+    let w = window.range();
+    let present = |selector: &str| format!("group(present_over_time({selector}[{w}]))");
+    match source {
+        ActivitySource::Otlp => present(&otlp_selector("count", job, "!=\"\"")),
+        ActivitySource::Scrape => format!(
+            "{} or {}",
+            present(SCRAPE_COUNTERS[0]),
+            present(SCRAPE_COUNTERS[1])
+        ),
+    }
+}
+
+/// The PromQL for the MCP activity page. Fixed queries: only the source and
+/// the window, server-side enums, and deckwatch's own `job` vary.
+///
+/// Both sources produce the same `status` label, and name the tool with
+/// [`ActivitySource::tool_label`].
 struct ActivityQueries {
     calls: String,
     apply_manifest: String,
@@ -606,45 +721,72 @@ struct ActivityQueries {
     tool_p95: String,
 }
 
-fn activity_queries(window: ActivityWindow) -> ActivityQueries {
+fn activity_queries(source: ActivitySource, window: ActivityWindow, job: &str) -> ActivityQueries {
     let r = window.rate_range();
     let w = window.range();
-    ActivityQueries {
-        calls: format!(
-            "sum by (status) ({}) * 60",
-            both_families(CALL_COUNTERS, |m| format!("rate({m}[{r}])"))
-        ),
-        apply_manifest: format!(
-            "sum by (status) ({}) * 60",
-            both_families(CALL_COUNTERS, |m| format!(
-                "rate({m}{{tool=\"apply_manifest\"}}[{r}])"
-            ))
-        ),
-        p95: format!(
-            "histogram_quantile(0.95, sum by (le) ({}))",
-            both_families(DURATION_BUCKETS, |m| format!("rate({m}[{r}])"))
-        ),
-        tool_totals: format!(
-            "sum by (tool, status) ({})",
-            both_families(CALL_COUNTERS, |m| format!("increase({m}[{w}])"))
-        ),
-        tool_p95: format!(
-            "histogram_quantile(0.95, sum by (le, tool) ({}))",
-            both_families(DURATION_BUCKETS, |m| format!("increase({m}[{w}])"))
-        ),
+    match source {
+        ActivitySource::Otlp => {
+            let calls = otlp_selector("count", job, "!=\"\"");
+            let apply_manifest = otlp_selector("count", job, "=\"apply_manifest\"");
+            let buckets = otlp_selector("bucket", job, "!=\"\"");
+            ActivityQueries {
+                calls: format!(
+                    "sum by (status) ({}) * 60",
+                    with_status(&format!("rate({calls}[{r}])"))
+                ),
+                apply_manifest: format!(
+                    "sum by (status) ({}) * 60",
+                    with_status(&format!("rate({apply_manifest}[{r}])"))
+                ),
+                p95: format!("histogram_quantile(0.95, sum by (le) (rate({buckets}[{r}])))"),
+                tool_totals: format!(
+                    "sum by ({OTLP_TOOL}, status) ({})",
+                    with_status(&format!("increase({calls}[{w}])"))
+                ),
+                tool_p95: format!(
+                    "histogram_quantile(0.95, sum by (le, {OTLP_TOOL}) \
+                     (increase({buckets}[{w}])))"
+                ),
+            }
+        }
+        ActivitySource::Scrape => ActivityQueries {
+            calls: format!(
+                "sum by (status) ({}) * 60",
+                both_families(SCRAPE_COUNTERS, |m| format!("rate({m}[{r}])"))
+            ),
+            apply_manifest: format!(
+                "sum by (status) ({}) * 60",
+                both_families(SCRAPE_COUNTERS, |m| format!(
+                    "rate({m}{{tool=\"apply_manifest\"}}[{r}])"
+                ))
+            ),
+            p95: format!(
+                "histogram_quantile(0.95, sum by (le) ({}))",
+                both_families(SCRAPE_DURATION_BUCKETS, |m| format!("rate({m}[{r}])"))
+            ),
+            tool_totals: format!(
+                "sum by (tool, status) ({})",
+                both_families(SCRAPE_COUNTERS, |m| format!("increase({m}[{w}])"))
+            ),
+            tool_p95: format!(
+                "histogram_quantile(0.95, sum by (le, tool) ({}))",
+                both_families(SCRAPE_DURATION_BUCKETS, |m| format!("increase({m}[{w}])"))
+            ),
+        },
     }
 }
 
-/// Per-tool totals from `sum by (tool, status) (increase(...))` samples and
-/// `histogram_quantile(...) by (tool)` samples: most calls first, at most
-/// [`MAX_TOOLS`].
+/// Per-tool totals from `sum by (<tool>, status) (increase(...))` samples and
+/// `histogram_quantile(...) by (<tool>)` samples, the tool named by
+/// `tool_label`: most calls first, at most [`MAX_TOOLS`].
 fn tool_activity(
     totals: Vec<(serde_json::Map<String, serde_json::Value>, f64)>,
     p95: Vec<(serde_json::Map<String, serde_json::Value>, f64)>,
+    tool_label: &str,
 ) -> Vec<ToolActivity> {
     let mut by_tool: std::collections::BTreeMap<String, ToolActivity> = Default::default();
     for (labels, value) in totals {
-        let Some(tool) = label_of(&labels, "tool") else {
+        let Some(tool) = label_of(&labels, tool_label) else {
             continue;
         };
         let entry = by_tool.entry(tool.clone()).or_insert(ToolActivity {
@@ -662,7 +804,7 @@ fn tool_activity(
         }
     }
     for (labels, value) in p95 {
-        if let Some(entry) = label_of(&labels, "tool").and_then(|t| by_tool.get_mut(&t)) {
+        if let Some(entry) = label_of(&labels, tool_label).and_then(|t| by_tool.get_mut(&t)) {
             entry.p95_seconds = Some(value);
         }
     }
@@ -688,30 +830,95 @@ fn labeled(series: Vec<(Option<String>, Vec<RangePoint>)>) -> Vec<LabeledSeries>
     out
 }
 
+/// The `job` label of deckwatch's OTLP series, from the resource deckwatch
+/// exports with. Matching it keeps out other services that export the same
+/// OpenTelemetry metric, such as a standalone mcp-k8s.
+fn otlp_job() -> &'static str {
+    static JOB: LazyLock<String> = LazyLock::new(|| {
+        let resource = crate::telemetry::resource();
+        let attribute = |key: &'static str| {
+            resource
+                .get(&opentelemetry::Key::from_static_str(key))
+                .map(|v| v.to_string())
+                .filter(|v| !v.is_empty())
+        };
+        job_label(
+            attribute("service.namespace").as_deref(),
+            &attribute("service.name")
+                .unwrap_or_else(|| crate::telemetry::DEFAULT_SERVICE_NAME.to_string()),
+        )
+    });
+    &JOB
+}
+
+/// The `job` label Prometheus's OTLP receiver gives a resource:
+/// `service.namespace/service.name`, or `service.name` alone.
+fn job_label(service_namespace: Option<&str>, service_name: &str) -> String {
+    match service_namespace {
+        Some(namespace) => format!("{namespace}/{service_name}"),
+        None => service_name.to_string(),
+    }
+}
+
 /// `GET /api/prometheus/mcp_activity?window=1h|24h|7d`: deckwatch's MCP
-/// tool call metrics for the MCP activity page, from the Prometheus that
-/// scrapes deckwatch. Like the bundled Grafana dashboard, it sums every
-/// deckwatch instance that Prometheus scrapes.
+/// tool call metrics for the MCP activity page, from the Prometheus at
+/// `PROMETHEUS_URL`. Like the bundled Grafana dashboard, it sums every
+/// deckwatch instance that Prometheus has series from.
 pub async fn mcp_activity(
     State(_state): State<AppState>,
     Query(params): Query<McpActivityQuery>,
 ) -> Json<McpActivityResponse> {
     let http = crate::outbound::global().client(crate::outbound::Purpose::Observability);
     let now = jiff::Timestamp::now().as_second();
-    Json(activity(prometheus_url().as_deref(), &http, params.window, now).await)
+    Json(
+        activity(
+            prometheus_url().as_deref(),
+            &http,
+            params.window,
+            now,
+            otlp_job(),
+        )
+        .await,
+    )
+}
+
+/// The source the page reads for `window` ending at `now`: OTLP if
+/// Prometheus has deckwatch's OTLP tool call series in the window, otherwise
+/// the `/metrics` counters if it has those, otherwise `None`. One cheap
+/// instant query per source, both at once.
+async fn detect_source(
+    http: &reqwest::Client,
+    prom_url: &str,
+    window: ActivityWindow,
+    now: i64,
+    job: &str,
+) -> Result<Option<ActivitySource>, String> {
+    let otlp = has_data_query(ActivitySource::Otlp, window, job);
+    let scrape = has_data_query(ActivitySource::Scrape, window, job);
+    let (otlp, scrape) = tokio::join!(
+        execute_instant(http, prom_url, &otlp, now),
+        execute_instant(http, prom_url, &scrape, now),
+    );
+    if !otlp?.is_empty() {
+        return Ok(Some(ActivitySource::Otlp));
+    }
+    Ok((!scrape?.is_empty()).then_some(ActivitySource::Scrape))
 }
 
 /// The MCP activity for `window` ending at `now` (unix seconds), from the
-/// Prometheus at `prom_url`.
+/// Prometheus at `prom_url`. `job` is the `job` label of deckwatch's OTLP
+/// series ([`otlp_job`]).
 async fn activity(
     prom_url: Option<&str>,
     http: &reqwest::Client,
     window: ActivityWindow,
     now: i64,
+    job: &str,
 ) -> McpActivityResponse {
     let mut response = McpActivityResponse {
         window_seconds: window.seconds(),
         step_seconds: window.step(),
+        source: None,
         calls_per_minute: Vec::new(),
         apply_manifest_per_minute: Vec::new(),
         p95_seconds: Vec::new(),
@@ -720,15 +927,24 @@ async fn activity(
     };
     let Some(prom_url) = prom_url else {
         response.unavailable_reason = Some(
-            "prometheus not configured (set PROMETHEUS_URL to the Prometheus that scrapes \
-             deckwatch's /metrics)"
+            "prometheus not configured (set PROMETHEUS_URL to the Prometheus that stores \
+             deckwatch's metrics)"
                 .to_string(),
         );
         return response;
     };
+    let source = match detect_source(http, prom_url, window, now, job).await {
+        Ok(Some(source)) => source,
+        // Neither source has series in the window: nothing to show.
+        Ok(None) => return response,
+        Err(e) => {
+            response.unavailable_reason = Some(e);
+            return response;
+        }
+    };
     let start = now - window.seconds();
     let step = window.step();
-    let q = activity_queries(window);
+    let q = activity_queries(source, window, job);
 
     let (calls, apply_manifest, p95, totals, tool_p95) = tokio::join!(
         execute_range_by(http, prom_url, &q.calls, start, now, step, "status"),
@@ -747,10 +963,11 @@ async fn activity(
     );
     match (calls, apply_manifest, p95, totals, tool_p95) {
         (Ok(calls), Ok(apply_manifest), Ok(p95), Ok(totals), Ok(tool_p95)) => {
+            response.source = Some(source);
             response.calls_per_minute = labeled(calls);
             response.apply_manifest_per_minute = labeled(apply_manifest);
             response.p95_seconds = p95.into_iter().next().map(|(_, p)| p).unwrap_or_default();
-            response.tools = tool_activity(totals, tool_p95);
+            response.tools = tool_activity(totals, tool_p95, source.tool_label());
         }
         (Err(e), ..) | (_, Err(e), ..) | (_, _, Err(e), ..) | (.., Err(e), _) | (.., Err(e)) => {
             response.unavailable_reason = Some(e);

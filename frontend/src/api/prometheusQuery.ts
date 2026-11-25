@@ -81,8 +81,10 @@ export const prometheusQueryApi = {
     return apiFetch<RangeResponse>(`/prometheus/query_range?${qs.toString()}`);
   },
 
-  // deckwatch's own MCP tool call metrics for the MCP activity page: fixed
-  // queries over the window, or `unavailable_reason` without Prometheus.
+  // deckwatch's MCP tool call metrics for the MCP activity page, from its
+  // OTLP histogram or, as the fallback, its /metrics counters (`source` says
+  // which): fixed queries over the window, or `unavailable_reason` without
+  // Prometheus.
   mcpActivity: (window: McpActivityWindow) =>
     apiFetch<McpActivityResponse>(
       `/prometheus/mcp_activity?window=${encodeURIComponent(window)}`,

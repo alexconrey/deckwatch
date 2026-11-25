@@ -406,24 +406,103 @@ Rows are kept for 365 days and up to 100,000 rows, then pruned hourly. Set
   (`tracing.ui_url`).
 - **Tool calls**: calls per minute, the share that failed or were denied, the
   p95 duration and `apply_manifest` calls per minute over time, and calls,
-  errors, denials and p95 per tool. These come from Prometheus (deckwatch's own
-  `/metrics`, scraped by the `PROMETHEUS_URL` Prometheus) through fixed queries
-  (`GET /api/prometheus/mcp_activity`). Without Prometheus the page says so and
-  shows only the audit rows. Like the bundled Grafana dashboard, it sums every
-  deckwatch instance that Prometheus scrapes.
+  errors, denials and p95 per tool. These come from the Prometheus at
+  `PROMETHEUS_URL` through fixed queries (`GET /api/prometheus/mcp_activity`):
+  from deckwatch's OTLP metrics, or else from its `/metrics` counters, and the
+  page says which ([Tool call metrics](#tool-call-metrics)). Without
+  Prometheus the page says so and shows only the audit rows. Like the bundled
+  Grafana dashboard, it sums every deckwatch instance that Prometheus has
+  metrics from.
 
 The audit rows come from `GET /api/audit`, which filters on `source`, `action`,
 `tool`, `client`, `outcome`, `resource_type`, `namespace` and `since`, and
 returns pages newest first (`order=asc` for oldest first) linked by
 `next_cursor`.
 
-Prometheus `/metrics` counts each tool call once:
-`deckwatch_mcp_tool_calls_total{tool,status}` counts the calls deckwatch
-serves itself (and calls a guardrail refused, as `status="denied"`), and
-`mcp_k8s_tool_calls_total{tool,status}` counts the ones mcp-k8s runs,
-including those deckwatch intercepts and then hands on (such as
-`apply_manifest`). `deckwatch_mcp_requests_total{method,status}` labels
-methods outside the MCP specification as `_OTHER`.
+#### Tool call metrics
+
+For each window, the page checks which of two sources Prometheus has tool call
+series from (one cheap query each) and reads the first that has some. The
+response's `source` (`otlp`, `scrape`, or `null` for neither) and the page say
+which one it used.
+
+1. **OTLP, the primary source.** The `mcp.server.operation.duration`
+   histogram that deckwatch exports over OTLP
+   ([docs/TRACING.md](TRACING.md#105-mcp-requests)) has one observation per
+   MCP request, whether deckwatch serves the tool or mcp-k8s runs it.
+   Prometheus's OTLP receiver stores it as
+   `mcp_server_operation_duration_seconds_bucket`, `_sum` and `_count`, with
+   the labels `mcp_method_name`, `gen_ai_tool_name`, `error_type`,
+   `mcp_k8s_action` and `mcp_k8s_decision`. The page reads the tool calls
+   (`mcp_method_name="tools/call"`) with deckwatch's `job` (see below):
+
+   | Figure | From |
+   |---|---|
+   | Calls per tool | `sum by (gen_ai_tool_name) (rate(mcp_server_operation_duration_seconds_count{mcp_method_name="tools/call"}[5m]))` |
+   | Denials | `mcp_k8s_decision="denied"` |
+   | Errors | `error_type!=""`, except denials (their `error_type` is `permission_denied`) |
+   | p95 duration | `histogram_quantile(0.95, sum by (le) (rate(mcp_server_operation_duration_seconds_bucket{mcp_method_name="tools/call"}[5m])))` |
+
+   The time series use `rate()` over 5 minutes (last hour), 15 minutes (24
+   hours) or 1 hour (7 days), and the per-tool figures `increase()` over the
+   whole window. A call naming a tool deckwatch doesn't have carries no
+   `gen_ai_tool_name`, and the page leaves it out.
+
+2. **deckwatch's `/metrics`, the fallback, for one release.** With no OTLP
+   series in the window, the page reads deckwatch's own counters, which a
+   Prometheus scrape of `/metrics` collects. Each tool call is counted once,
+   in one of them:
+   - `deckwatch_mcp_tool_calls_total{tool,status}`: the calls deckwatch serves
+     itself, and every call a guardrail refused (`status="denied"`);
+   - `deckwatch_mcp_passthrough_tool_calls_total{tool,status}`: the calls
+     deckwatch hands to mcp-k8s, including the ones it intercepts first (such
+     as `apply_manifest`), with `status` `ok` or `error`.
+
+   Their durations are `deckwatch_mcp_tool_call_duration_seconds` and
+   `deckwatch_mcp_passthrough_tool_call_duration_seconds`. The fallback is
+   temporary: export deckwatch's metrics over OTLP.
+
+The page doesn't read mcp-k8s's own `mcp_k8s_tool_calls_total` and
+`mcp_k8s_tool_call_duration_seconds`, which mcp-k8s v0.7.0 deprecated. The
+embedded mcp-k8s still exports them, and the bundled Grafana dashboards still
+use them. `deckwatch_mcp_requests_total{method,status}` labels methods outside
+the MCP specification as `_OTHER`.
+
+**Sending deckwatch's metrics to Prometheus's OTLP receiver:**
+
+- Start Prometheus 3 with `--web.enable-otlp-receiver`. It then accepts OTLP
+  metrics at `/api/v1/otlp/v1/metrics`.
+- Point deckwatch at it with `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT`, a full URL
+  used as is, such as
+  `http://prometheus.example.com:9090/api/v1/otlp/v1/metrics` (with Helm,
+  through `extraEnv`). Or send the metrics through an OpenTelemetry collector
+  that forwards them there. [docs/TRACING.md](TRACING.md#102-configuration)
+  covers the rest of the configuration.
+- Keep the receiver's default translation strategy,
+  `UnderscoreEscapingWithSuffixes` (`otlp.translation_strategy` in the
+  Prometheus configuration). It turns dots into underscores
+  (`gen_ai.tool.name` becomes `gen_ai_tool_name`) and appends the unit
+  (`_seconds`), which gives the names above. With another strategy the page
+  finds no OTLP series and uses the fallback.
+- The page reads the classic histogram series (`_bucket`, `_sum` and
+  `_count`), so don't have the receiver convert histograms to native ones
+  (`otlp.convert_histograms_to_nhcb`).
+- The receiver sets `job` to `service.name`, prefixed with
+  `service.namespace/` when that is set. The page matches deckwatch's own:
+  `deckwatch`, or `OTEL_SERVICE_NAME` (Helm `telemetry.otlp.serviceName`).
+  Other services that export the same OpenTelemetry metric, such as a
+  standalone mcp-k8s, stay off the page. A collector in between must keep
+  these resource attributes.
+- With more than one deckwatch replica, give each its own
+  `service.instance.id`, which becomes `instance`, or their series collide.
+  With Helm:
+
+  ```yaml
+  telemetry:
+    otlp:
+      resourceAttributes:
+        service.instance.id: $(POD_NAME)
+  ```
 
 ---
 

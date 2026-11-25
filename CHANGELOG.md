@@ -27,9 +27,23 @@ Changes merged since the last release are listed under `[Unreleased]`.
   `DECKWATCH_CACHE_DIR` is set. The Helm chart sets it (see Added). If you run
   deckwatch without the chart, set `DECKWATCH_CACHE_DIR` to a writable
   directory, or plugins are compiled on every call. (#399)
+- **Send deckwatch's metrics to Prometheus over OTLP to keep the MCP activity
+  page's tool call figures.** The page now reads them from deckwatch's OTLP
+  metrics first (see Changed). Its fallback, deckwatch's own `/metrics`
+  counters, is temporary, and it no longer reads mcp-k8s's
+  `mcp_k8s_tool_calls_total`: without OTLP metrics, calls of mcp-k8s tools
+  from before the upgrade drop out of the page's history. See "Tool call
+  metrics" in [docs/MCP.md](docs/MCP.md#tool-call-metrics). (#400, #398)
 
 ### Added
 
+- **`deckwatch_mcp_passthrough_tool_calls_total{tool,status}`** and
+  `deckwatch_mcp_passthrough_tool_call_duration_seconds{tool}`: the MCP tool
+  calls deckwatch hands to mcp-k8s. Until now only mcp-k8s's own
+  `mcp_k8s_tool_calls_total` counted them, which mcp-k8s v0.7.0 deprecated.
+  With `deckwatch_mcp_tool_calls_total`, which doesn't change, each tool call
+  is counted once; dashboards that add `deckwatch_mcp_tool_calls_total` and
+  `mcp_k8s_tool_calls_total` keep working. (#400, #398)
 - **Helm `extraEnv`:** extra environment variables for the deckwatch
   container, as a list of Kubernetes `EnvVar` objects added after the ones
   the chart sets. See
@@ -54,6 +68,19 @@ Changes merged since the last release are listed under `[Unreleased]`.
   are planned to replace it; until then, set the `OTEL_*` variables on your
   workloads yourself. deckwatch's own OTLP export (Helm `telemetry.otlp`) is
   unchanged. (#396)
+- **The MCP activity page reads deckwatch's OTLP metrics.** Its tool call
+  figures come from `mcp_server_operation_duration_seconds`, the
+  `mcp.server.operation.duration` histogram that deckwatch exports over OTLP,
+  as Prometheus 3's OTLP receiver stores it with its default translation
+  (`UnderscoreEscapingWithSuffixes`). It reads the series with deckwatch's
+  `job` (from `service.name`), so other services that export the same metric
+  stay off the page. When Prometheus has none of them for the window, the
+  page uses deckwatch's `/metrics` counters (`deckwatch_mcp_tool_calls_total`
+  and the new passthrough counter) for one release. The page and
+  `GET /api/prometheus/mcp_activity` (`source`: `otlp`, `scrape` or `null`)
+  say which source the figures come from. The page no longer reads mcp-k8s's
+  `mcp_k8s_tool_calls_total` or `mcp_k8s_tool_call_duration_seconds`.
+  (#400, #398)
 
 ### Fixed
 

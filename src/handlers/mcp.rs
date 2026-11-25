@@ -1131,7 +1131,8 @@ fn fence_events(text: &str) -> String {
 
 tokio::task_local! {
     /// Set by [`mcp_k8s_tool`] when a deckwatch tool hands its call to
-    /// mcp-k8s, which counts it in `mcp_k8s_tool_calls_total`.
+    /// mcp-k8s, so [`call_tool`] counts it as a passthrough call
+    /// (`deckwatch_mcp_passthrough_tool_calls_total`).
     static DELEGATED: Cell<bool>;
 }
 
@@ -1269,11 +1270,16 @@ async fn call_tool(
         });
     }
     // deckwatch_mcp_tool_calls_total counts the calls deckwatch served
-    // itself; mcp_k8s_tool_calls_total counts the ones mcp-k8s ran,
-    // including those a deckwatch tool handed to it.
-    if !delegated {
-        let status = if result.is_ok() { "ok" } else { "error" };
-        crate::metrics::record_mcp_tool_call(name, status, start.elapsed().as_secs_f64());
+    // itself; deckwatch_mcp_passthrough_tool_calls_total counts the ones
+    // mcp-k8s ran, including those a deckwatch tool handed to it. mcp-k8s
+    // checks the same permission settings as the guardrail above, so a call
+    // that got this far isn't refused there: it ends ok or error.
+    let status = if result.is_ok() { "ok" } else { "error" };
+    let elapsed = start.elapsed().as_secs_f64();
+    if delegated {
+        crate::metrics::record_mcp_passthrough_tool_call(name, status, elapsed);
+    } else {
+        crate::metrics::record_mcp_tool_call(name, status, elapsed);
     }
     Some(result)
 }
@@ -2950,8 +2956,8 @@ async fn tool_refresh_resource(
 // ── mcp-k8s tools deckwatch intercepts ──
 
 /// Hand a call of an intercepted tool to mcp-k8s. Inside
-/// [`call_tool`], mcp-k8s reports into the running `ToolCall` and
-/// counts the call in `mcp_k8s_tool_calls_total`.
+/// [`call_tool`], mcp-k8s reports into the running `ToolCall`, and
+/// deckwatch counts the call as a passthrough call.
 async fn mcp_k8s_tool(
     state: &AppState,
     tool_name: &str,

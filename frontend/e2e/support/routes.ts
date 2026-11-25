@@ -588,16 +588,17 @@ export function installDefaultRoutes(api: MockApi, state: MockState): void {
   api.on("GET", "/prometheus/mcp_activity", (req) =>
     ok(
       state.features.prometheus
-        ? mcpActivity(req.query.get("window") ?? "24h")
+        ? mcpActivity(req.query.get("window") ?? "24h", state.mcpActivitySource)
         : {
             window_seconds: 86400,
             step_seconds: 300,
+            source: null,
             calls_per_minute: [],
             apply_manifest_per_minute: [],
             p95_seconds: [],
             tools: [],
             unavailable_reason:
-              "prometheus not configured (set PROMETHEUS_URL to the Prometheus that scrapes deckwatch's /metrics)",
+              "prometheus not configured (set PROMETHEUS_URL to the Prometheus that stores deckwatch's metrics)",
           },
     ),
   );
