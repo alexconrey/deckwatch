@@ -28,6 +28,16 @@ Changes merged since the last release are listed under `[Unreleased]`.
   included. See
   [README.md](README.md#helm-chart-extra-environment-variables). (#391)
 
+### Changed
+
+- **The OpenTelemetry Collector plugin is retired.** deckwatch-plugin-otel's
+  repository is going away, so remove the plugin under **Settings → Plugins**
+  if you installed it. [docs/TRACING.md](docs/TRACING.md) no longer describes
+  it. Built-in OTLP endpoint settings and per-application `OTEL_*` injection
+  are planned to replace it; until then, set the `OTEL_*` variables on your
+  workloads yourself. deckwatch's own OTLP export (Helm `telemetry.otlp`) is
+  unchanged. (#396)
+
 ### Fixed
 
 - **The chart's probes give deckwatch time to start, and to answer when
