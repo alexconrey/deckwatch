@@ -138,3 +138,21 @@ async fn plugin_notifications_respect_the_event_type_and_namespace_filters() {
         .collect();
     assert_eq!(messages, vec!["sent", "plugin-wide: sent"]);
 }
+
+#[tokio::test]
+async fn webhook_errors_leave_out_the_url() {
+    // A port nothing listens on: the request fails before any response.
+    let port = std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    let url = format!("http://127.0.0.1:{port}/services/T000/B000/hook-path-token?k=query-token");
+    let err = post_webhook(&reqwest::Client::new(), &url, &serde_json::json!({}))
+        .await
+        .expect_err("nothing listens on the port");
+    let msg = format!("{err:#}");
+    assert!(msg.starts_with("webhook request failed"), "{msg}");
+    assert!(!msg.contains("hook-path-token"), "{msg}");
+    assert!(!msg.contains("query-token"), "{msg}");
+}

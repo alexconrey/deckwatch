@@ -351,6 +351,10 @@ fn namespace_enabled(settings: &NotificationSettings, ns: &str) -> bool {
 
 /// POST `payload` as JSON to the webhook `url`; non-2xx is an error carrying
 /// the status and response body.
+///
+/// The URL is left out of errors: it is a secret (Slack, Teams and similar
+/// webhook URLs carry their token in the path, where redaction can't find
+/// it), and these errors are logged.
 pub async fn post_webhook(
     http: &reqwest::Client,
     url: &str,
@@ -359,7 +363,7 @@ pub async fn post_webhook(
     let resp = http.post(url).json(payload).send().await.map_err(|e| {
         anyhow::anyhow!(
             "webhook request failed: {}",
-            crate::outbound::error_chain(&e)
+            crate::outbound::error_chain(&e.without_url())
         )
     })?;
     if !resp.status().is_success() {

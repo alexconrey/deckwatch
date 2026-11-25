@@ -286,6 +286,15 @@ first.
   endpoint they were saved for (see Added), and a crafted Vertex AI or
   Bedrock region can no longer redirect the access token or a signed request.
   (#253)
+- **Credentials in URLs are kept out of the logs.** deckwatch logged the
+  database URL on every start, password included, and with OTLP log export
+  (see Added) log lines also leave the cluster. That URL, the S3 registry
+  endpoint, GitOps repository URLs, and the URLs in outbound error messages
+  and plugin events are now logged with their userinfo, query values and
+  fragment masked (`***`): a token in a plugin source URL's query string is
+  masked too, not only `user:password@`. Notification webhook errors no
+  longer include the webhook URL. If an earlier version logged a database
+  URL that holds a password, rotate that password. (#299)
 - **Dependency advisories.** extism 1.41 with wasmtime 49 fixes
   GHSA-mghf-wjfp-p5xm / RUSTSEC-2026-0379 (critical: an aarch64 Cranelift
   miscompile), RUSTSEC-2026-0269 (filesystem sandbox escape),

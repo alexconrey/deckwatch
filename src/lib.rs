@@ -34,6 +34,7 @@ mod plugin_k8s_events;
 mod plugin_status;
 mod plugins;
 mod rate_limit;
+mod redact;
 mod routes;
 mod state;
 mod telemetry;
@@ -116,11 +117,7 @@ pub async fn run() {
 
     // --- Database ---
     let db_backend = db::backend_name(&config.database_url);
-    tracing::info!(
-        backend = db_backend,
-        url = %config.database_url,
-        "connecting to database"
-    );
+    log_connecting_to_database(&config.database_url);
     let db = db::connect(&config.database_url)
         .await
         .expect("Failed to connect to database and run migrations");
@@ -240,6 +237,17 @@ pub async fn run() {
     axum::serve(listener, app).await.expect("server error");
 }
 
+/// The "connecting to database" line. A PostgreSQL or MySQL URL can carry
+/// the password (in the userinfo or the query), and logs are exported when
+/// OTLP log export is on, so the URL is logged redacted.
+fn log_connecting_to_database(database_url: &str) {
+    tracing::info!(
+        backend = db::backend_name(database_url),
+        url = %redact::url(database_url),
+        "connecting to database"
+    );
+}
+
 /// Build the registry store per the configured backend. On failure we log
 /// and return None — the server still comes up, but /v2/* and /api/registry
 /// return the "registry_disabled" envelope. A total startup abort would
@@ -280,7 +288,7 @@ async fn build_registry_store(config: &Config) -> Option<RegistryStore> {
                         bucket = %config.registry_s3_bucket,
                         prefix = %config.registry_s3_prefix,
                         region = %config.registry_s3_region,
-                        endpoint = %config.registry_s3_endpoint,
+                        endpoint = %redact::url(&config.registry_s3_endpoint),
                         "OCI registry storage ready (s3)"
                     );
                     Some(RegistryStore::s3(backend))
@@ -486,3 +494,7 @@ mod plugin_events_acceptance_tests;
 
 #[cfg(test)]
 mod test_tracing;
+
+#[cfg(test)]
+#[path = "lib_tests.rs"]
+mod tests;

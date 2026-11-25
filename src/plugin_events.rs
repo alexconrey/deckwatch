@@ -258,45 +258,18 @@ fn percent_encode(s: &str) -> String {
 
 // ── Text sanitization ────────────────────────────────────────────────────────
 
-/// Replace the userinfo of any `scheme://user:pass@host` URL with `***`.
-/// Plugin source URLs and plugin error messages can carry credentials.
-pub fn redact_url_userinfo(text: &str) -> Cow<'_, str> {
-    if !text.contains("://") || !text.contains('@') {
-        return Cow::Borrowed(text);
-    }
-    let mut out = String::with_capacity(text.len());
-    let mut rest = text;
-    while let Some(i) = rest.find("://") {
-        let (head, tail) = rest.split_at(i + 3);
-        out.push_str(head);
-        // The authority ends at the first '/', '?', '#' or whitespace.
-        let end = tail
-            .find(|c: char| matches!(c, '/' | '?' | '#') || c.is_whitespace())
-            .unwrap_or(tail.len());
-        let authority = &tail[..end];
-        match authority.rfind('@') {
-            Some(at) => {
-                out.push_str("***");
-                out.push_str(&authority[at..]);
-            }
-            None => out.push_str(authority),
-        }
-        rest = &tail[end..];
-    }
-    out.push_str(rest);
-    Cow::Owned(out)
-}
-
 /// Make plugin text safe to store and show: mask secrets and URL
-/// credentials, strip control characters (ANSI escapes included), collapse
-/// whitespace onto one line, and cap the length at `max_bytes`.
+/// credentials (userinfo, query values and fragments, as
+/// [`crate::redact::urls_in_text`] does; plugin source URLs and fetch errors
+/// can carry tokens), strip control characters (ANSI escapes included),
+/// collapse whitespace onto one line, and cap the length at `max_bytes`.
 ///
 /// One line matters: nothing a plugin writes can start a new line in a log,
 /// a Kubernetes Event or the fenced block an LLM sees, so it can't fake a
 /// fence marker or a log record.
 pub fn sanitize_text(text: &str, max_bytes: usize, scrubber: &SecretScrubber) -> String {
     let scrubbed = scrubber.scrub(text);
-    let redacted = redact_url_userinfo(&scrubbed);
+    let redacted = crate::redact::urls_in_text(&scrubbed);
     let stripped = crate::log_sanitize::strip_control_bytes(&redacted);
     let one_line = stripped.split_whitespace().collect::<Vec<_>>().join(" ");
     truncate(&one_line, max_bytes)

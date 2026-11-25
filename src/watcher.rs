@@ -409,7 +409,11 @@ pub async fn github_changed_files(
     {
         Ok(files) => Some(files),
         Err(e) => {
-            tracing::warn!(repo = %repo_url, error = %e, "GitHub compare failed; skipping path filter");
+            tracing::warn!(
+                repo = %crate::redact::url(repo_url),
+                error = %e,
+                "GitHub compare failed; skipping path filter"
+            );
             None
         }
     }

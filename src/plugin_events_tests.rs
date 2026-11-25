@@ -270,15 +270,25 @@ fn sanitize_caps_length_on_a_char_boundary() {
 
 #[test]
 fn url_credentials_are_redacted() {
+    let sanitize = |text: &str| sanitize_text(text, MAX_MESSAGE_BYTES, &none());
     assert_eq!(
-        redact_url_userinfo("GET https://alice:s3cret@example.com/x?y=1 failed"),
-        "GET https://***@example.com/x?y=1 failed"
+        sanitize("GET https://alice:s3cret@example.com/x?y=1 failed"),
+        "GET https://***@example.com/x?y=*** failed"
+    );
+    // Tokens in the query string (fetch errors carry the source URL).
+    assert_eq!(
+        sanitize(
+            "HTTP 404 fetching plugin from \
+             https://git.example/api/packages/org/generic/p/1.0/p.wasm?private_token=abc123"
+        ),
+        "HTTP 404 fetching plugin from \
+         https://git.example/api/packages/org/generic/p/1.0/p.wasm?private_token=***"
     );
     assert_eq!(
-        redact_url_userinfo("token@host.example and https://example.com"),
+        sanitize("token@host.example and https://example.com"),
         "token@host.example and https://example.com"
     );
-    assert_eq!(redact_url_userinfo("no urls here"), "no urls here");
+    assert_eq!(sanitize("no urls here"), "no urls here");
 }
 
 #[test]

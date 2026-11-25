@@ -174,9 +174,13 @@ fn resource_names_deckwatch_and_its_version() {
 fn endpoints_are_logged_without_credentials() {
     assert_eq!(
         endpoint_for_log(Some(
-            "https://user:secret@otlp.example.com:4318/otlp?token=x".into()
+            "https://user:secret@otlp.example.com:4318/otlp?token=x#y".into()
         )),
-        "https://otlp.example.com:4318/otlp"
+        "https://***@otlp.example.com:4318/otlp?token=***#***"
+    );
+    assert_eq!(
+        endpoint_for_log(Some("https://otlp.example.com:4318".into())),
+        "https://otlp.example.com:4318"
     );
     assert_eq!(endpoint_for_log(None), "(per-signal endpoints)");
     assert_eq!(endpoint_for_log(Some("not a url".into())), "(invalid URL)");
