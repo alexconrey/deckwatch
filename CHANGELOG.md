@@ -20,10 +20,12 @@ Changes merged since the last release are listed under `[Unreleased]`.
 ## [0.7.0] - 2026-11-24
 
 A security and hardening release. It also moves to kube 5, which requires
-Kubernetes 1.33 or newer, makes outbound HTTPS configurable (extra trusted
-CAs, and endpoint overrides that stored credentials can't follow), and fixes
-several plugin lifecycle bugs. Some changes need action before or after the
-upgrade: read the upgrade notes first.
+Kubernetes 1.33 or newer; makes outbound HTTPS configurable (extra trusted
+CAs, and endpoint overrides that stored credentials can't follow); shows
+plugin problems where they happen (in API and MCP responses, a Problems view
+and Kubernetes Events); can export deckwatch's own traces and logs over OTLP;
+and fixes several plugin lifecycle bugs. Some changes need action before or
+after the upgrade: read the upgrade notes first.
 
 ### Upgrade notes
 
@@ -33,18 +35,19 @@ first.
 - **Kubernetes 1.33 or newer is required.** deckwatch builds against kube 5
   and k8s-openapi 0.29 with the Kubernetes 1.33 API (`v1_33`), and the chart
   declares `kubeVersion: ">=1.33.0-0"`, so Helm refuses older clusters. The
-  embedded mcp-k8s (now v0.5.0) uses the same API types: its tools for alpha
+  embedded mcp-k8s (now v0.5.1) uses the same API types: its tools for alpha
   and beta APIs (DRA, VolumeAttributesClass, ClusterTrustBundle,
   LeaseCandidate, MutatingAdmissionPolicy, StorageVersion,
   StorageVersionMigration) return the API server's 404 on clusters that don't
   enable those API versions, which is the default. See "404 from DRA,
   VolumeAttributesClass or other alpha/beta tools" in
   [docs/MCP.md](docs/MCP.md). (#252)
-- **Back up the database before upgrading.** 0.7.0 migrates it on startup
-  (adding `gitops_configs.token_binding`), and deckwatch 0.6.x refuses to
-  start on a migrated database (sea-orm reports that migration
-  `m20261124_000001_gitops_token_binding` is missing). Rolling back means
-  restoring the backup. (#253)
+- **Back up the database before upgrading.** 0.7.0 migrates it on startup:
+  `m20261124_000001_gitops_token_binding` adds `gitops_configs.token_binding`
+  (#253), and `m20261124_000002_plugin_status` adds the `plugin_status` table
+  (#263). deckwatch 0.6.x refuses to start on a migrated database (sea-orm
+  reports those migrations as missing), so rolling back means restoring the
+  backup.
 - **Cross-site browser requests are rejected.** The permissive CORS layer is
   gone, so pages on other origins can't read API responses. `POST`, `PUT`,
   `PATCH`, `DELETE` and WebSocket upgrades (pod exec, port-forward) get `403`
@@ -65,12 +68,31 @@ first.
   returns `400` for a masked plugin value with nothing stored under its key,
   such as a renamed key (#207), and for an invalid endpoint or AI region
   (#253). Scripts that read secrets back from the API need another source.
+- **Plugin resource and MCP plugin responses changed.** `DELETE` on an
+  application's plugin resource
+  (`/api/namespaces/{ns}/applications/{name}/resources/{plugin}/{resource_id}`)
+  returns `200` with `message`, `plugin_events` and
+  `kubernetes_resource_deletions` instead of an empty `204`, and a
+  `provision()` that fails outright returns `502` with
+  `"error": "plugin_failed"` and the plugin's events. When a plugin reported
+  anything, MCP `enable_plugin`, `validate_plugin`, `provision_resource`,
+  `refresh_resource` and `deprovision_resource` append it after their JSON
+  (`Plugin events (N):` and an untrusted-data fence), so clients that parse
+  these results as JSON must read only the JSON part (#261). MCP
+  `get_events` output is wrapped in the same kind of fence (#265).
 - **Helm sets `RUST_LOG` only from the new `logFilter` value.** The chart
   used to hard-code `RUST_LOG=deckwatch=info,tower_http=info`. With
   `logFilter` empty, the default, deckwatch's built-in filter applies, and it
-  now also keeps mcp-k8s and plugin log lines (see Changed). To keep the old
-  output, set `logFilter: "deckwatch=info,tower_http=info"`. If you patched
-  `RUST_LOG` onto the Deployment yourself, set `logFilter` instead. (#256)
+  now also keeps mcp-k8s and plugin log lines and OpenTelemetry export
+  warnings (see Changed). To keep the old output, set
+  `logFilter: "deckwatch=info,tower_http=info"`. If you patched `RUST_LOG`
+  onto the Deployment yourself, set `logFilter` instead. (#256, #260)
+- **Installs without the Helm chart need RBAC for Events.** deckwatch now
+  publishes plugin failures and notices as Kubernetes Events (see Added),
+  which needs `create` and `patch` on `events.k8s.io` `events`. The chart's
+  ClusterRole grants both; add them to your own RBAC otherwise. Without them
+  deckwatch logs a warning for each Event it can't publish, counts it in
+  `deckwatch_plugin_k8s_events_total{result="error"}`, and carries on. (#265)
 - **Leftover plugin fields are removed after the upgrade.** When an
   application's last plugin resource is removed, deckwatch now strips the env
   vars, sidecars, init containers, volumes and annotations that the plugin
@@ -140,6 +162,14 @@ first.
   `get_pod_logs` output, so pod logs can't close the fence early. The fence
   nonce is random (128 bits; it was derived from the clock), and the prompt
   names the nonce that closes the section. (#257)
+- **Plugin and event text is treated as untrusted.** Before plugin events are
+  returned, logged or stored, the values of `secret` config fields are masked
+  (in plaintext, stored ciphertext, JSON-escaped and percent-encoded form),
+  credentials in URLs are redacted, control characters are stripped, and
+  messages and event counts are capped. MCP returns plugin output and
+  `get_events` output inside the untrusted-data fence, because event notes
+  can come from plugins and from any workload allowed to write Events.
+  (#261, #265)
 - **Stored credentials can't be redirected:** they are only sent to the
   endpoint they were saved for (see Added), and a crafted Vertex AI or
   Bedrock region can no longer redirect the access token or a signed request.
@@ -215,6 +245,53 @@ first.
   `deckwatch_plugin_errors_total` (`k8s_delete_refused`, `k8s_delete_failed`)
   and reported by MCP `deprovision_resource` in
   `kubernetes_resource_deletions`. (#235)
+- **Plugin events reach the person or agent who triggered the call.**
+  Deployment create and update, and provision, refresh and deprovision,
+  return what the plugin reported in `plugin_events`, including warnings on
+  success; the MCP plugin tools return it fenced; and the UI shows it on the
+  deployment pages, the Infrastructure tab and the provision dialog. Every
+  plugin call now goes through one path that opens a `plugin <export>` span,
+  records the plugin metrics, and turns structured `events`
+  (deckwatch-plugin-sdk v0.10.0), the legacy `errors`, `warnings` and
+  `message`, and host failures (`plugin.trap`, `plugin.timeout`,
+  `plugin.load_failed`, `plugin.output_invalid`, `plugin.fetch_failed`, …)
+  into one list. New metrics: `deckwatch_plugin_events_total` and
+  `deckwatch_plugin_events_dropped_total`. (#261)
+- **Plugin status and a Problems view.** deckwatch keeps the current health
+  (`healthy`, `degraded` or `failing`) and latest events of every plugin
+  target (each provisioned resource, each plugin's `apply()` per
+  application, and each plugin's load) in a new `plugin_status` table. It is
+  served by `GET /api/plugin-status` (filters: `health`, `plugin`,
+  `namespace`), `GET /api/namespaces/{ns}/applications/{name}/plugin-status`
+  and `GET /api/plugins/{name}/status`. The UI shows health badges on
+  applications, plugins and resources, and a Problems view
+  (`/plugin-problems`), with a Problems button in the top bar while anything
+  is failing or degraded. (#263)
+- **Plugin failures and notices as Kubernetes Events** on the affected
+  Deployments, so they show in `kubectl describe deployment`, deckwatch's
+  event views and MCP `get_events`. They are published through kube-rs's
+  `Recorder` (events.k8s.io/v1, reporting controller `deckwatch`) with the
+  reasons `PluginApplyFailed`, `PluginApplyWarning`, `PluginProvisionFailed`,
+  `PluginProvisionWarning`, `PluginProvisioned`, `PluginDeprovisionFailed`,
+  `PluginDeprovisioned`, `PluginRecovered` and `PluginFieldsReleased`. The
+  same target, reason and action is published at most every 5 minutes, and
+  repeats fold into one Event's series count. Publishing never blocks or
+  fails the call; `deckwatch_plugin_k8s_events_total{result}` counts
+  `published`, `folded`, `dropped` and `error`. Needs new RBAC (see Upgrade
+  notes). (#265)
+- **deckwatch's own telemetry over OTLP/HTTP.** Off unless
+  `OTEL_EXPORTER_OTLP_ENDPOINT` or a per-signal endpoint is set. It exports
+  traces (a span per HTTP request) and log records that carry their trace
+  and span IDs, including MCP tool calls, mcp-k8s and plugin log lines; the
+  metrics pipeline is installed but has nothing to export yet, and
+  Prometheus `/metrics` is unchanged. Only http/protobuf is supported. It
+  reads the standard `OTEL_*` variables at startup, sends through the
+  outbound HTTP client (so `DECKWATCH_EXTRA_CA_FILE` applies; the
+  `OTEL_EXPORTER_OTLP_*CERTIFICATE`/`*KEY` variables are ignored with a
+  warning), and doesn't fall back to the `tracing.otlp_endpoint` setting.
+  Helm: `telemetry.otlp.*`; with `telemetry.otlp.enabled`, `tracing.enabled`
+  and no endpoint, traces go to the bundled Tempo or Jaeger on port 4318.
+  See [docs/TRACING.md](docs/TRACING.md). (#260)
 - `User-Agent: deckwatch/<version>` on every outbound request, and outbound
   errors that include the TLS reason (unknown issuer, expired certificate,
   name mismatch). (#253)
@@ -222,9 +299,10 @@ first.
 ### Changed
 
 - **mcp-k8s and plugin log lines are kept.** The default log filter is now
-  `deckwatch=info,tower_http=info,mcp_k8s=info,extism::pdk=info`; a valid
-  `RUST_LOG` still replaces it. `extism::pdk` carries plugin log lines, with
-  a `plugin` field. deckwatch-plugin-aws, for example, logs a few lines per
+  `deckwatch=info,tower_http=info,mcp_k8s=info,extism::pdk=info,opentelemetry=warn`;
+  a valid `RUST_LOG` still replaces it. `opentelemetry=warn` shows failed
+  OTLP exports (#260). `extism::pdk` carries plugin log lines, with a
+  `plugin` field. deckwatch-plugin-aws, for example, logs a few lines per
   reconcile for each deployment with AWS resources, roughly 1–2k lines an
   hour each. To keep only plugin warnings, set `logFilter` to
   `deckwatch=info,tower_http=info,mcp_k8s=info,extism::pdk=warn`. (#256)
@@ -237,10 +315,18 @@ first.
   public repositories. (#253)
 - A `PUT /api/settings` without `endpoints` keeps the stored endpoints.
   (#253)
-- **mcp-k8s is pinned to the v0.5.0 tag** (it followed `main`) and is built
+- **mcp-k8s is pinned to the v0.5.1 tag** (it followed `main`) and is built
   without its standalone server's dependencies. Tool names, parameters and
   outputs are unchanged, apart from the API versions in the upgrade notes.
-  (#236, #252)
+  (#236, #252, #259)
+- **MCP `enable_plugin` loads the plugin before it returns** and reports
+  fetch, checksum, metadata or version problems; it reloads only that plugin
+  instead of all of them. (#261)
+- **Plugin logs and metrics:** the reconciler's per-call
+  `calling plugin apply()` and `apply() completed` lines are now `debug`;
+  plugin events are logged as rate-limited `plugin event:` lines; and
+  `deckwatch_plugin_k8s_resources_total` records kinds outside a fixed list
+  as `other`, so a plugin can't create label values. (#261)
 - **The UI is built with vite 8** (Rolldown and Lightning CSS), which splits
   it into smaller chunks that the page preloads. (#237)
 - **web-vitals 6** measures LCP, INP and CLS slightly differently (LCP is
@@ -275,19 +361,29 @@ first.
   cluster serves (they used `v1beta1`). (#252)
 - The OpenAPI spec (`/api/docs`) no longer lists the removed addon
   endpoints. (#214)
+- With `tracing.enabled`, the chart's deckwatch, registry and webhook
+  Services also selected the bundled Tempo or Jaeger pod, so some traffic
+  went to it. The deckwatch pod now carries `app.kubernetes.io/component:
+  server`, and the Services select on it. (#262)
+- deckwatch's event views show the time, count and source of events.k8s.io
+  Events (from `eventTime`, `series` and `reportingComponent`), so Events
+  from deckwatch and other modern controllers no longer sort to the bottom
+  without a time. (#265)
 
 ### Dependencies
 
-- **Rust:** kube 4 → 5.1 and k8s-openapi 0.28 → 0.29 (#252); mcp-k8s v0.5.0
-  (#236, #252); extism 1.30 → 1.41 and jsonwebtoken 9 → 12 (#183); rand 0.8
-  → 0.10, aes-gcm 0.10 → 0.11 and ed25519-dalek 2 → 3 (#216); hmac 0.12 →
-  0.13 and sha2 0.10 → 0.11 (#227); object_store 0.11 → 0.14 (#240); rcgen
-  0.13 → 0.14 (#238); tower-http 0.6 → 0.7 (#197); jiff 0.2 → 1.0 (#202,
-  #221); metrics-exporter-prometheus 0.17 → 0.18 (#222); base64 0.22 → 0.23
-  (#224). Known-answer tests pin the credential ciphertext format, license
-  signature checks, webhook HMACs, OCI digests and plugin checksums across
-  these upgrades, so stored credentials still decrypt (#216, #227), and the
-  admission webhook's certificates have the same contents (#238).
+- **Rust:** kube 4 → 5.1 and k8s-openapi 0.28 → 0.29 (#252), with kube's
+  `runtime` feature (#265); mcp-k8s v0.5.1 (#236, #252, #259); OpenTelemetry
+  0.33 and tracing-opentelemetry 0.34 (#260); extism 1.30 → 1.41 and
+  jsonwebtoken 9 → 12 (#183); rand 0.8 → 0.10, aes-gcm 0.10 → 0.11 and
+  ed25519-dalek 2 → 3 (#216); hmac 0.12 → 0.13 and sha2 0.10 → 0.11 (#227);
+  object_store 0.11 → 0.14 (#240); rcgen 0.13 → 0.14 (#238); tower-http 0.6
+  → 0.7 (#197); jiff 0.2 → 1.0 (#202, #221); metrics-exporter-prometheus
+  0.17 → 0.18 (#222); base64 0.22 → 0.23 (#224). Known-answer tests pin
+  the credential ciphertext format, license signature checks, webhook HMACs,
+  OCI digests and plugin checksums across these upgrades, so stored
+  credentials still decrypt (#216, #227), and the admission webhook's
+  certificates have the same contents (#238).
 - **Frontend:** pinia 3 → 4, with `@vue/devtools-api` 8 as a direct
   dependency, and web-vitals 4 → 6 (#217); vite 6 → 8, vitest 2 → 5 and
   happy-dom 15 → 21 (#183, #237); `@vitejs/plugin-vue` 5 → 6 (#219);
@@ -317,6 +413,8 @@ first.
   TLS mocks. (#253)
 - Stale references to the removed addon system are gone from `CLAUDE.md` and
   the docs. (#214)
+- Tests drive real extism plugins, built from WebAssembly text, through every
+  plugin call path. (#261)
 - **Releases:** this changelog. The release workflow refuses a tag that
   doesn't match the versions and a dated section here, before it builds
   anything, and then creates the GitHub Release from that section. CI's
