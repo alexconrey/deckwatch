@@ -38,7 +38,7 @@ use crate::metrics;
 use crate::plugin_events::{Health, PluginEventReport};
 use crate::plugin_status::StatusKey;
 use crate::plugins::{
-    KubernetesObjectRef, PluginCall, ResourceProvisionRequest, SidecarSpec, Trigger,
+    KubernetesObjectRef, LoadedPlugin, PluginCall, ResourceProvisionRequest, SidecarSpec, Trigger,
 };
 use crate::state::AppState;
 
@@ -124,6 +124,20 @@ fn row_to_response(row: application_plugin_resources::Model) -> ProvisionedResou
     }
 }
 
+/// A copy of the loaded plugin `name`. Calls run on the copy, so the plugin
+/// list isn't locked for as long as a plugin takes (a reload would wait on
+/// it, and every reader behind the reload).
+async fn loaded_plugin(state: &AppState, name: &str) -> Result<LoadedPlugin, AppError> {
+    state
+        .plugins
+        .read()
+        .await
+        .iter()
+        .find(|p| p.name == name)
+        .cloned()
+        .ok_or_else(|| AppError::NotFound(format!("plugin '{name}' is not loaded")))
+}
+
 // ── GET /api/namespaces/{ns}/applications/{name}/resources ────────────────────
 
 pub async fn list(
@@ -155,11 +169,7 @@ pub async fn provision(
     let fields = body.map(|b| b.0.fields).unwrap_or_default();
 
     // Find the plugin by name.
-    let plugins = state.plugins.read().await;
-    let plugin = plugins
-        .iter()
-        .find(|p| p.name == plugin_name)
-        .ok_or_else(|| AppError::NotFound(format!("plugin '{plugin_name}' is not loaded")))?;
+    let plugin = loaded_plugin(&state, &plugin_name).await?;
 
     // Validate the resource id is declared by the plugin.
     let resource_decl = plugin
@@ -202,7 +212,9 @@ pub async fn provision(
         .namespace(&ns)
         .application(&app_name)
         .resource(&resource_id);
-    let (result, outcome) = crate::plugins::run_provision(plugin, &req, &call).take_result();
+    let (result, outcome) = crate::plugins::run_provision(&plugin, &req, &call)
+        .await
+        .take_result();
     let status_key = StatusKey::resource(&app_id, &plugin_name, &resource_id);
     let Some(result) = result else {
         state
@@ -214,12 +226,10 @@ pub async fn provision(
         });
     };
 
-    // Drop the read lock before the async apply call.
     let kubernetes_resources = outcome.k8s_resources(&result.kubernetes_resources);
     let state_map = result.state.clone();
     let deployment_annotations = result.deployment_annotations.clone();
     let sidecars: Vec<SidecarSpec> = result.sidecars.clone();
-    drop(plugins);
 
     // Apply any Kubernetes resources emitted by the plugin.
     let mut status = outcome.status_update(status_key);
@@ -300,11 +310,7 @@ pub async fn refresh(
 
     let fields: HashMap<String, String> = serde_json::from_str(&row.fields).unwrap_or_default();
 
-    let plugins = state.plugins.read().await;
-    let plugin = plugins
-        .iter()
-        .find(|p| p.name == plugin_name)
-        .ok_or_else(|| AppError::NotFound(format!("plugin '{plugin_name}' is not loaded")))?;
+    let plugin = loaded_plugin(&state, &plugin_name).await?;
 
     let req = ResourceProvisionRequest {
         application_name: app_name.clone(),
@@ -318,7 +324,9 @@ pub async fn refresh(
         .namespace(&ns)
         .application(&app_name)
         .resource(&resource_id);
-    let (result, outcome) = crate::plugins::run_provision(plugin, &req, &call).take_result();
+    let (result, outcome) = crate::plugins::run_provision(&plugin, &req, &call)
+        .await
+        .take_result();
     let status_key = StatusKey::resource(&app_id, &plugin_name, &resource_id);
     let Some(result) = result else {
         state
@@ -334,7 +342,6 @@ pub async fn refresh(
     let state_map = result.state.clone();
     let deployment_annotations = result.deployment_annotations.clone();
     let sidecars: Vec<SidecarSpec> = result.sidecars.clone();
-    drop(plugins);
 
     let mut status = outcome.status_update(status_key);
     if !kubernetes_resources.is_empty() {
@@ -446,15 +453,16 @@ pub async fn deprovision_resource(
     };
 
     let (requested, message, plugin_events): (Vec<KubernetesObjectRef>, String, _) = {
-        let plugins = state.plugins.read().await;
-        match plugins.iter().find(|p| p.name == plugin_name) {
+        let plugin = loaded_plugin(state, plugin_name).await.ok();
+        match plugin {
             Some(plugin) => {
                 let call = PluginCall::new(&state.plugin_telemetry, Trigger::Deprovision)
                     .namespace(ns)
                     .application(app_name)
                     .resource(resource_id);
-                let (result, outcome) =
-                    crate::plugins::run_deprovision(plugin, &dep_req, &call).take_result();
+                let (result, outcome) = crate::plugins::run_deprovision(&plugin, &dep_req, &call)
+                    .await
+                    .take_result();
                 let (requested, message) = match result {
                     Some(result) => (
                         result.delete_kubernetes_resources,

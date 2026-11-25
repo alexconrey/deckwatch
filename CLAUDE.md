@@ -373,7 +373,7 @@ Sidecars and other workload injection come from external WASM plugins built on
 [deckwatch-plugin-sdk](https://github.com/alexconrey/deckwatch-plugin-sdk). They
 replaced the built-in addon system, which was removed in #171 (there is no
 `/api/addons`). The old sidecars are now the
-`alexconrey/deckwatch-plugin-{redis,memcached,nginx-proxy,fluent-bit,postgresql,otel}`
+`alexconrey/deckwatch-plugin-{redis,memcached,nginx-proxy,fluent-bit,postgresql}`
 plugins.
 
 - **Configured** in settings `plugins[]` (Settings → Plugins, `PUT /api/settings`,

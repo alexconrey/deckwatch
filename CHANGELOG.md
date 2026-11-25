@@ -46,15 +46,33 @@ Changes merged since the last release are listed under `[Unreleased]`.
   (#401, #398)
 - **Helm `extraEnv`:** extra environment variables for the deckwatch
   container, as a list of Kubernetes `EnvVar` objects added after the ones
-  the chart sets. Until plugin calls stop blocking the async runtime (#385),
-  use it to set `TOKIO_WORKER_THREADS` if the CPU limit is under 2 cores (the
-  chart's default is `200m`). deckwatch then runs a single worker thread, and
-  while a plugin call holds it, deckwatch answers nothing, health checks
-  included. See
+  the chart sets. See
   [README.md](README.md#helm-chart-extra-environment-variables). (#391)
+
+### Changed
+
+- **The OpenTelemetry Collector plugin is retired.** deckwatch-plugin-otel's
+  repository is going away, so remove the plugin under **Settings → Plugins**
+  if you installed it. [docs/TRACING.md](docs/TRACING.md) no longer describes
+  it. Per-application `OTEL_*` injection is planned to replace it (#398);
+  until then, set the `OTEL_*` variables on your workloads yourself.
+  deckwatch's own OTLP export (Helm `telemetry.otlp`) works as before, and its
+  endpoints can now also be set in **Settings → Observability** (see Added).
+  (#396)
 
 ### Fixed
 
+- **Plugin calls no longer stall the server, so the pod stops restarting.**
+  Plugins ran on the async runtime's worker threads, and a container CPU
+  limit under 2 cores leaves the runtime a single worker. While a plugin ran
+  (the reconcile loop calls every plugin for each plugin-managed Deployment
+  every 10 seconds), nothing else did: `/api/healthz` and `/api/readyz` timed
+  out and the kubelet restarted the pod. Plugin calls now run on a separate
+  thread pool, at most 4 at a time, and the runtime starts at least 2 worker
+  threads (`TOKIO_WORKER_THREADS` still sets the number). Plugin calls still
+  have no time limit (#301), but deckwatch now stops waiting for one after 2
+  minutes and reports `plugin.timeout`; the call may still finish in the
+  background. (#385, #395)
 - Saving the Settings page no longer drops the trace viewer's settings
   (`tracing.query_url`, `ui_url` and `backend_kind`) from the settings
   database, where the MCP activity page reads its trace links from. A
