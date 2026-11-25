@@ -41,7 +41,7 @@ Changes merged since the last release are listed under `[Unreleased]`.
   `apps/statefulsets`; deckwatch didn't touch StatefulSets before. If you
   manage deckwatch's RBAC yourself, add them, or applications with
   OpenTelemetry injection on (see Added) leave their StatefulSets out, and
-  deckwatch logs a warning every 10 minutes. (#398, #PR_NUMBER)
+  deckwatch logs a warning every 10 minutes. (#398, #404)
 
 ### Added
 
@@ -68,7 +68,7 @@ Changes merged since the last release are listed under `[Unreleased]`.
   restarts the pods once; the tab asks first. The database gets a nullable
   column, `applications.observability`, on startup. See
   [docs/TRACING.md](docs/TRACING.md#5-exporting-from-your-workloads).
-  (#398, #PR_NUMBER)
+  (#398, #404)
 - **OTLP endpoints for deckwatch's own telemetry in Settings →
   Observability:** `observability.otlp_endpoint`, an OpenTelemetry
   Collector's OTLP/HTTP base URL for traces and logs, and
