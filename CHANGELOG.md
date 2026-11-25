@@ -17,8 +17,33 @@ Changes merged since the last release are listed under `[Unreleased]`.
 
 ## [Unreleased]
 
+### Upgrade notes
+
+- **`tracing.otlp_endpoint` is retired.** It was a gRPC `host:port` for the
+  retired OpenTelemetry Collector plugin, and deckwatch never exported to it.
+  To export deckwatch's own telemetry, enter your collector's OTLP/HTTP
+  endpoint (usually port 4318, not 4317) as the OTLP endpoint in
+  **Settings → Observability**. The old value isn't converted. Until you set
+  it, or remove the old value from the settings and from the chart's
+  `settings.defaults.tracing`, deckwatch logs a warning at startup and the
+  Settings page asks for it. `tracing.query_url`, `ui_url` and
+  `backend_kind` are unchanged. (#401, #398)
+
 ### Added
 
+- **OTLP endpoints for deckwatch's own telemetry in Settings →
+  Observability:** `observability.otlp_endpoint`, an OpenTelemetry
+  Collector's OTLP/HTTP base URL for traces and logs, and
+  `observability.otlp_metrics_endpoint`, the full URL of Prometheus's OTLP
+  receiver (`/api/v1/otlp/v1/metrics`) for metrics. An
+  `OTEL_EXPORTER_OTLP_*ENDPOINT` variable still wins, per signal, and the
+  exporter headers (`OTEL_EXPORTER_OTLP_*HEADERS`) are only sent to an
+  endpoint from the environment. deckwatch reads the endpoints at startup,
+  so restart it after a change. The Settings page and
+  `GET /api/settings/observability` show where each signal goes now and
+  after a restart. See
+  [docs/TRACING.md](docs/TRACING.md#10-deckwatchs-own-telemetry).
+  (#401, #398)
 - **Helm `extraEnv`:** extra environment variables for the deckwatch
   container, as a list of Kubernetes `EnvVar` objects added after the ones
   the chart sets. Until plugin calls stop blocking the async runtime (#385),
@@ -30,6 +55,10 @@ Changes merged since the last release are listed under `[Unreleased]`.
 
 ### Fixed
 
+- Saving the Settings page no longer drops the trace viewer's settings
+  (`tracing.query_url`, `ui_url` and `backend_kind`) from the settings
+  database, where the MCP activity page reads its trace links from. A
+  `PUT /api/settings` without `tracing` now keeps the stored block. (#401)
 - **The chart's probes give deckwatch time to start, and to answer when
   busy.** deckwatch loads every enabled plugin before it serves HTTP, and the
   liveness probe restarted it after about 30 seconds, so slow plugin
