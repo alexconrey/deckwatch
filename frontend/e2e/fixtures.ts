@@ -84,6 +84,14 @@ export const test = base.extend<Fixtures>({
         return response;
       };
     });
+    // useMetrics flushes its last batch with navigator.sendBeacon on
+    // pagehide, which fires while the test closes the page. Playwright no
+    // longer intercepts requests by then, so the beacon reached vite
+    // preview's /api proxy, which logged ECONNREFUSED (no backend runs).
+    // Nothing asserts on metrics, so drop beacons.
+    await page.addInitScript(() => {
+      navigator.sendBeacon = () => true;
+    });
     await page.addInitScript((css: string) => {
       const install = () => {
         const style = document.createElement("style");
