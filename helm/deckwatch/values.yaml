@@ -117,6 +117,22 @@ startupProbe:
   timeoutSeconds: 5
   failureThreshold: 60
 
+# deckwatch's cache directory: an emptyDir mounted at mountPath and passed to
+# deckwatch as DECKWATCH_CACHE_DIR. Every plugin call compiles the plugin's
+# WebAssembly; with the cache, each plugin binary is compiled once and the
+# result reused (from <mountPath>/wasmtime). Each pod has its own cache, so
+# replicas share no volume, and it lasts as long as the pod, container
+# restarts included. Disabled, plugins are compiled on every call. If
+# deckwatch can't use the directory, it logs a warning and runs without the
+# cache; the cache never makes a plugin call fail.
+cache:
+  enabled: true
+  mountPath: /var/cache/deckwatch
+  # The emptyDir's size limit; Kubernetes evicts the pod if the cache grows
+  # past it. wasmtime trims its cache to stay under 512 MiB, checking at most
+  # hourly, so keep the limit well above that. Empty means no limit.
+  sizeLimit: 1Gi
+
 podAnnotations: {}
 podLabels: {}
 nodeSelector: {}

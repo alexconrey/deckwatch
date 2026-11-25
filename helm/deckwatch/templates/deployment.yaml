@@ -11,6 +11,10 @@ metadata:
 {{- if and $extraCa.secretName $extraCa.configMapName }}
 {{- fail "outbound.extraCaBundle: set secretName or configMapName, not both" }}
 {{- end }}
+{{- $cache := .Values.cache | default dict }}
+{{- if and $cache.enabled (not $cache.mountPath) }}
+{{- fail "cache.enabled needs cache.mountPath" }}
+{{- end }}
 spec:
   {{- if and .Values.database.persistence.enabled (hasPrefix "sqlite" .Values.database.url) }}
   replicas: 1
@@ -90,6 +94,11 @@ spec:
             {{- if hasKey $audit "maxRows" }}
             - name: DECKWATCH_AUDIT_MAX_ROWS
               value: {{ $audit.maxRows | int64 | quote }}
+            {{- end }}
+            {{- if $cache.enabled }}
+            # Compiled plugins are cached here (the cache emptyDir below).
+            - name: DECKWATCH_CACHE_DIR
+              value: {{ $cache.mountPath | quote }}
             {{- end }}
             - name: DECKWATCH_ENCRYPTION_KEY
               valueFrom:
@@ -202,7 +211,8 @@ spec:
             {{- toYaml .Values.resources | nindent 12 }}
           {{- $needsRegistryVol := and .Values.registry.enabled (or (eq (default "filesystem" .Values.registry.storage) "filesystem") (not .Values.registry.storage)) }}
           {{- $needsDbVol := and .Values.database.persistence.enabled (hasPrefix "sqlite" .Values.database.url) }}
-          {{- if or $needsRegistryVol $needsDbVol $needsExtraCa }}
+          {{- $needsCacheVol := $cache.enabled }}
+          {{- if or $needsRegistryVol $needsDbVol $needsExtraCa $needsCacheVol }}
           volumeMounts:
             {{- if $needsRegistryVol }}
             - name: registry-storage
@@ -217,8 +227,12 @@ spec:
               mountPath: /etc/deckwatch/extra-ca
               readOnly: true
             {{- end }}
+            {{- if $needsCacheVol }}
+            - name: cache
+              mountPath: {{ $cache.mountPath | quote }}
+            {{- end }}
           {{- end }}
-      {{- if or $needsRegistryVol $needsDbVol $needsExtraCa }}
+      {{- if or $needsRegistryVol $needsDbVol $needsExtraCa $needsCacheVol }}
       volumes:
         {{- if $needsRegistryVol }}
         - name: registry-storage
@@ -244,6 +258,16 @@ spec:
             items:
               - key: {{ $extraCaKey | quote }}
                 path: {{ $extraCaKey | quote }}
+        {{- end }}
+        {{- if $needsCacheVol }}
+        # One cache per pod; it starts empty when the pod is replaced.
+        - name: cache
+          {{- if $cache.sizeLimit }}
+          emptyDir:
+            sizeLimit: {{ $cache.sizeLimit | quote }}
+          {{- else }}
+          emptyDir: {}
+          {{- end }}
         {{- end }}
       {{- end }}
       {{- with .Values.nodeSelector }}

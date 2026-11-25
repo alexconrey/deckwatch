@@ -12,7 +12,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use extism::{Function, Manifest, Plugin, UserData, Val, ValType, Wasm};
+use extism::{Function, Manifest, Plugin, PluginBuilder, UserData, Val, ValType, Wasm};
 use k8s_openapi::api::core::v1::{
     ConfigMapKeySelector, ConfigMapVolumeSource, Container, ContainerPort, EmptyDirVolumeSource,
     EnvVar, EnvVarSource, ResourceRequirements, SecretKeySelector, SecretVolumeSource, Volume,
@@ -27,6 +27,7 @@ use tracing::{Instrument, Span};
 
 use crate::handlers::settings::{DeckwatchSettings, PluginConfig, PluginSource};
 use crate::metrics;
+use crate::plugin_cache::CompileCache;
 use crate::plugin_events::{
     self, codes, host_event, Health, LegacyNotices, PluginEventReport, PluginTelemetry,
     SecretScrubber,
@@ -2221,10 +2222,18 @@ enum Invocation {
     Failed { code: &'static str, message: String },
 }
 
-fn invoke(manifest: &Manifest, export: &str, input: &str) -> Invocation {
+fn invoke(manifest: &Manifest, export: &str, input: &str, cache: &CompileCache) -> Invocation {
     // WASI is disabled; plugins reach the network only through extism's
-    // HTTP host function, scoped to allowed_hosts.
-    let mut plugin = match Plugin::new(manifest, [host_now_fn()], false) {
+    // HTTP host function, scoped to allowed_hosts. The compile cache is
+    // always deckwatch's choice (`plugin_cache`), never extism's default
+    // under $HOME.
+    let builder = PluginBuilder::new(manifest)
+        .with_functions([host_now_fn()])
+        .with_wasi(false);
+    let mut plugin = match cache
+        .compile(builder)
+        .and_then(|compiled| Plugin::new_from_compiled(&compiled))
+    {
         Ok(p) => p,
         Err(e) => {
             return Invocation::Failed {
@@ -2398,7 +2407,12 @@ fn call_export<T: PluginOutput>(
                 );
                 (None, Vec::new())
             }
-            Ok(input) => match invoke(&built.manifest, export.as_str(), &input) {
+            Ok(input) => match invoke(
+                &built.manifest,
+                export.as_str(),
+                &input,
+                call.telemetry.compile_cache(),
+            ) {
                 Invocation::Output(raw) => match parse_output::<T>(&raw) {
                     Ok(parsed) => {
                         for bad in parsed.bad_events {
