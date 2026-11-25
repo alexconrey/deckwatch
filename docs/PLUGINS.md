@@ -505,19 +505,12 @@ startupProbe:
   failureThreshold: 120   # 10 minutes, checked every 5 s
 ```
 
-Once deckwatch is running, a plugin call holds one of its async worker threads
-for as long as it runs, its HTTP requests included
-([#385](https://github.com/alexconrey/deckwatch/issues/385)). A CPU limit under
-2 cores gives deckwatch a single worker, and while that worker is busy,
-deckwatch answers nothing, its health checks included. If the events show
-liveness probes timing out (`context deadline exceeded`) and then
-`failed liveness probe, will be restarted`, run more workers:
-
-```yaml
-extraEnv:
-  - name: TOKIO_WORKER_THREADS
-    value: "4"
-```
+Once deckwatch is running, plugin calls run on threads of their own, at most 4
+at a time, not on the async worker threads that answer HTTP, so a slow or stuck
+plugin doesn't hold up the health checks. deckwatch stops waiting for a call
+after 2 minutes and reports `plugin.timeout`. Plugin calls have no time limit
+yet ([#301](https://github.com/alexconrey/deckwatch/issues/301)), so the call
+itself may still be running.
 
 ### Plugin loaded but not injecting
 
@@ -546,3 +539,5 @@ For developers working on deckwatch itself:
 - **`src/handlers/deployments.rs`** — `apply_plugins()` called in both `create` and `update` handlers
 
 Plugins are instantiated fresh per deployment operation (not pooled). This avoids thread-safety concerns with extism `Plugin` instances and keeps memory bounded since WASM binaries for a single-function plugin are typically 50–200 KB.
+
+A plugin call blocks its thread: extism runs the export synchronously, and the plugin's HTTP requests wait on that thread. So calls never run on Tokio's async workers, where they would stall every other task, health checks included. The entry points in `src/plugins.rs` (`run_plugin`, `run_provision`, `run_deprovision`, `apply_plugins`, `fetch_plugins` and `fetch_and_validate`) are async and run each call on Tokio's blocking pool, at most 4 at a time, inside the caller's span; the blocking functions are private to the module. A caller waits for a call up to the call timeout plus 5 seconds, or 2 minutes when no timeout is set, then reports `plugin.timeout`; the abandoned call may still be running.

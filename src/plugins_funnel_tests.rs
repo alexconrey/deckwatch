@@ -26,7 +26,7 @@ fn apply_with(plugin: &LoadedPlugin, t: &PluginTelemetry) -> CallOutcome<PluginR
         .namespace("shop")
         .application("shop")
         .deployment("web");
-    run_plugin(plugin, &ctx(), &call)
+    run_plugin_blocking(plugin, &ctx(), &call)
 }
 
 fn apply(behavior: Behavior) -> CallOutcome<PluginResult> {
@@ -162,7 +162,7 @@ fn a_missing_deprovision_export_is_success() {
         .export("apply", Behavior::output("{}"))
         .loaded("no-deprovision");
     let t = telemetry();
-    let outcome = run_deprovision(
+    let outcome = run_deprovision_blocking(
         &plugin,
         &ResourceDeprovisionRequest::default(),
         &PluginCall::new(&t, Trigger::Deprovision),
@@ -351,7 +351,7 @@ fn a_failed_call_marks_its_span_as_an_error() {
         .application("shop")
         .resource("rds");
     let (_, events) =
-        capture(|| run_provision(&plugin, &ResourceProvisionRequest::default(), &call));
+        capture(|| run_provision_blocking(&plugin, &ResourceProvisionRequest::default(), &call));
     let logged = events
         .iter()
         .find(|e| e.target == "deckwatch::plugin_events")
@@ -417,8 +417,8 @@ fn trace_context_is_sent_only_when_tracing_is_on() {
 
 // ── apply_plugins ────────────────────────────────────────────────────────────
 
-#[test]
-fn apply_plugins_keeps_going_past_a_failing_plugin_and_reports_both() {
+#[tokio::test]
+async fn apply_plugins_keeps_going_past_a_failing_plugin_and_reports_both() {
     let good = FixturePlugin::new()
         .export(
             "apply",
@@ -442,7 +442,7 @@ fn apply_plugins_keeps_going_past_a_failing_plugin_and_reports_both() {
     let call = PluginCall::new(&t, Trigger::DeploymentUpdate)
         .namespace("shop")
         .deployment("web");
-    let report = apply_plugins(&[bad, good], &ctx(), &mut pod_spec, &mut annotations, &call);
+    let report = apply_plugins(&[bad, good], &ctx(), &mut pod_spec, &mut annotations, &call).await;
 
     let env = pod_spec.containers[0].env.as_ref().unwrap();
     assert_eq!(env[0].name, "FROM_GOOD");
@@ -462,8 +462,8 @@ fn apply_plugins_keeps_going_past_a_failing_plugin_and_reports_both() {
     assert_eq!(reports[1].event.message, "heads up");
 }
 
-#[test]
-fn a_service_account_conflict_is_a_policy_rejection_but_reapplying_is_not() {
+#[tokio::test]
+async fn a_service_account_conflict_is_a_policy_rejection_but_reapplying_is_not() {
     let plugin = FixturePlugin::new()
         .export(
             "apply",
@@ -488,7 +488,8 @@ fn a_service_account_conflict_is_a_policy_rejection_but_reapplying_is_not() {
             &mut pod_spec,
             &mut BTreeMap::new(),
             &call,
-        );
+        )
+        .await;
         let codes: Vec<_> = report
             .reports()
             .iter()

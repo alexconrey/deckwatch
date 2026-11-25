@@ -808,7 +808,9 @@ pub async fn fetch_and_validate(
         };
     };
 
-    let outcome = span.in_scope(|| run_plugin(&plugin, &test_ctx, &call));
+    let outcome = run_plugin(&plugin, &test_ctx, &call)
+        .instrument(span.clone())
+        .await;
     events.extend(outcome.reports());
     let apply_export_found = outcome.result.is_some()
         || !outcome.events.iter().any(|e| {
@@ -1047,7 +1049,7 @@ async fn load_plugin(
     // A plugin without a metadata() export gets defaults; one whose
     // metadata() fails still loads with defaults, and the failure is
     // reported.
-    let meta = run_metadata(&plugin, &call);
+    let meta = run_metadata(&plugin, &call).await;
     let mut events = meta.events;
     if let Some(mut metadata) = meta.result {
         if metadata.name.is_empty() {
@@ -1498,7 +1500,12 @@ impl PluginApplyReport {
 /// Plugins are sorted by declared dependency before execution. Each plugin
 /// receives the accumulated `outputs` from all prior plugins in its context.
 /// A failing plugin is skipped; its outcome says why.
-pub fn apply_plugins(
+///
+/// Each `apply()` runs off the async workers through [`run_plugin`]; the
+/// merging stays here. One call per blocking task means a call that panics
+/// costs only that plugin's result, like any other failure, and the pod spec
+/// never leaves the caller.
+pub async fn apply_plugins(
     plugins: &[LoadedPlugin],
     ctx: &PluginContext,
     pod_spec: &mut k8s_openapi::api::core::v1::PodSpec,
@@ -1516,7 +1523,7 @@ pub fn apply_plugins(
         let mut enriched_ctx = ctx.clone();
         enriched_ctx.plugin_outputs = accumulated_outputs.clone();
 
-        let (result, mut outcome) = run_plugin(plugin, &enriched_ctx, call).take_result();
+        let (result, mut outcome) = run_plugin(plugin, &enriched_ctx, call).await.take_result();
         if let Some(result) = result {
             apply_env_vars(plugin, &result.env_vars, pod_spec, dep_annotations);
             apply_sidecars(plugin, &result.sidecars, pod_spec, dep_annotations);
@@ -1757,7 +1764,8 @@ fn inherited_env_var_from(
 //
 // Callers get a `CallOutcome` and route its events onward: to the API or MCP
 // response of the action that triggered the call, and to the background
-// sinks.
+// sinks. They reach the funnel only through the async entry points, which
+// run it off the async workers (see "Off the async workers" below).
 
 /// A plugin export, or a host step with its own span (`fetch`, `validate`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -2477,8 +2485,8 @@ fn call_export<T: PluginOutput>(
     })
 }
 
-/// Call the plugin's `provision()` export.
-pub fn run_provision(
+/// Call the plugin's `provision()` export, on this thread.
+fn run_provision_blocking(
     plugin: &LoadedPlugin,
     req: &ResourceProvisionRequest,
     call: &PluginCall<'_>,
@@ -2509,10 +2517,9 @@ pub fn run_provision(
     outcome
 }
 
-/// Call the plugin's `deprovision()` export. A plugin without one succeeds
-/// with an empty result. Errors never block removal of the resource record;
-/// callers return the events to the operator.
-pub fn run_deprovision(
+/// Call the plugin's `deprovision()` export, on this thread. A plugin
+/// without one succeeds with an empty result.
+fn run_deprovision_blocking(
     plugin: &LoadedPlugin,
     req: &ResourceDeprovisionRequest,
     call: &PluginCall<'_>,
@@ -2539,8 +2546,8 @@ pub fn run_deprovision(
     outcome
 }
 
-/// Call the plugin's `apply()` export.
-pub fn run_plugin(
+/// Call the plugin's `apply()` export, on this thread.
+fn run_plugin_blocking(
     plugin: &LoadedPlugin,
     ctx: &PluginContext,
     call: &PluginCall<'_>,
@@ -2567,10 +2574,256 @@ pub fn run_plugin(
     outcome
 }
 
+/// Call the plugin's `metadata()` export, on this thread. A plugin without
+/// one gets the default metadata.
+fn run_metadata_blocking(
+    plugin: &LoadedPlugin,
+    call: &PluginCall<'_>,
+) -> CallOutcome<PluginMetadata> {
+    call_export::<PluginMetadata>(plugin, Export::Metadata, call, true, |_| Ok(String::new()))
+}
+
+// ── Off the async workers ────────────────────────────────────────────────────
+//
+// A plugin call holds its thread from start to finish: extism compiles the
+// module and runs the export synchronously, and every HTTP request the
+// plugin makes (extism's `http_request` host function, blocking `ureq`)
+// waits on that thread. On a Tokio worker that stalls every task queued
+// behind it. A container CPU limit under 2 cores gives the runtime a single
+// worker, so one slow plugin stalled the whole server, `/api/healthz`
+// included, until the kubelet restarted the pod (#385).
+//
+// So the entry points the rest of deckwatch can reach are async, and the
+// blocking functions above are private to this module. Each call runs on
+// Tokio's blocking pool (`spawn_blocking`) with owned inputs, inside the
+// caller's span and subscriber: the `plugin {export}` span, the plugin's own
+// log lines and the `trace_context` the plugin receives stay in the caller's
+// trace. At most `MAX_CONCURRENT_PLUGIN_CALLS` calls are waited on at once,
+// and a caller waits at most `call_wait` for its call.
+
+/// Most plugin calls deckwatch waits on at once. Each runs on its own
+/// blocking-pool thread and compiles its module; later calls wait, without
+/// holding a thread, for a slot.
+const MAX_CONCURRENT_PLUGIN_CALLS: usize = 4;
+
+static PLUGIN_CALLS: tokio::sync::Semaphore =
+    tokio::sync::Semaphore::const_new(MAX_CONCURRENT_PLUGIN_CALLS);
+
+/// How long a caller waits for a call when no call timeout is configured,
+/// which is the default (#301). Calls normally take well under a second.
+const DEFAULT_CALL_WAIT: Duration = Duration::from_secs(120);
+
+/// How much longer than a configured call timeout a caller waits. extism
+/// stops a call at its timeout (and bounds the plugin's HTTP requests by
+/// what's left of it), but not while it compiles the module, so the call's
+/// own `plugin.timeout` outcome normally arrives first.
+const CALL_WAIT_GRACE: Duration = Duration::from_secs(5);
+
+/// How long a caller waits for one plugin call, given the configured call
+/// timeout.
+fn call_wait(call_timeout: Option<Duration>) -> Duration {
+    call_timeout.map_or(DEFAULT_CALL_WAIT, |t| t.saturating_add(CALL_WAIT_GRACE))
+}
+
+/// A [`PluginCall`] that owns its fields, to move into a blocking task.
+struct OwnedPluginCall {
+    telemetry: PluginTelemetry,
+    trigger: Trigger,
+    namespace: String,
+    application: String,
+    deployment: String,
+    resource_id: String,
+}
+
+impl OwnedPluginCall {
+    fn new(call: &PluginCall<'_>) -> Self {
+        Self {
+            telemetry: call.telemetry.clone(),
+            trigger: call.trigger,
+            namespace: call.namespace.to_string(),
+            application: call.application.to_string(),
+            deployment: call.deployment.to_string(),
+            resource_id: call.resource_id.to_string(),
+        }
+    }
+
+    fn call(&self) -> PluginCall<'_> {
+        PluginCall {
+            telemetry: &self.telemetry,
+            trigger: self.trigger,
+            namespace: &self.namespace,
+            application: &self.application,
+            deployment: &self.deployment,
+            resource_id: &self.resource_id,
+        }
+    }
+}
+
+/// Why a call's result never came back.
+#[derive(Debug)]
+enum Lost {
+    /// The blocking task panicked, or was cancelled because the runtime is
+    /// shutting down.
+    Join(tokio::task::JoinError),
+    /// The call didn't finish within the wait. It may still be running.
+    Abandoned(Duration),
+}
+
+/// Run `f` on Tokio's blocking pool once one of the
+/// [`MAX_CONCURRENT_PLUGIN_CALLS`] slots is free, inside the caller's span
+/// and with its subscriber, waiting at most `wait` for it.
+async fn run_blocking<R: Send + 'static>(
+    wait: Duration,
+    f: impl FnOnce() -> R + Send + 'static,
+) -> Result<R, Lost> {
+    // The slot belongs to the waiting caller, not to the blocking task. With
+    // no call timeout, a plugin HTTP request that never gets an answer never
+    // returns, and four such calls holding their slots would stop every later
+    // plugin call. So a caller gives up after `wait` and frees its slot, and
+    // so does a caller that goes away (a dropped request). The abandoned call
+    // finishes on its own (its outcome is then only logged and counted) or,
+    // if it really never returns, keeps its thread for good: Tokio can't stop
+    // a blocking task.
+    let _slot = PLUGIN_CALLS
+        .acquire()
+        .await
+        .expect("the plugin call semaphore is never closed");
+    let span = Span::current();
+    let dispatch = tracing::dispatcher::get_default(tracing::Dispatch::clone);
+    let task = tokio::task::spawn_blocking(move || {
+        tracing::dispatcher::with_default(&dispatch, || span.in_scope(f))
+    });
+    match tokio::time::timeout(wait, task).await {
+        Ok(joined) => joined.map_err(Lost::Join),
+        Err(_) => Err(Lost::Abandoned(wait)),
+    }
+}
+
+/// Run one call of `plugin`'s `export` (`f`, one of the blocking functions)
+/// off the async workers. A call that panics or runs past the wait becomes a
+/// failed outcome.
+async fn off_runtime<T, F>(
+    plugin: &LoadedPlugin,
+    export: Export,
+    call: &PluginCall<'_>,
+    f: F,
+) -> CallOutcome<T>
+where
+    T: Send + 'static,
+    F: FnOnce(&LoadedPlugin, &PluginCall<'_>) -> CallOutcome<T> + Send + 'static,
+{
+    let start = Instant::now();
+    let owned_plugin = plugin.clone();
+    let owned_call = OwnedPluginCall::new(call);
+    let wait = call_wait(call.telemetry.call_timeout());
+    match run_blocking(wait, move || f(&owned_plugin, &owned_call.call())).await {
+        Ok(outcome) => outcome,
+        Err(lost) => lost_call(plugin, export, call, start.elapsed(), &lost),
+    }
+}
+
+/// The outcome of a call whose result never came back: failed, with a
+/// `plugin.timeout` event if deckwatch stopped waiting for it, or a
+/// `plugin.trap` one if it panicked (in extism or the funnel; the panic hook
+/// has printed the panic) or was cancelled at shutdown.
+fn lost_call<T>(
+    plugin: &LoadedPlugin,
+    export: Export,
+    call: &PluginCall<'_>,
+    elapsed: Duration,
+    lost: &Lost,
+) -> CallOutcome<T> {
+    let name = export.as_str();
+    let (code, message) = match lost {
+        Lost::Abandoned(wait) => (
+            codes::TIMEOUT,
+            format!(
+                "{name}() didn't finish within {wait:?}; deckwatch stopped waiting for it, \
+                 but it may still be running"
+            ),
+        ),
+        Lost::Join(e) if e.is_panic() => (
+            codes::TRAP,
+            format!("{name}() crashed: deckwatch panicked while calling it"),
+        ),
+        Lost::Join(_) => (
+            codes::TRAP,
+            format!("{name}() was cancelled: deckwatch is shutting down"),
+        ),
+    };
+    let span = plugin_span(export, &plugin.name, &plugin.metadata.version, call);
+    span.in_scope(|| {
+        let scrubber = SecretScrubber::default();
+        let events = vec![host_event(EventSeverity::Error, code, message, &scrubber)];
+        finish_call(
+            &plugin.name,
+            export,
+            false,
+            elapsed,
+            &events,
+            0,
+            call.telemetry,
+        );
+        CallOutcome {
+            plugin: plugin.name.clone(),
+            export,
+            result: None,
+            events,
+            trace_id: plugin_events::trace_context(&span)
+                .as_deref()
+                .and_then(plugin_events::trace_id_of)
+                .map(str::to_string),
+            scrubber: Arc::new(scrubber),
+            trigger: call.trigger,
+        }
+    })
+}
+
+/// Call the plugin's `apply()` export.
+pub async fn run_plugin(
+    plugin: &LoadedPlugin,
+    ctx: &PluginContext,
+    call: &PluginCall<'_>,
+) -> CallOutcome<PluginResult> {
+    let ctx = ctx.clone();
+    off_runtime(plugin, Export::Apply, call, move |plugin, call| {
+        run_plugin_blocking(plugin, &ctx, call)
+    })
+    .await
+}
+
+/// Call the plugin's `provision()` export.
+pub async fn run_provision(
+    plugin: &LoadedPlugin,
+    req: &ResourceProvisionRequest,
+    call: &PluginCall<'_>,
+) -> CallOutcome<ResourceProvisionResult> {
+    let req = req.clone();
+    off_runtime(plugin, Export::Provision, call, move |plugin, call| {
+        run_provision_blocking(plugin, &req, call)
+    })
+    .await
+}
+
+/// Call the plugin's `deprovision()` export. A plugin without one succeeds
+/// with an empty result. Errors never block removal of the resource record;
+/// callers return the events to the operator.
+pub async fn run_deprovision(
+    plugin: &LoadedPlugin,
+    req: &ResourceDeprovisionRequest,
+    call: &PluginCall<'_>,
+) -> CallOutcome<ResourceDeprovisionResult> {
+    let req = req.clone();
+    off_runtime(plugin, Export::Deprovision, call, move |plugin, call| {
+        run_deprovision_blocking(plugin, &req, call)
+    })
+    .await
+}
+
 /// Call the plugin's `metadata()` export. A plugin without one gets the
 /// default metadata.
-fn run_metadata(plugin: &LoadedPlugin, call: &PluginCall<'_>) -> CallOutcome<PluginMetadata> {
-    call_export::<PluginMetadata>(plugin, Export::Metadata, call, true, |_| Ok(String::new()))
+async fn run_metadata(plugin: &LoadedPlugin, call: &PluginCall<'_>) -> CallOutcome<PluginMetadata> {
+    off_runtime(plugin, Export::Metadata, call, run_metadata_blocking).await
 }
 
 fn apply_env_vars(
@@ -3675,3 +3928,7 @@ mod tests {
 #[cfg(test)]
 #[path = "plugins_funnel_tests.rs"]
 mod funnel_tests;
+
+#[cfg(test)]
+#[path = "plugins_runtime_tests.rs"]
+mod runtime_tests;
