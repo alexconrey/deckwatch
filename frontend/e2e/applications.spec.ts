@@ -208,6 +208,87 @@ test.describe("Applications", () => {
       await expect(page.getByText("Redis cache provisioned")).toBeVisible();
     });
 
+    test.describe("Observability tab", () => {
+      test("turning OpenTelemetry injection on asks first, then saves", async ({ app, page, mockApi }) => {
+        await app.goto("/applications/default/billing");
+        await page.getByRole("tab", { name: "Observability" }).click();
+        const otel = page.getByTestId("app-otel");
+        await expect(otel.getByText("Off", { exact: true }).first()).toBeVisible();
+
+        await otel.getByLabel("Inject OpenTelemetry variables").check();
+        await otel.getByLabel("Service name").fill("billing");
+        await otel.getByLabel("Extra resource attributes").fill("team=payments, tier=worker%20pool");
+        await otel.getByRole("button", { name: "Save" }).click();
+
+        const dialog = app.dialog("Turn on OpenTelemetry injection?");
+        await expect(dialog.getByText("primary container of 1 Deployment.", { exact: false })).toBeVisible();
+        await expect(dialog.getByText("Their pods restart once", { exact: false })).toBeVisible();
+        expect(mockApi.requests("PUT", "/namespaces/:ns/applications/:name/observability")).toHaveLength(0);
+        await dialog.getByRole("button", { name: "Turn on" }).click();
+
+        const call = await mockApi.waitForRequest("PUT", "/namespaces/default/applications/billing/observability");
+        expect(call.body).toEqual({
+          opentelemetry: {
+            enabled: true,
+            service_name: "billing",
+            resource_attributes: [
+              { key: "team", value: "payments" },
+              { key: "tier", value: "worker%20pool" },
+            ],
+          },
+        });
+        await expect(dialog).toBeHidden();
+        await expect(otel.getByText("Injecting", { exact: true })).toBeVisible();
+        await expect(page.getByTestId("app-otel-workloads").getByText(/^Injected/)).toBeVisible();
+      });
+
+      test("turning injection off asks first", async ({ app, page, mockApi }) => {
+        await app.goto("/applications/default/storefront");
+        await page.getByRole("tab", { name: "Observability" }).click();
+        const otel = page.getByTestId("app-otel");
+        await otel.getByLabel("Inject OpenTelemetry variables").uncheck();
+        await otel.getByRole("button", { name: "Save" }).click();
+
+        const dialog = app.dialog("Turn off OpenTelemetry injection?");
+        await expect(dialog.getByText("values your workloads set themselves stay", { exact: false })).toBeVisible();
+        await dialog.getByRole("button", { name: "Turn off" }).click();
+        const call = await mockApi.waitForRequest("PUT", "/namespaces/default/applications/storefront/observability");
+        expect(call.body).toEqual({
+          opentelemetry: {
+            enabled: false,
+            service_name: null,
+            resource_attributes: [{ key: "deployment.environment", value: "prod" }],
+          },
+        });
+      });
+
+      test("extra attributes the server would refuse can't be saved", async ({ app, page }) => {
+        await app.goto("/applications/default/storefront");
+        await page.getByRole("tab", { name: "Observability" }).click();
+        const otel = page.getByTestId("app-otel");
+        await otel.getByLabel("Extra resource attributes").fill("deckwatch.application.name=other");
+        await expect(otel.getByText("deckwatch.application.name is set by deckwatch.")).toBeVisible();
+        await expect(otel.getByRole("button", { name: "Save" })).toBeDisabled();
+        await otel.getByLabel("Extra resource attributes").fill("team=two words");
+        await expect(otel.getByText("Percent-encode the value of team", { exact: false })).toBeVisible();
+        await expect(otel.getByRole("button", { name: "Save" })).toBeDisabled();
+      });
+
+      test("a deployment's PodMonitor is turned on from the section", async ({ app, page, mockApi }) => {
+        await app.goto("/applications/default/storefront");
+        await page.getByRole("tab", { name: "Observability" }).click();
+        await page.getByTestId("monitor-api").getByRole("button", { name: "Enable" }).click();
+
+        const dialog = app.dialog("Enable Monitor");
+        await dialog.getByLabel("Scrape interval").fill("1m");
+        await dialog.getByRole("button", { name: "Enable" }).click();
+        const call = await mockApi.waitForRequest("PUT", "/namespaces/default/deployments/api/monitor");
+        expect(call.body).toEqual({ enabled: true, port: "http", path: "/metrics", interval: "1m" });
+        await expect(dialog).toBeHidden();
+        await expect(page.getByTestId("monitor-api").getByText("On", { exact: true })).toBeVisible();
+      });
+    });
+
     test("Fix with AI asks for an agent and shows the queued notice", async ({ app, page }) => {
       await app.goto("/applications/default/storefront");
       await page.getByRole("button", { name: "Fix with AI" }).click();

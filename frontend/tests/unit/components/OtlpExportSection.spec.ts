@@ -65,6 +65,11 @@ describe("OtlpExportSection", () => {
     expect(traces).toContain(`${COLLECTOR}/v1/traces`);
     expect(wrapper.find('[data-testid="otlp-signal-metrics"]').text()).toContain("Not exported");
     expect(wrapper.find('[data-testid="otlp-restart-note"]').text()).toContain("restart");
+    // The same endpoints reach applications with injection on, never the
+    // environment's.
+    expect(wrapper.find('[data-testid="otlp-restart-note"]').text()).toContain(
+      "deckwatch's environment variables never apply to them",
+    );
     expect(wrapper.find('[data-testid="otlp-restart-required"]').exists()).toBe(false);
   });
 

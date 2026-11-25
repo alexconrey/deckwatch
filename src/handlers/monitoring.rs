@@ -274,11 +274,11 @@ pub async fn delete(
     }
 }
 
-fn podmonitor_name(deployment: &str) -> String {
+pub(crate) fn podmonitor_name(deployment: &str) -> String {
     format!("{deployment}{PODMONITOR_SUFFIX}")
 }
 
-fn pick_default_port(deployment: &k8s_openapi::api::apps::v1::Deployment) -> String {
+pub(crate) fn pick_default_port(deployment: &k8s_openapi::api::apps::v1::Deployment) -> String {
     let containers = deployment
         .spec
         .as_ref()
@@ -366,7 +366,7 @@ fn build_podmonitor(
     obj
 }
 
-fn extract_endpoint(pm: &DynamicObject) -> Option<(String, String, String)> {
+pub(crate) fn extract_endpoint(pm: &DynamicObject) -> Option<(String, String, String)> {
     let spec = pm.data.get("spec")?;
     let ep = spec.get("podMetricsEndpoints")?.as_array()?.first()?;
     let port = ep.get("port")?.as_str()?.to_string();

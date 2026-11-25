@@ -10,12 +10,12 @@ use crate::audit;
 use crate::auth::{self, AuthConfig};
 use crate::handlers::registry::RegistryStore;
 use crate::handlers::{
-    admission, agent_feedback, ai_fix, application_resources, applications, autoscaling,
-    configmaps_ui, cronjobs, deployments, deployments_ux, diagnostics, docs, events, exec, git,
-    gitops, health, ingressclasses, ingresses, license, logs, mcp, monitoring, namespaces, nodes,
-    plugin_status, plugins, pods, portforward, prometheus_query, promote, registry, registry_ui,
-    resource_metrics, secrets, serviceaccounts, settings, storageclasses, templates,
-    tracing_handler, webhooks,
+    admission, agent_feedback, ai_fix, app_observability, application_resources, applications,
+    autoscaling, configmaps_ui, cronjobs, deployments, deployments_ux, diagnostics, docs, events,
+    exec, git, gitops, health, ingressclasses, ingresses, license, logs, mcp, monitoring,
+    namespaces, nodes, plugin_status, plugins, pods, portforward, prometheus_query, promote,
+    registry, registry_ui, resource_metrics, secrets, serviceaccounts, settings, storageclasses,
+    templates, tracing_handler, webhooks,
 };
 use crate::metrics;
 use crate::state::AppState;
@@ -249,6 +249,11 @@ pub fn build_router(
         .route(
             "/api/namespaces/{ns}/applications/{name}/members",
             post(applications::add_member),
+        )
+        // Observability section: Prometheus monitors and OTel injection
+        .route(
+            "/api/namespaces/{ns}/applications/{name}/observability",
+            get(app_observability::get).put(app_observability::put),
         )
         .route(
             "/api/namespaces/{ns}/applications/{name}/members/{kind}/{resource_name}",

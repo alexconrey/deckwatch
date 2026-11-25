@@ -109,7 +109,10 @@ credentials, query or fragment), and every change is audit-logged. deckwatch
 reads them at startup, so a change applies after a restart, and an
 `OTEL_EXPORTER_OTLP_*ENDPOINT` environment variable wins, per signal. A `PUT`
 that omits `observability` (or `tracing`) keeps the stored value. See
-[TRACING.md](TRACING.md#10-deckwatchs-own-telemetry).
+[TRACING.md](TRACING.md#10-deckwatchs-own-telemetry). Applications with
+OpenTelemetry injection on get these endpoints too (never the environment
+variables), within seconds of a change, which restarts their pods once; see
+[TRACING.md](TRACING.md#5-exporting-from-your-workloads).
 
 ### Container registry
 

@@ -276,7 +276,7 @@ The only access control is `--namespaces` (env: `DECKWATCH_NAMESPACES`). If unse
 
 ## What is NOT in the codebase (deliberate scope)
 
-- No StatefulSet / DaemonSet management.
+- No StatefulSet / DaemonSet management. (An application's StatefulSets only get OpenTelemetry injection, see [TRACING.md](TRACING.md#5-exporting-from-your-workloads).)
 - No standalone PersistentVolumeClaim UI.
 - No Service / ConfigMap / Secret CRUD (Secrets are read-only via the gitops trigger; there's no way to create them in-app — see UX_IMPROVEMENTS.md §C2).
 - No Events feed (see §H6).

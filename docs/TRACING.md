@@ -6,7 +6,7 @@ separately:
 | Part | What it does | Where it is configured |
 |---|---|---|
 | **Tracing backend** | Stores spans (Grafana Tempo or Jaeger) | Your own installation, or the bundled Helm option ([§4](#4-deploying-the-backend)) |
-| **Workload export** | Sends the application's spans to the backend | The application's OpenTelemetry SDK, through the standard `OTEL_*` variables ([§5](#5-exporting-from-your-workloads)) |
+| **Workload export** | Sends the application's spans to the backend | The application's OpenTelemetry SDK, through the standard `OTEL_*` variables, which deckwatch can set per application ([§5](#5-exporting-from-your-workloads)) |
 | **Trace queries** | Lets deckwatch list recent traces and link into the backend's UI | The `tracing` block of deckwatch's settings ([§6](#6-trace-queries-and-deep-links)) |
 
 These parts are about your workloads' traces. deckwatch can also export its **own** traces, log
@@ -31,8 +31,9 @@ environment. That export is separate and off by default; see
 ## 2. Quick start
 
 1. Have a backend that accepts OTLP ([§4](#4-deploying-the-backend)).
-2. Point your workloads at the backend's OTLP endpoint with the standard `OTEL_*` variables.
-   deckwatch doesn't set them for you yet ([§5](#5-exporting-from-your-workloads)).
+2. Point your workloads at the backend's OTLP endpoint with the standard `OTEL_*` variables:
+   turn on OpenTelemetry injection in the application's **Observability** tab, or set them
+   yourself ([§5](#5-exporting-from-your-workloads)).
 3. Point deckwatch's `tracing` settings at the backend's query API and UI
    ([§6](#6-trace-queries-and-deep-links)).
 4. Instrument the application ([§7](#7-instrumenting-applications)).
@@ -115,15 +116,54 @@ queries, as `http://<release>-jaeger.<namespace>.svc:16686` ([§6.1](#61-trace-q
 
 ## 5. Exporting from your workloads
 
-The OpenTelemetry Collector plugin (`deckwatch-plugin-otel`) is retired. Built-in support
-replaces it: the OTLP endpoints in **Settings → Observability**, which deckwatch already uses for
-its own telemetry ([§10.2](#102-configuration)), and per-application injection of the `OTEL_*`
-variables that point your workloads at them, which is planned. Until then, set the `OTEL_*`
-variables on your workloads yourself ([§7](#7-instrumenting-applications)).
+deckwatch can point an application's workloads at the OTLP endpoints in **Settings →
+Observability** ([§10.2](#102-configuration)), the ones it exports its own telemetry to. Turn on
+**OpenTelemetry injection** in the application's **Observability** tab, or with
+`PUT /api/namespaces/{ns}/applications/{name}/observability`; it's off by default. deckwatch then
+sets these variables on the primary (first) container of every Deployment, StatefulSet and
+CronJob labelled `deckwatch.io/application=<app>`:
 
-deckwatch's own telemetry export is not affected by the plugin's retirement. It is configured in
-**Settings → Observability** or through the standard `OTEL_*` environment variables, and works as
-described in [§10](#10-deckwatchs-own-telemetry).
+| Variable | Value |
+|---|---|
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | `observability.otlp_endpoint`, for traces and logs |
+| `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT` | `observability.otlp_metrics_endpoint`, when it's set |
+| `OTEL_EXPORTER_OTLP_PROTOCOL` | `http/protobuf` |
+| `OTEL_SERVICE_NAME` | The workload's name, or the application's service name |
+| `OTEL_RESOURCE_ATTRIBUTES` | `k8s.namespace.name`, `k8s.deployment.name` (`k8s.statefulset.name`, `k8s.cronjob.name`) and `deckwatch.application.name`, then the application's extra attributes |
+| `OTEL_TRACES_EXPORTER`, `OTEL_METRICS_EXPORTER`, `OTEL_LOGS_EXPORTER` | `none` for a signal without an endpoint |
+
+- **Only the endpoints in settings.** deckwatch's own `OTEL_EXPORTER_OTLP_*` variables never reach
+  your workloads: they can point at something only deckwatch can reach, and can carry
+  credentials. The settings endpoints can't hold credentials, and no headers are injected. With
+  no endpoint set, nothing is injected. deckwatch writes each `$` as `$$`, so Kubernetes doesn't
+  expand a `$(NAME)` in a value (into a Secret's value, for instance).
+- **Values the workload sets win.** deckwatch doesn't set a variable the container's `env`
+  already defines, and gives one up once someone changes it (kubectl, the YAML editor, GitOps, a
+  `valueFrom`) or a manifest declares it too (server-side or `kubectl apply`). A workload that
+  sets its own `OTEL_EXPORTER_OTLP_ENDPOINT` or `OTEL_EXPORTER_OTLP_<SIGNAL>_ENDPOINT` keeps its
+  export setup: deckwatch then only sets `OTEL_SERVICE_NAME` and `OTEL_RESOURCE_ATTRIBUTES`. To
+  override a value, set it in `env`: deleting one doesn't stick while injection is on. deckwatch
+  doesn't read `envFrom` (a ConfigMap or Secret), and `env` wins over it, so a variable you set
+  that way is replaced by deckwatch's.
+- **The reconciler applies it** within 10 seconds, whatever changed the workload. The annotation
+  `observability.deckwatch.io/otel-env` records what deckwatch set: a hash of each value, and the
+  deckwatch database that set it. Turning injection off, deleting the application or taking the
+  workload out of it removes exactly those variables, as long as they still have deckwatch's
+  values. A database without injection on for the application, a new or reset one included,
+  never removes another database's. One with injection on takes them over once; if another
+  deckwatch takes them back, they're left to it, and the tab shows **Another deckwatch**.
+- **Pods restart only for a change.** Turning injection on or off, changing the service name or
+  the attributes, and changing an endpoint in settings change the pod template, so the pods of
+  Deployments and StatefulSets restart once; CronJobs get the change on their next run. The tab
+  asks before it saves. When nothing changed, nothing is patched.
+- **Extra attributes** are `key=value` pairs. Keys use letters, digits, `.`, `_` and `-`; values
+  must be percent-encoded (`team=payments%20eu`). The attributes deckwatch sets, and
+  `service.name`, can't be overridden. The service name is at most 255 characters.
+- **StatefulSets** need `get`, `list` and `patch` on `apps/statefulsets`, which the chart's
+  ClusterRole grants.
+
+The same tab shows the Prometheus monitor (a PodMonitor) of each of the application's
+Deployments, with the same switch as the deployment page.
 
 ## 6. Trace queries and deep links
 

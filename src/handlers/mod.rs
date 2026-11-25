@@ -1,6 +1,7 @@
 pub mod admission;
 pub mod agent_feedback;
 pub mod ai_fix;
+pub mod app_observability;
 pub mod application_resources;
 pub mod applications;
 pub mod autoscaling;

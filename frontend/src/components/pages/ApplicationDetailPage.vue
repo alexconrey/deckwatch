@@ -37,6 +37,7 @@ import StatusChip from "@/components/common/StatusChip.vue";
 import AddMemberDialog from "@/components/common/AddMemberDialog.vue";
 import MetricSparkline from "@/components/common/MetricSparkline.vue";
 import AiFixButton from "@/components/common/AiFixButton.vue";
+import ObservabilityTab from "@/components/views/application/ObservabilityTab.vue";
 import { formatAge } from "@/utils/format";
 
 const props = defineProps<{
@@ -311,7 +312,7 @@ const onFixWithAi = (agent: DiagAgent) => {
 
 const { success: pluginSuccess, error: pluginError } = useSnackbar();
 
-const activeTab = ref<"overview" | "plugins" | "infrastructure">("overview");
+const activeTab = ref<"overview" | "observability" | "plugins" | "infrastructure">("overview");
 
 // Associated plugins for this application.
 const appPlugins = ref<ApplicationPluginEntry[]>([]);
@@ -701,6 +702,7 @@ watch(activeTab, async (tab) => {
 
     <v-tabs v-if="detail" v-model="activeTab" class="mb-4">
       <v-tab value="overview" prepend-icon="mdi-view-dashboard-outline">Overview</v-tab>
+      <v-tab value="observability" prepend-icon="mdi-chart-timeline-variant">Observability</v-tab>
       <v-tab value="plugins" prepend-icon="mdi-puzzle">Plugins</v-tab>
       <v-tab value="infrastructure" prepend-icon="mdi-server">Infrastructure</v-tab>
     </v-tabs>
@@ -891,6 +893,11 @@ watch(activeTab, async (tab) => {
           </template>
         </v-data-table>
       </v-card>
+    </template>
+
+    <!-- Observability tab -->
+    <template v-if="detail && activeTab === 'observability'">
+      <ObservabilityTab :namespace="namespace" :name="name" />
     </template>
 
     <!-- Plugins tab -->

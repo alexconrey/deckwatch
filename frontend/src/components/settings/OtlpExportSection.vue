@@ -77,7 +77,8 @@ function sourceColor(s: OtlpSignalStatus): string | undefined {
     <p class="text-body-2 text-secondary mb-3">
       deckwatch can export its own traces, log lines and metrics over OTLP/HTTP:
       traces and logs to an OpenTelemetry Collector, and metrics to Prometheus's
-      OTLP receiver. This doesn't change how your workloads export theirs.
+      OTLP receiver. Applications that turn on OpenTelemetry injection, in their
+      Observability tab, export theirs to the same endpoints.
     </p>
 
     <v-alert
@@ -161,6 +162,9 @@ function sourceColor(s: OtlpSignalStatus): string | undefined {
       save a change. An <code>OTEL_EXPORTER_OTLP_*ENDPOINT</code> environment
       variable wins over them for its signal. Exporter headers from the
       environment, usually credentials, are only sent to endpoints set there.
+      Applications with injection on get a saved change within seconds, which
+      restarts their pods once; deckwatch's environment variables never apply
+      to them.
     </v-alert>
 
     <v-chip

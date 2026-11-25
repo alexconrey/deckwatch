@@ -54,7 +54,10 @@ pub struct AppState {
     /// Kubernetes SSA patch when the computed patch hasn't changed since the
     /// last reconcile cycle, preventing spurious API-server traffic.
     /// Cleared whenever the plugin list is refreshed so stale fingerprints
-    /// do not block a fresh config from being applied.
+    /// do not block a fresh config from being applied. OpenTelemetry
+    /// injection (`crate::otel_inject`) keeps its own entries here too,
+    /// under `otel:` keys: the patch it last sent to a workload and the
+    /// object's resulting `resourceVersion`.
     pub plugin_patch_fingerprints: Arc<Mutex<HashMap<String, u64>>>,
     /// Plugin event plumbing shared by every plugin call: the per-plugin log
     /// rate limit, the secret scrubber's decryption key, and the latest load

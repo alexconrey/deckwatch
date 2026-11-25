@@ -87,6 +87,11 @@ The detail page for an application shows:
   status, image, and replica count. Click a deployment name to jump to its
   detail page.
 - **CronJobs table** -- lists any cron jobs associated with the application.
+- **Observability tab** -- the Prometheus monitor (PodMonitor) of each
+  deployment, and OpenTelemetry injection: the standard `OTEL_*` variables on
+  the application's Deployments, StatefulSets and CronJobs, pointing them at
+  the OTLP endpoints in Settings → Observability. See
+  [Exporting from your workloads](TRACING.md#5-exporting-from-your-workloads).
 
 ## Adding Members
 

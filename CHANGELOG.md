@@ -36,9 +36,39 @@ Changes merged since the last release are listed under `[Unreleased]`.
   `settings.defaults.tracing`, deckwatch logs a warning at startup and the
   Settings page asks for it. `tracing.query_url`, `ui_url` and
   `backend_kind` are unchanged. (#401, #398)
+- **OpenTelemetry injection into StatefulSets needs RBAC on them.** The
+  chart's ClusterRole now grants `get`, `list` and `patch` on
+  `apps/statefulsets`; deckwatch didn't touch StatefulSets before. If you
+  manage deckwatch's RBAC yourself, add them, or applications with
+  OpenTelemetry injection on (see Added) leave their StatefulSets out, and
+  deckwatch logs a warning every 10 minutes. (#398, #404)
 
 ### Added
 
+- **An Observability tab for each application, with OpenTelemetry
+  injection.** The application page's new tab (also
+  `GET`/`PUT /api/namespaces/{ns}/applications/{name}/observability`) shows
+  the Prometheus monitor (PodMonitor) of each of the application's
+  Deployments, with the same switch as the deployment page, and turns
+  OpenTelemetry injection on or off; it's off by default. With it on,
+  deckwatch sets the standard `OTEL_*` variables on the primary container of
+  the application's Deployments, StatefulSets and CronJobs: the OTLP
+  endpoints from **Settings → Observability** (never deckwatch's own
+  `OTEL_EXPORTER_OTLP_*` variables), `http/protobuf`, the service name (the
+  workload's, or one for the whole application), resource attributes (the
+  namespace, workload and application, plus your own), and
+  `OTEL_<SIGNAL>_EXPORTER=none` for each signal without an endpoint. The
+  reconciler applies it within 10 seconds, however the workload changed.
+  Variables a workload sets in its `env` are kept (`envFrom` isn't read, and
+  `env` wins over it), a workload with its own OTLP endpoint keeps its export
+  setup and only gets the service name and attributes, and turning injection
+  off removes exactly what deckwatch set, which the
+  `observability.deckwatch.io/otel-env` annotation records. Turning it on or
+  off, changing its settings, or changing those endpoints in settings
+  restarts the pods once; the tab asks first. The database gets a nullable
+  column, `applications.observability`, on startup. See
+  [docs/TRACING.md](docs/TRACING.md#5-exporting-from-your-workloads).
+  (#398, #404)
 - **OTLP endpoints for deckwatch's own telemetry in Settings →
   Observability:** `observability.otlp_endpoint`, an OpenTelemetry
   Collector's OTLP/HTTP base URL for traces and logs, and
@@ -72,8 +102,7 @@ Changes merged since the last release are listed under `[Unreleased]`.
 - **The OpenTelemetry Collector plugin is retired.** deckwatch-plugin-otel's
   repository is going away, so remove the plugin under **Settings → Plugins**
   if you installed it. [docs/TRACING.md](docs/TRACING.md) no longer describes
-  it. Per-application `OTEL_*` injection is planned to replace it (#398);
-  until then, set the `OTEL_*` variables on your workloads yourself.
+  it. Per-application `OTEL_*` injection replaces it (see Added).
   deckwatch's own OTLP export (Helm `telemetry.otlp`) works as before, and its
   endpoints can now also be set in **Settings → Observability** (see Added).
   (#396)

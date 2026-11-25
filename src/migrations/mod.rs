@@ -13,6 +13,7 @@ mod m20260814_000002_perf_indices;
 mod m20261124_000001_gitops_token_binding;
 mod m20261124_000002_plugin_status;
 mod m20261124_000003_audit_log_mcp;
+mod m20261125_000001_application_observability;
 pub(crate) mod schema;
 
 use sea_orm_migration::prelude::*;
@@ -38,6 +39,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20261124_000001_gitops_token_binding::Migration),
             Box::new(m20261124_000002_plugin_status::Migration),
             Box::new(m20261124_000003_audit_log_mcp::Migration),
+            Box::new(m20261125_000001_application_observability::Migration),
         ]
     }
 }

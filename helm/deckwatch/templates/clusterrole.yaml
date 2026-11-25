@@ -11,6 +11,11 @@ rules:
   - apiGroups: ["apps"]
     resources: ["replicasets"]
     verbs: ["get", "list"]
+  # OpenTelemetry injection: the env of an application's StatefulSets
+  # (src/otel_inject.rs). deckwatch doesn't otherwise manage them.
+  - apiGroups: ["apps"]
+    resources: ["statefulsets"]
+    verbs: ["get", "list", "patch"]
   - apiGroups: [""]
     resources: ["pods", "pods/log"]
     verbs: ["get", "list", "watch"]

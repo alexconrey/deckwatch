@@ -275,6 +275,7 @@ pub async fn create(
         team: Set(String::new()),
         deployment_name: Set(Some(req.name.clone())),
         git_config: Set(git_config_json),
+        observability: Set(None),
         created_at: Set(now),
         updated_at: Set(now),
     };

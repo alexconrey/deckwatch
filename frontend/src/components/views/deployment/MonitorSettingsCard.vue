@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref, watch } from "vue";
+import { computed, ref } from "vue";
 import { monitoringApi } from "@/api/monitoring";
 import { usePolling } from "@/composables/usePolling";
 import type {
@@ -7,6 +7,7 @@ import type {
   MonitorSettings,
 } from "@/types/monitoring";
 import ConfirmDialog from "@/components/common/ConfirmDialog.vue";
+import MonitorConfigDialog from "@/components/views/deployment/MonitorConfigDialog.vue";
 
 const props = defineProps<{
   namespace: string;
@@ -18,14 +19,6 @@ const loading = ref(false);
 const error = ref<string | null>(null);
 const showConfigDialog = ref(false);
 const showDisableDialog = ref(false);
-
-// Local form state -- kept separate from `settings` so poll updates don't
-// clobber in-progress user input while the dialog is open.
-const form = ref({
-  port: "metrics",
-  path: "/metrics",
-  interval: "30s",
-});
 
 const enabled = computed(() => settings.value?.enabled === true);
 const unavailable = computed(() => settings.value?.unavailable_reason ?? null);
@@ -45,39 +38,10 @@ const fetchSettings = async () => {
 
 usePolling(fetchSettings, 5000);
 
-// Prefill the dialog from the current settings when opening, so editing an
-// existing PodMonitor doesn't silently reset the user's port/path/interval
-// back to the defaults.
-watch(showConfigDialog, (open) => {
-  if (!open) return;
-  if (settings.value) {
-    form.value = {
-      port: settings.value.port || "metrics",
-      path: settings.value.path || "/metrics",
-      interval: settings.value.interval || "30s",
-    };
-  } else {
-    form.value = { port: "metrics", path: "/metrics", interval: "30s" };
-  }
-});
-
-const canSave = computed(() => {
-  if (!form.value.port.trim()) return false;
-  if (!form.value.path.trim()) return false;
-  if (!/^\d+(ms|s|m|h|d|w|y)$/.test(form.value.interval.trim())) return false;
-  return true;
-});
-
-const handleSave = async () => {
+const handleSave = async (body: MonitorConfigRequest) => {
   loading.value = true;
   error.value = null;
   try {
-    const body: MonitorConfigRequest = {
-      enabled: true,
-      port: form.value.port.trim(),
-      path: form.value.path.trim(),
-      interval: form.value.interval.trim(),
-    };
     settings.value = await monitoringApi.upsert(
       props.namespace,
       props.deploymentName,
@@ -209,68 +173,14 @@ const handleDisable = async () => {
       Prometheus scraping is not configured for this deployment.
     </div>
 
-    <v-dialog v-model="showConfigDialog" max-width="520">
-      <v-card>
-        <v-card-title>
-          {{ enabled ? "Edit Monitor" : "Enable Monitor" }}
-        </v-card-title>
-        <v-card-text>
-          <div class="text-body-2 mb-3 text-secondary">
-            Creates a PodMonitor CRD in namespace
-            <code>{{ namespace }}</code> that matches this deployment's pod
-            selector. The prometheus-operator will begin scraping the endpoint
-            below.
-          </div>
-
-          <v-text-field
-            v-model="form.port"
-            label="Port"
-            hint="Named container port (preferred) or numeric string"
-            persistent-hint
-            density="compact"
-            class="mb-2"
-          />
-          <v-text-field
-            v-model="form.path"
-            label="Path"
-            hint="HTTP path to scrape"
-            persistent-hint
-            density="compact"
-            class="mb-2"
-          />
-          <v-text-field
-            v-model="form.interval"
-            label="Scrape interval"
-            hint="Prometheus duration, e.g. 30s, 1m, 5m"
-            persistent-hint
-            density="compact"
-          />
-
-          <v-alert
-            v-if="!canSave"
-            type="warning"
-            density="compact"
-            variant="tonal"
-            class="mt-3"
-          >
-            Port, path, and a valid Prometheus interval are required.
-          </v-alert>
-        </v-card-text>
-        <v-card-actions>
-          <v-spacer />
-          <v-btn variant="text" @click="showConfigDialog = false">Cancel</v-btn>
-          <v-btn
-            color="primary"
-            variant="flat"
-            :loading="loading"
-            :disabled="!canSave"
-            @click="handleSave"
-          >
-            {{ enabled ? "Save" : "Enable" }}
-          </v-btn>
-        </v-card-actions>
-      </v-card>
-    </v-dialog>
+    <MonitorConfigDialog
+      v-model="showConfigDialog"
+      :namespace="namespace"
+      :enabled="enabled"
+      :current="settings"
+      :loading="loading"
+      @save="handleSave"
+    />
 
     <ConfirmDialog
       v-model="showDisableDialog"
