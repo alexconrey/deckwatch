@@ -20,6 +20,8 @@ import type {
   MarketplaceCatalog,
   McpActivityResponse,
   NodeSummary,
+  ObservabilityStatus,
+  OtlpSignalExport,
   OutboundStatus,
   PluginEventReport,
   PluginStatus,
@@ -137,6 +139,70 @@ function settings(): DeckwatchSettings {
       deployments: "Always check metrics before recommending resource changes.",
     },
     marketplace_url: MARKETPLACE_URL,
+    observability: { otlp_endpoint: COLLECTOR_URL, otlp_metrics_endpoint: "" },
+  };
+}
+
+// ----------------------------------------------------------- observability
+
+/** The OpenTelemetry Collector deckwatch exports its own traces and logs to. */
+export const COLLECTOR_URL = "http://otel-collector.observability:4318";
+
+function fromSettings(signal: "traces" | "logs", base = COLLECTOR_URL): OtlpSignalExport {
+  return {
+    source: "settings",
+    endpoint: `${base}/v1/${signal}`,
+    from: "observability.otlp_endpoint",
+    exported: true,
+    reason: null,
+  };
+}
+
+const NOT_EXPORTED: OtlpSignalExport = { source: "unset", endpoint: "", from: null, exported: false, reason: null };
+
+/**
+ * GET /api/settings/observability: traces and logs go to the collector in
+ * settings, metrics nowhere, as set up at startup.
+ */
+function observability(): ObservabilityStatus {
+  return {
+    signals: [
+      { signal: "traces", running: fromSettings("traces"), configured: fromSettings("traces") },
+      { signal: "metrics", running: NOT_EXPORTED, configured: NOT_EXPORTED },
+      { signal: "logs", running: fromSettings("logs"), configured: fromSettings("logs") },
+    ],
+    restart_required: false,
+    retired_otlp_endpoint: null,
+  };
+}
+
+/** The collector moved after startup, so the saved endpoint waits for a restart. */
+export const MOVED_COLLECTOR_URL = "https://otel-collector.platform.internal";
+
+/**
+ * A new collector endpoint saved since startup, metrics from an environment
+ * variable, and the retired tracing.otlp_endpoint still set. Pair with
+ * settings.observability.otlp_endpoint = MOVED_COLLECTOR_URL.
+ */
+export function pendingObservability(): ObservabilityStatus {
+  const metrics: OtlpSignalExport = {
+    source: "env",
+    endpoint: "http://prometheus.monitoring:9090/api/v1/otlp/v1/metrics",
+    from: "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT",
+    exported: true,
+    reason: null,
+  };
+  return {
+    signals: [
+      { signal: "traces", running: fromSettings("traces"), configured: fromSettings("traces", MOVED_COLLECTOR_URL) },
+      { signal: "metrics", running: metrics, configured: metrics },
+      { signal: "logs", running: fromSettings("logs"), configured: fromSettings("logs", MOVED_COLLECTOR_URL) },
+    ],
+    restart_required: true,
+    retired_otlp_endpoint: {
+      value: "deckwatch-tempo.deckwatch.svc:4317",
+      message: "tracing.otlp_endpoint (deckwatch-tempo.deckwatch.svc:4317) is retired and deckwatch doesn't use it.",
+    },
   };
 }
 
@@ -1302,6 +1368,7 @@ export interface MockState {
   /** Attached as plugin_events to deployment create and update responses. */
   writePluginEvents: PluginEventReport[];
   outbound: OutboundStatus;
+  observability: ObservabilityStatus;
   marketplace: MarketplaceCatalog;
   marketplaceUrl: string;
   nodes: NodeSummary[];
@@ -1350,6 +1417,7 @@ export function createMockState(): MockState {
     pluginStatus: pluginStatus(),
     writePluginEvents: [],
     outbound: outbound(),
+    observability: observability(),
     marketplace: marketplace(),
     marketplaceUrl: MARKETPLACE_URL,
     nodes: nodes(),

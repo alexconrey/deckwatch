@@ -43,6 +43,7 @@ export function installDefaultRoutes(api: MockApi, state: MockState): void {
     return ok(creds);
   });
   api.on("GET", "/settings/outbound", () => ok(state.outbound));
+  api.on("GET", "/settings/observability", () => ok(state.observability));
   api.on("POST", "/notifications/test", noContent());
   api.on("GET", "/features", () => ok(state.features));
   api.on("POST", "/frontend-metrics", noContent());
