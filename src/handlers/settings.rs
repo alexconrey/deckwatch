@@ -544,10 +544,14 @@ pub struct PluginConfig {
     /// (e.g. rotated by a Kubernetes secret or IRSA) always win over static
     /// config entries.
     ///
-    /// Use this when credentials are already present as pod environment variables
-    /// rather than stored in settings. For example, to pass through AWS credentials
-    /// that are mounted as env vars via a Kubernetes Secret:
-    /// `inherit_env_keys: ["AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN", "AWS_REGION"]`
+    /// Use this for values already present as pod environment variables,
+    /// for example `inherit_env_keys: ["AWS_REGION", "AWS_ROLE_ARN"]`.
+    ///
+    /// deckwatch's own secrets are never passed: `DECKWATCH_ENCRYPTION_KEY`,
+    /// `DECKWATCH_DATABASE_URL`, static AWS credentials (`AWS_ACCESS_KEY_ID`,
+    /// `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`) and the OTLP exporter's
+    /// `OTEL_EXPORTER_OTLP_*HEADERS`. The call reports a `plugin.policy_rejected`
+    /// warning instead.
     #[serde(default)]
     pub inherit_env_keys: Vec<String>,
     /// Reads the contents of files whose paths are stored in environment variables,

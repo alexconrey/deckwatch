@@ -109,6 +109,7 @@ Deckwatch exposes the following MCP tools:
 |------|-------------|------------|
 | `create_application` | Create a new deckwatch application with optional seed deployment | `namespace`, `name`, `description` (optional), `template_id` (optional), `create_deployment` (optional, default true) |
 | `list_plugins` | List configured plugins with enabled/loaded state, source, and the loaded binary's version and SHA-256 | — |
+| `validate_plugin` | Dry-run a plugin from a public GitHub or URL source: checks that it loads, and reports the env var names (never values), sidecars and Kubernetes objects its `apply()` would add. It runs with no git token, no network access and nothing from deckwatch's environment or files | `source`, `config` (optional), `test_namespace`, `test_deployment`, `test_annotations`, `test_labels` (optional) |
 | `provision_resource` | Provision a plugin-declared resource for an application (e.g. a Redis or PostgreSQL sidecar); its env vars and sidecars are injected into every deployment in the application | `namespace`, `application_name`, `plugin_name`, `resource_id`, `fields` (optional) |
 | `list_application_resources` | List an application's provisioned plugin resources: input fields, state (injected env vars), annotations, and sidecars | `namespace`, `application_name` |
 | `list_templates` | List deployment templates (web-app, worker, cron-job, static-site, custom) with payloads | — |
@@ -249,6 +250,13 @@ using Streamable HTTP transport:
 - **Protocol:** JSON-RPC 2.0
 - **Content-Type:** `application/json`
 - **Methods:** `initialize`, `notifications/initialized`, `tools/list`, `tools/call`
+- **Arguments:** deckwatch's own tools check a call's `arguments` against the
+  tool's `inputSchema` before running it. An argument the schema doesn't
+  declare, a missing required argument, or a value of the wrong type or
+  outside its allowed values is refused with an error naming it (`null` counts
+  as leaving an optional argument out). The mcp-k8s tools, including the four
+  deckwatch replaces (`update_deployment`, `create_pod`, `apply_manifest`,
+  `exec_pod`), aren't checked this way.
 - **Sessions:** a successful `initialize` returns an `Mcp-Session-Id` header,
   which clients send back on later requests. Deckwatch only uses it to label
   those requests with the name and version the client gave in `initialize`
