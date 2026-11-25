@@ -30,7 +30,7 @@ The Settings page renders a sidebar tree with the following sections:
 | **Container Registries** | `container_registries` | Managed list of OCI registries for GitOps dropdowns |
 | **Plugins** | `plugins` | External WASM plugins loaded from Git repositories |
 | **MCP Tuning** | `mcp_tuning` | Resource-scoped org guidance injected into MCP tool descriptions |
-| **Audit Log** | `audit` | Read-only view of the `audit_log` table |
+| **Audit Log** | `audit` | Read-only view of the `audit_log` table: UI/API changes, and MCP tool calls that write, delete or exec or were denied (see [MCP.md](MCP.md#audit-log)). Retention is deployment config (`DECKWATCH_AUDIT_RETENTION_DAYS`, `DECKWATCH_AUDIT_MAX_ROWS`), not a setting |
 
 ## Schema
 
