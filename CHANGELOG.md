@@ -22,8 +22,9 @@ Changes merged since the last release are listed under `[Unreleased]`.
 A security and hardening release. It also moves to kube 5, which requires
 Kubernetes 1.33 or newer; makes outbound HTTPS configurable (extra trusted
 CAs, and endpoint overrides that stored credentials can't follow); shows
-plugin problems where they happen (in API and MCP responses, a Problems view
-and Kubernetes Events); can export deckwatch's own traces and logs over OTLP;
+plugin problems where they happen (in API and MCP responses, a Problems view,
+Kubernetes Events and notifications); can export deckwatch's own traces and
+logs over OTLP;
 and fixes several plugin lifecycle bugs. Some changes need action before or
 after the upgrade: read the upgrade notes first.
 
@@ -93,6 +94,13 @@ first.
   ClusterRole grants both; add them to your own RBAC otherwise. Without them
   deckwatch logs a warning for each Event it can't publish, counts it in
   `deckwatch_plugin_k8s_events_total{result="error"}`, and carries on. (#265)
+- **Enabled notifications are actually sent now.** deckwatch read the
+  notification settings from the old settings ConfigMap, so installs that
+  enabled notifications in Settings never received any. It now reads the
+  database, so an enabled webhook starts receiving the new `plugin_failing`
+  and `plugin_recovered` notifications, unless `event_types` leaves them out
+  (an empty list sends every type). The build, deployment, application and
+  pod event types can be selected but still aren't sent. (#270)
 - **Leftover plugin fields are removed after the upgrade.** When an
   application's last plugin resource is removed, deckwatch now strips the env
   vars, sidecars, init containers, volumes and annotations that the plugin
@@ -279,6 +287,12 @@ first.
   fails the call; `deckwatch_plugin_k8s_events_total{result}` counts
   `published`, `folded`, `dropped` and `error`. Needs new RBAC (see Upgrade
   notes). (#265)
+- **`plugin_failing` and `plugin_recovered` notifications**, sent once when a
+  plugin target starts failing and once when it recovers, never on every
+  reconcile. A target that fails again within 10 minutes of its last
+  `plugin_failing` sends nothing, and neither does its next recovery. Plugin
+  text is escaped for Slack, so it can't become a mention or a link, and a
+  plugin that fails to load ignores the `namespaces` filter. (#270)
 - **deckwatch's own telemetry over OTLP/HTTP.** Off unless
   `OTEL_EXPORTER_OTLP_ENDPOINT` or a per-signal endpoint is set. It exports
   traces (a span per HTTP request) and log records that carry their trace
@@ -292,6 +306,10 @@ first.
   Helm: `telemetry.otlp.*`; with `telemetry.otlp.enabled`, `tracing.enabled`
   and no endpoint, traces go to the bundled Tempo or Jaeger on port 4318.
   See [docs/TRACING.md](docs/TRACING.md). (#260)
+- **Plugins receive `trace_context`**, a W3C `traceparent` for the plugin
+  call's span, while deckwatch exports traces, so a plugin can pass it on in
+  its own requests (deckwatch-plugin-sdk v0.10.0's `trace_headers()`).
+  Plugin events and status rows then carry the trace ID. (#270)
 - `User-Agent: deckwatch/<version>` on every outbound request, and outbound
   errors that include the TLS reason (unknown issuer, expired certificate,
   name mismatch). (#253)
@@ -365,6 +383,10 @@ first.
   Services also selected the bundled Tempo or Jaeger pod, so some traffic
   went to it. The deckwatch pod now carries `app.kubernetes.io/component:
   server`, and the Services select on it. (#262)
+- Notifications work again, including the Test button in Settings →
+  Notifications, which reported success while nothing was sent: the
+  notification client read the old settings ConfigMap instead of the
+  database (see Upgrade notes). (#270)
 - deckwatch's event views show the time, count and source of events.k8s.io
   Events (from `eventTime`, `series` and `reportingComponent`), so Events
   from deckwatch and other modern controllers no longer sort to the bottom
