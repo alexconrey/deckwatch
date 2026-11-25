@@ -1564,12 +1564,34 @@ async fn apply_one_resource(
 /// Deckwatch's own secrets. Plugin config, including `inherit_env_keys`, is
 /// editable through settings and the MCP `update_plugin_config` tool, so a
 /// plugin must never be able to pull these out of the process environment:
-/// the encryption key decrypts every stored credential, and the database URL
-/// can carry a password.
-const NON_INHERITABLE_ENV: &[&str] = &["DECKWATCH_ENCRYPTION_KEY", "DECKWATCH_DATABASE_URL"];
+///
+/// - the encryption key decrypts every stored credential, and the database
+///   URL can carry a password;
+/// - static AWS credentials in deckwatch's environment are deckwatch's own
+///   (the registry's S3 storage reads them), not a plugin's.
+///
+/// [`is_non_inheritable`] also refuses the OTLP exporter headers. This is a
+/// denylist, so it can't be complete: an operator-set allowlist is the real
+/// fix (SEC-11).
+const NON_INHERITABLE_ENV: &[&str] = &[
+    "DECKWATCH_ENCRYPTION_KEY",
+    "DECKWATCH_DATABASE_URL",
+    "AWS_ACCESS_KEY_ID",
+    "AWS_SECRET_ACCESS_KEY",
+    "AWS_SESSION_TOKEN",
+];
+
+/// Whether `key` names one of deckwatch's own secrets: one of
+/// [`NON_INHERITABLE_ENV`], or an OTLP exporter header variable
+/// (`OTEL_EXPORTER_OTLP_HEADERS`, `OTEL_EXPORTER_OTLP_TRACES_HEADERS`, …),
+/// which holds the telemetry backend's credentials.
+fn is_non_inheritable(key: &str) -> bool {
+    NON_INHERITABLE_ENV.contains(&key)
+        || (key.starts_with("OTEL_EXPORTER_OTLP_") && key.ends_with("HEADERS"))
+}
 
 /// `std::env::var` for `inherit_env_keys` / `inherit_env_file_keys`,
-/// refusing [`NON_INHERITABLE_ENV`].
+/// refusing deckwatch's own secrets ([`is_non_inheritable`]).
 fn inherited_env_var(plugin: &str, key: &str) -> Option<String> {
     inherited_env_var_from(plugin, key, |k| std::env::var(k).ok())
 }
@@ -1579,7 +1601,7 @@ fn inherited_env_var_from(
     key: &str,
     lookup: impl Fn(&str) -> Option<String>,
 ) -> Option<String> {
-    if NON_INHERITABLE_ENV.contains(&key) {
+    if is_non_inheritable(key) {
         tracing::warn!(
             plugin,
             key,
@@ -2010,7 +2032,7 @@ fn build_manifest(
 
         // Inherited env vars override static config so live/rotated values win.
         for key in &plugin.inherit_env_keys {
-            if NON_INHERITABLE_ENV.contains(&key.as_str()) {
+            if is_non_inheritable(key) {
                 refused.push(key.clone());
             }
             if let Some(val) = inherited_env_var(&plugin.name, key) {
@@ -2022,7 +2044,7 @@ fn build_manifest(
         // Cloud-agnostic: deckwatch reads the file; the plugin decides what
         // to do with it (e.g. exchange a workload identity token).
         for (config_key, env_var) in &plugin.inherit_env_file_keys {
-            if NON_INHERITABLE_ENV.contains(&env_var.as_str()) {
+            if is_non_inheritable(env_var) {
                 refused.push(env_var.clone());
             }
             if let Some(path) = inherited_env_var(&plugin.name, env_var) {
@@ -3369,10 +3391,26 @@ mod tests {
         for key in NON_INHERITABLE_ENV {
             assert_eq!(inherited_env_var_from("evil", key, env), None, "{key}");
         }
-        assert_eq!(
-            inherited_env_var_from("aws", "AWS_REGION", env).as_deref(),
-            Some("value-of-AWS_REGION")
-        );
+        // Static AWS credentials and the OTLP exporter's headers are
+        // deckwatch's own too.
+        for key in [
+            "AWS_ACCESS_KEY_ID",
+            "AWS_SECRET_ACCESS_KEY",
+            "AWS_SESSION_TOKEN",
+            "OTEL_EXPORTER_OTLP_HEADERS",
+            "OTEL_EXPORTER_OTLP_TRACES_HEADERS",
+            "OTEL_EXPORTER_OTLP_METRICS_HEADERS",
+            "OTEL_EXPORTER_OTLP_LOGS_HEADERS",
+        ] {
+            assert_eq!(inherited_env_var_from("evil", key, env), None, "{key}");
+        }
+        for key in ["AWS_REGION", "AWS_ROLE_ARN", "OTEL_EXPORTER_OTLP_ENDPOINT"] {
+            assert_eq!(
+                inherited_env_var_from("aws", key, env),
+                Some(format!("value-of-{key}")),
+                "{key}"
+            );
+        }
         assert_eq!(inherited_env_var_from("aws", "UNSET", |_| None), None);
     }
 }

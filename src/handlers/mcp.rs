@@ -20,6 +20,7 @@ use serde::{Deserialize, Serialize};
 use tracing::{Instrument, Span};
 
 use super::mcp_audit;
+use super::mcp_schema;
 use super::mcp_telemetry::{self, DeckwatchTool, RequestContext};
 use crate::audit;
 use crate::entities::applications as apps_entity;
@@ -362,14 +363,22 @@ fn exec_pod_tool_definition() -> serde_json::Value {
 /// (`mcp_telemetry::DECKWATCH_TOOLS`), as `tools/list` lists them;
 /// `submit_agent_feedback` is listed only when agent feedback is on.
 pub(super) fn served_tool_definitions() -> Vec<serde_json::Value> {
-    let mut tools = deckwatch_tool_definitions();
+    let mut tools = native_tool_definitions();
     tools.extend([
-        agent_feedback_tool_definition(),
         enhanced_update_deployment_tool_definition(),
         enhanced_create_pod_tool_definition(),
         apply_manifest_tool_definition(),
         exec_pod_tool_definition(),
     ]);
+    tools
+}
+
+/// The definitions of deckwatch's native tools: every tool it serves itself
+/// except the mcp-k8s tools it replaces. `mcp_schema` checks calls of these
+/// against their `inputSchema`.
+pub(super) fn native_tool_definitions() -> Vec<serde_json::Value> {
+    let mut tools = deckwatch_tool_definitions();
+    tools.push(agent_feedback_tool_definition());
     tools
 }
 
@@ -963,13 +972,13 @@ fn deckwatch_tool_definitions() -> Vec<serde_json::Value> {
         }),
         serde_json::json!({
             "name": "validate_plugin",
-            "description": "Validate a plugin before adding it to settings. Fetches the WASM binary from the given source, confirms it loads and exports an `apply` function, then dry-runs it with a configurable test context and reports exactly what env vars, sidecars, and Kubernetes resources it would inject. Does not modify any state.",
+            "description": "Validate a plugin before adding it to settings. Fetches the WASM binary from a public GitHub or URL source, confirms it loads and exports an `apply` function, then dry-runs it with a configurable test context and reports which env vars (names, and the Secret or ConfigMap a value would come from; never values), sidecars and Kubernetes resources it would inject. The dry run gets no git token, no network access and nothing from deckwatch's environment or files: only `config` and the test context reach the plugin. Does not modify any state.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "source": {
                         "type": "object",
-                        "description": "Plugin source — same schema as settings plugins[].source",
+                        "description": "Plugin source — settings plugins[].source, for a public GitHub repository or URL",
                         "properties": {
                             "type": { "type": "string", "enum": ["github", "url"] },
                             "repo": { "type": "string", "description": "GitHub owner/repo (type=github)" },
@@ -978,20 +987,12 @@ fn deckwatch_tool_definitions() -> Vec<serde_json::Value> {
                             "use_release": { "type": "boolean", "description": "Fetch from GitHub Releases instead of raw file (type=github)" },
                             "url": { "type": "string", "description": "Full HTTPS URL (type=url)" }
                         },
-                        "required": ["type"]
-                    },
-                    "token_secret": {
-                        "type": "string",
-                        "description": "Name of a git_token_secrets entry for authenticated fetches (private repos)"
-                    },
-                    "allowed_hosts": {
-                        "type": "array",
-                        "items": { "type": "string" },
-                        "description": "Hosts the plugin can reach via HTTP (e.g. [\"*.amazonaws.com\"]). Mirrors the saved plugin config."
+                        "required": ["type"],
+                        "additionalProperties": false
                     },
                     "config": {
                         "type": "object",
-                        "description": "Key-value config injected into the plugin (credentials, endpoints, etc.). Plugin reads via extism_pdk::config::get().",
+                        "description": "Key-value config passed to the plugin, which reads it via extism_pdk::config::get(). Use test values: the plugin's output is reported back, and it can't reach the network.",
                         "additionalProperties": { "type": "string" }
                     },
                     "test_namespace": {
@@ -1231,9 +1232,12 @@ async fn call_tool(
             // need a deep stack (debug builds overflow test threads).
             let body = audit::within_mcp_call(async {
                 match own {
-                    Some(tool) => {
-                        Some(Box::pin(dispatch_deckwatch_tool(state, tool.name, args)).await)
-                    }
+                    // deckwatch's own tools run only with the arguments
+                    // their schema declares.
+                    Some(tool) => Some(match mcp_schema::check(tool.name, args) {
+                        Ok(()) => Box::pin(dispatch_deckwatch_tool(state, tool.name, args)).await,
+                        Err(e) => Err(e),
+                    }),
                     None => {
                         Box::pin(mcp_k8s::mcp::handle_tool(
                             &mcp_k8s_client(state),
@@ -2661,35 +2665,51 @@ async fn tool_get_plugin_config(
     serde_json::to_string_pretty(&result).map_err(|e| e.to_string())
 }
 
+/// MCP `validate_plugin`: fetch caller-chosen WASM and dry-run its
+/// `apply()`. Whoever can call it chooses the code, so the run gets only the
+/// caller's own `config` and test context: no git token (the download is
+/// anonymous), no `allowed_hosts` (no network access), and nothing from
+/// deckwatch's environment or files. The result names the env vars the
+/// plugin would set but never carries their values.
+///
+/// The schema check refuses the arguments that would grant more before this
+/// runs (`mcp_schema::refusal_reason`); they are refused here again, and
+/// never passed on.
 async fn tool_validate_plugin(
     state: &AppState,
     args: &serde_json::Value,
 ) -> Result<String, String> {
+    let refused = args.as_object().and_then(|obj| {
+        obj.keys()
+            .find_map(|key| Some((key, mcp_schema::refusal_reason("validate_plugin", key)?)))
+    });
+    if let Some((key, why)) = refused {
+        return Err(format!("validate_plugin refuses `{key}`: {why}"));
+    }
+
     // Parse the source from args — same JSON shape as DeckwatchSettings.plugins[].source.
     let source: settings::PluginSource = serde_json::from_value(args["source"].clone())
         .map_err(|e| format!("invalid source: {e}"))?;
+    if matches!(source, settings::PluginSource::Upload { .. }) {
+        return Err(
+            "invalid source: validate_plugin fetches from a GitHub repository or a URL \
+             (type github or url)"
+                .to_string(),
+        );
+    }
 
     let cfg = settings::PluginConfig {
         name: "__validate__".to_string(),
         enabled: true,
         source,
-        token_secret: args["token_secret"].as_str().map(|s| s.to_string()),
-        allowed_hosts: args
-            .get("allowed_hosts")
-            .and_then(|v| serde_json::from_value(v.clone()).ok())
-            .unwrap_or_default(),
+        token_secret: None,
+        allowed_hosts: Vec::new(),
         config: args
             .get("config")
             .and_then(|v| serde_json::from_value(v.clone()).ok())
             .unwrap_or_default(),
-        inherit_env_keys: args
-            .get("inherit_env_keys")
-            .and_then(|v| serde_json::from_value(v.clone()).ok())
-            .unwrap_or_default(),
-        inherit_env_file_keys: args
-            .get("inherit_env_file_keys")
-            .and_then(|v| serde_json::from_value(v.clone()).ok())
-            .unwrap_or_default(),
+        inherit_env_keys: Vec::new(),
+        inherit_env_file_keys: Default::default(),
         // Validation runs do not enforce a checksum — the caller is explicitly
         // testing an arbitrary source before committing it to settings.
         sha256: None,
@@ -2722,19 +2742,7 @@ async fn tool_validate_plugin(
 
     let result_summary = vr.result.as_ref().map(|r| {
         serde_json::json!({
-            "env_vars": r.env_vars.iter().map(|e| {
-                if let Some(vf) = &e.value_from {
-                    if let Some(skr) = &vf.secret_key_ref {
-                        serde_json::json!({ "name": e.name, "from_secret": skr.name, "key": skr.key })
-                    } else if let Some(cmkr) = &vf.config_map_key_ref {
-                        serde_json::json!({ "name": e.name, "from_configmap": cmkr.name, "key": cmkr.key })
-                    } else {
-                        serde_json::json!({ "name": e.name, "value": "(unknown source)" })
-                    }
-                } else {
-                    serde_json::json!({ "name": e.name, "value": e.value })
-                }
-            }).collect::<Vec<_>>(),
+            "env_vars": r.env_vars.iter().map(validated_env_var).collect::<Vec<_>>(),
             "sidecars": r.sidecars.iter().map(|s| serde_json::json!({
                 "name": s.name,
                 "image": s.image,
@@ -2765,6 +2773,24 @@ async fn tool_validate_plugin(
 
     let text = serde_json::to_string_pretty(&output).map_err(|e| e.to_string())?;
     Ok(with_plugin_output(text, &vr.events))
+}
+
+/// How `validate_plugin` reports an env var the plugin would set: its name,
+/// and the Secret or ConfigMap key a `value_from` points at. Never a plain
+/// value: the plugin chose it, and it can be anything the plugin was given.
+fn validated_env_var(e: &crate::plugins::EnvVarSpec) -> serde_json::Value {
+    match &e.value_from {
+        Some(vf) => {
+            if let Some(skr) = &vf.secret_key_ref {
+                serde_json::json!({ "name": e.name, "from_secret": skr.name, "key": skr.key })
+            } else if let Some(cmkr) = &vf.config_map_key_ref {
+                serde_json::json!({ "name": e.name, "from_configmap": cmkr.name, "key": cmkr.key })
+            } else {
+                serde_json::json!({ "name": e.name, "value_from": "(unknown source)" })
+            }
+        }
+        None => serde_json::json!({ "name": e.name }),
+    }
 }
 
 /// Append what plugins reported to a tool result, inside the untrusted-content
@@ -3628,3 +3654,7 @@ mod tool_telemetry_tests;
 #[cfg(test)]
 #[path = "mcp_tool_audit_tests.rs"]
 mod tool_audit_tests;
+
+#[cfg(test)]
+#[path = "mcp_validate_plugin_tests.rs"]
+mod validate_plugin_tests;

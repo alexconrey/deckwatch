@@ -169,26 +169,32 @@ kubectl create configmap deckwatch-config -n deckwatch \
 
 ## Plugin `inherit_env_keys`
 
-Plugins read credentials via `extism_pdk::config::get()`. For credentials that
-are already mounted as pod environment variables (e.g. from a Kubernetes Secret
-or IRSA), you can avoid storing them in settings by listing their names in
-`inherit_env_keys`. Deckwatch reads those keys from the deckwatch process
-environment at each plugin invocation and injects them — overriding any
-same-named entry in the static `config` map so live/rotated values always win.
+Plugins read their config via `extism_pdk::config::get()`. For values that
+are already set as pod environment variables, you can avoid storing them in
+settings by listing their names in `inherit_env_keys`. Deckwatch reads those
+keys from the deckwatch process environment at each plugin invocation and
+injects them — overriding any same-named entry in the static `config` map so
+live/rotated values always win. `inherit_env_file_keys` does the same with the
+contents of a file whose path is in an environment variable, such as a
+workload identity token:
 
 ```jsonc
 {
   "plugins": [{
     "name": "aws",
-    "inherit_env_keys": [
-      "AWS_ACCESS_KEY_ID",
-      "AWS_SECRET_ACCESS_KEY",
-      "AWS_SESSION_TOKEN",
-      "AWS_REGION"
-    ]
+    "inherit_env_keys": ["AWS_REGION", "AWS_ROLE_ARN"],
+    "inherit_env_file_keys": { "AWS_IDENTITY_TOKEN": "AWS_WEB_IDENTITY_TOKEN_FILE" }
   }]
 }
 ```
+
+Deckwatch never passes its own secrets, by either list:
+`DECKWATCH_ENCRYPTION_KEY`, `DECKWATCH_DATABASE_URL`, static AWS credentials
+(`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`, which the
+registry's S3 storage uses) and the OTLP exporter's headers
+(`OTEL_EXPORTER_OTLP_HEADERS` and the per-signal `OTEL_EXPORTER_OTLP_*_HEADERS`).
+The plugin call reports a `plugin.policy_rejected` warning instead. Give a
+plugin its own credentials in its `config`, or a workload identity token.
 
 ## MCP Tuning
 

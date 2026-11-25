@@ -262,6 +262,56 @@ async fn guardrail_denials_are_audited_reads_too() {
     }
 }
 
+/// `validate_plugin` runs caller-supplied code, so every call is audited as
+/// `exec`, including the ones its argument check refuses. The row names an
+/// undeclared argument only as `?` and never holds a value.
+#[tokio::test]
+async fn validate_plugin_calls_are_audited_as_exec_refused_ones_too() {
+    let (state, _dir) = state_with(echo_client(), &[]).await;
+    let source = json!({ "type": "url", "url": "http://127.0.0.1:9/s3cr3t-url.wasm" });
+    let rows = rows_of(
+        &state,
+        vec![
+            call(
+                "validate_plugin",
+                json!({
+                    "source": source,
+                    "inherit_env_keys": ["S3CR3T_ENV"],
+                    "token_secret": "s3cr3t-token",
+                }),
+            ),
+            call("validate_plugin", json!({ "source": source })),
+        ],
+    )
+    .await;
+    let summary: Vec<(&str, &str, &str, &str)> = rows
+        .iter()
+        .map(|r| {
+            (
+                r.tool.as_str(),
+                r.action.as_str(),
+                r.resource_type.as_str(),
+                r.outcome.as_str(),
+            )
+        })
+        .collect();
+    // The refused call never ran. The second did: nothing listens on port
+    // 9, so it reports `"valid": false`, a successful call.
+    assert_eq!(
+        summary,
+        [
+            ("validate_plugin", "exec", "plugin", "error"),
+            ("validate_plugin", "exec", "plugin", "ok"),
+        ]
+    );
+    assert_eq!(detail(&rows[0])["argument_keys"], json!(["source", "?"]));
+    assert_eq!(detail(&rows[1])["argument_keys"], json!(["source"]));
+    for row in &rows {
+        assert!(!format!("{row:?}").contains("s3cr3t"), "{row:?}");
+        assert!(!format!("{row:?}").contains("S3CR3T"), "{row:?}");
+    }
+}
+
 #[tokio::test]
 async fn the_row_carries_the_clients_self_reported_name() {
     let (state, _dir) = state_with(echo_client(), &[]).await;

@@ -114,9 +114,14 @@ Plugins are configured as part of `DeckwatchSettings`, stored in the deckwatch d
 
       // Optional. Environment variable names to read from the deckwatch process
       // environment and inject into the plugin config at invocation time.
-      // These OVERRIDE same-named "config" entries so live/rotated credentials
-      // (e.g. from a Kubernetes Secret mounted as env vars) always win.
-      "inherit_env_keys": ["AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN"]
+      // These OVERRIDE same-named "config" entries so live/rotated values
+      // always win. deckwatch's own secrets are never passed (see
+      // SETTINGS.md, "Plugin inherit_env_keys").
+      "inherit_env_keys": ["AWS_ROLE_ARN"],
+
+      // Optional. Config key -> environment variable holding a file path;
+      // the plugin receives the file's contents (e.g. a workload identity token).
+      "inherit_env_file_keys": { "AWS_IDENTITY_TOKEN": "AWS_WEB_IDENTITY_TOKEN_FILE" }
     }
   ]
 }
