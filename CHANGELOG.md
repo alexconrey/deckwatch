@@ -17,6 +17,11 @@ Changes merged since the last release are listed under `[Unreleased]`.
 
 ## [Unreleased]
 
+### Fixed
+
+- The API docs (`/api/docs`) and `/api/openapi.yaml` report the running
+  deckwatch version. The spec said 0.2.1 since that release.
+
 ## [0.7.0] - 2026-11-25
 
 A security and hardening release. It also moves to kube 5, which requires
