@@ -8,6 +8,7 @@ import type {
   DeckwatchSettings,
   DeploymentDetailResponse,
   DeploymentTemplate,
+  DeprovisionResponse,
   DiagnosticHistoryItem,
   EventSummary,
   GitOpsStatus,
@@ -17,6 +18,9 @@ import type {
   IngressTemplate,
   MarketplaceCatalog,
   NodeSummary,
+  OutboundStatus,
+  PluginEventReport,
+  PluginStatus,
   PluginSummary,
   PodSummary,
   ProvisionedResource,
@@ -446,6 +450,264 @@ function provisionedResources(): Record<string, ProvisionedResource[]> {
       },
     ],
   };
+}
+
+// ------------------------------------------------------------ plugin status
+
+function pluginStatusRow(row: Partial<PluginStatus> & Pick<PluginStatus, "plugin">): PluginStatus {
+  return {
+    namespace: "",
+    application: "",
+    resource_id: "",
+    health: "healthy",
+    last_export: "metadata",
+    last_events: [],
+    first_failure_at: null,
+    consecutive_failures: 0,
+    last_success_at: ago({ m: 2 }),
+    last_changed_at: ago({ d: 1, h: 4 }),
+    updated_at: ago({ m: 2 }),
+    ...row,
+  };
+}
+
+/**
+ * Every plugin target is healthy by default: the app bar has no Problems
+ * button, and the application and plugin pages show green badges.
+ */
+function pluginStatus(): PluginStatus[] {
+  return [
+    pluginStatusRow({ plugin: "otel" }),
+    pluginStatusRow({ plugin: "aws-rds" }),
+    pluginStatusRow({ namespace: "default", application: "storefront", plugin: "otel", last_export: "apply" }),
+    pluginStatusRow({
+      namespace: "default",
+      application: "storefront",
+      plugin: "aws-rds",
+      resource_id: "postgres",
+      last_export: "fetch",
+    }),
+  ];
+}
+
+/**
+ * Plugin targets in trouble, for the Problems views: storefront's database
+ * failing, a plugin that no longer loads, and storefront's otel apply()
+ * degraded. Replaces the matching healthy rows.
+ */
+export function pluginProblems(): PluginStatus[] {
+  const trace = "4bf92f3577b34da6a3ce929d0e0e4736";
+  return [
+    pluginStatusRow({ plugin: "otel" }),
+    pluginStatusRow({ plugin: "aws-rds" }),
+    pluginStatusRow({
+      namespace: "default",
+      application: "storefront",
+      plugin: "aws-rds",
+      resource_id: "postgres",
+      health: "failing",
+      last_export: "fetch",
+      consecutive_failures: 3,
+      first_failure_at: ago({ m: 14 }),
+      last_success_at: ago({ h: 2, m: 10 }),
+      last_changed_at: ago({ m: 14 }),
+      updated_at: ago({ m: 1 }),
+      trace_id: trace,
+      last_events: [
+        {
+          plugin: "aws-rds",
+          export: "fetch",
+          severity: "error",
+          code: "aws-rds.describe_failed",
+          message: "DescribeDBInstances returned AccessDenied for storefront-db.",
+          resource_id: "postgres",
+          retryable: true,
+          hint: "Allow rds:DescribeDBInstances for the deckwatch IAM role.",
+          trace_id: trace,
+        },
+      ],
+    }),
+    pluginStatusRow({
+      plugin: "vault-secrets",
+      health: "failing",
+      last_export: "metadata",
+      consecutive_failures: 1,
+      first_failure_at: ago({ h: 1 }),
+      last_success_at: null,
+      last_changed_at: ago({ h: 1 }),
+      updated_at: ago({ h: 1 }),
+      last_events: [
+        {
+          plugin: "vault-secrets",
+          export: "metadata",
+          severity: "error",
+          code: "plugin.trap",
+          message: "wasm trap: unreachable instruction executed",
+          retryable: false,
+        },
+      ],
+    }),
+    pluginStatusRow({
+      namespace: "default",
+      application: "storefront",
+      plugin: "otel",
+      health: "degraded",
+      last_export: "apply",
+      last_success_at: ago({ m: 1 }),
+      last_changed_at: ago({ m: 6 }),
+      updated_at: ago({ m: 1 }),
+      last_events: [
+        {
+          plugin: "otel",
+          export: "apply",
+          severity: "warning",
+          code: "otel.collector_unreachable",
+          message: "otel-collector.observability.svc:4318 did not answer; spans are buffered in the pod.",
+          retryable: true,
+        },
+        {
+          plugin: "otel",
+          export: "apply",
+          severity: "info",
+          code: "otel.sampling",
+          message: "Head sampling is at 10%.",
+          retryable: false,
+        },
+      ],
+    }),
+  ];
+}
+
+/**
+ * What storefront's plugins report when a deployment is created or updated:
+ * one of each severity (MockState.writePluginEvents attaches them).
+ */
+export function writePluginEvents(): PluginEventReport[] {
+  return [
+    {
+      plugin: "otel",
+      export: "apply",
+      severity: "info",
+      code: "otel.injected",
+      message: "Added OTEL_EXPORTER_OTLP_ENDPOINT to 1 container.",
+      retryable: false,
+    },
+    {
+      plugin: "aws-rds",
+      export: "apply",
+      severity: "error",
+      code: "aws-rds.secret_missing",
+      message: "Secret storefront-db-credentials not found; DATABASE_URL was not set.",
+      object: { api_version: "v1", kind: "Secret", name: "storefront-db-credentials" },
+      retryable: false,
+      hint: "Provision the PostgreSQL database again to recreate the Secret.",
+    },
+    {
+      plugin: "otel",
+      export: "apply",
+      severity: "warning",
+      code: "otel.collector_unreachable",
+      message: "otel-collector.observability.svc:4318 did not answer; spans are buffered in the pod.",
+      retryable: true,
+    },
+  ];
+}
+
+/** DELETE …/resources/aws-rds/postgres, when the plugin has things to say. */
+export function deprovisionReport(): DeprovisionResponse {
+  return {
+    message: "Deleted the RDS instance storefront-db. Its final snapshot storefront-db-final is kept.",
+    plugin_events: [
+      {
+        plugin: "aws-rds",
+        export: "deprovision",
+        severity: "warning",
+        code: "aws-rds.snapshot_kept",
+        message: "The final snapshot storefront-db-final is billed until you delete it.",
+        resource_id: "postgres",
+        retryable: false,
+      },
+    ],
+    kubernetes_resource_deletions: [
+      { api_version: "batch/v1", kind: "Job", name: "storefront-db-migrate", namespace: "default", outcome: "deleted" },
+      { api_version: "batch/v1", kind: "Job", name: "storefront-db-backup", namespace: "default", outcome: "not_found" },
+      {
+        api_version: "v1",
+        kind: "ServiceAccount",
+        name: "storefront-db",
+        namespace: "default",
+        outcome: "refused",
+        reason: "still used by deployment/web; deleting it would stop new pods from being created",
+      },
+    ],
+  };
+}
+
+// ---------------------------------------------------------------- outbound
+
+/**
+ * GET /api/settings/outbound: every endpoint at its default, and the stored
+ * Anthropic key bound to the default host (the git tokens are referenced
+ * Secrets, not stored credentials).
+ */
+function outbound(): OutboundStatus {
+  const endpoint = (
+    id: OutboundStatus["endpoints"][number]["id"],
+    setting: OutboundStatus["endpoints"][number]["setting"],
+    label: string,
+    url: string,
+  ): OutboundStatus["endpoints"][number] => ({
+    id,
+    setting,
+    label,
+    default: url,
+    value: "",
+    effective: url,
+    host: url.replace(/^https:\/\//, "").replace(/\/.*$/, ""),
+    error: null,
+  });
+  return {
+    allow_insecure_endpoints: false,
+    extra_ca: null,
+    endpoints: [
+      endpoint("anthropic_api", "anthropic_api_base", "Anthropic API", "https://api.anthropic.com"),
+      endpoint("vertex_token", "vertex_token_url", "Vertex AI token", "https://oauth2.googleapis.com/token"),
+      endpoint("vertex_api", "vertex_api_base", "Vertex AI API", "https://{region}-aiplatform.googleapis.com"),
+      endpoint("bedrock", "bedrock_endpoint", "Bedrock runtime", "https://bedrock-runtime.{region}.amazonaws.com"),
+      endpoint("github_api", "github_api_base", "GitHub API", "https://api.github.com"),
+      endpoint("github_web", "github_web_base", "GitHub web", "https://github.com"),
+      endpoint("github_raw", "github_raw_base", "GitHub raw content", "https://raw.githubusercontent.com"),
+    ],
+    credentials: [
+      {
+        credential: "anthropic_api_key",
+        label: "Anthropic API key",
+        usable: true,
+        bindings: [
+          { endpoint: "anthropic_api", bound_host: "api.anthropic.com", configured_host: "api.anthropic.com", matches: true },
+        ],
+      },
+    ],
+  };
+}
+
+/**
+ * The Anthropic endpoint moved to a gateway after the key was saved, with
+ * http:// allowed and an extra CA bundle: the key is no longer sent anywhere.
+ * Pair with settings.endpoints.anthropic_api_base = GATEWAY_URL.
+ */
+export const GATEWAY_URL = "https://llm-gateway.platform.internal";
+
+export function movedOutbound(): OutboundStatus {
+  const status = outbound();
+  const anthropic = status.endpoints[0];
+  Object.assign(anthropic, { value: GATEWAY_URL, effective: GATEWAY_URL, host: "llm-gateway.platform.internal" });
+  status.allow_insecure_endpoints = true;
+  status.extra_ca = { file: "/etc/deckwatch/ca/corp-root.pem", certificates: 2 };
+  status.credentials[0].usable = false;
+  status.credentials[0].bindings[0].configured_host = "llm-gateway.platform.internal";
+  status.credentials[0].bindings[0].matches = false;
+  return status;
 }
 
 // ----------------------------------------------------------------- plugins
@@ -947,6 +1209,10 @@ export interface MockState {
   applicationPlugins: Record<string, ApplicationPluginEntry[]>;
   provisioned: Record<string, ProvisionedResource[]>;
   plugins: PluginSummary[];
+  pluginStatus: PluginStatus[];
+  /** Attached as plugin_events to deployment create and update responses. */
+  writePluginEvents: PluginEventReport[];
+  outbound: OutboundStatus;
   marketplace: MarketplaceCatalog;
   marketplaceUrl: string;
   nodes: NodeSummary[];
@@ -992,6 +1258,9 @@ export function createMockState(): MockState {
     applicationPlugins: applicationPlugins(),
     provisioned: provisionedResources(),
     plugins: plugins(),
+    pluginStatus: pluginStatus(),
+    writePluginEvents: [],
+    outbound: outbound(),
     marketplace: marketplace(),
     marketplaceUrl: MARKETPLACE_URL,
     nodes: nodes(),
