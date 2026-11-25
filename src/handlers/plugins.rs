@@ -179,6 +179,17 @@ pub async fn upload_plugin_wasm(
     Path(name): Path<String>,
     body: Bytes,
 ) -> Result<StatusCode, AppError> {
+    let uploads_dir = std::path::Path::new(crate::plugins::UPLOADS_DIR);
+    store_upload(state, uploads_dir, name, body).await
+}
+
+/// [`upload_plugin_wasm`], storing the binary in `uploads_dir`.
+async fn store_upload(
+    state: AppState,
+    uploads_dir: &std::path::Path,
+    name: String,
+    body: Bytes,
+) -> Result<StatusCode, AppError> {
     if body.is_empty() {
         return Err(AppError::BadRequest("request body is empty".into()));
     }
@@ -188,14 +199,28 @@ pub async fn upload_plugin_wasm(
         ));
     }
 
+    // `name` is a percent-decoded path segment, so it can hold `/` and `..`.
+    // Before anything touches the filesystem it must make a plain file name
+    // and name a configured plugin.
+    let filename = format!("{name}.wasm");
+    let dest = crate::plugins::upload_path(uploads_dir, &filename).ok_or_else(|| {
+        AppError::BadRequest(
+            "a plugin name for an upload may only contain letters, digits, '.', '_' and '-', \
+             and can't start with '.'"
+                .into(),
+        )
+    })?;
+    let mut settings = crate::handlers::settings::load_settings_from_db(&state).await;
+    let Some(index) = settings.plugins.iter().position(|p| p.name == name) else {
+        return Err(AppError::NotFound(format!(
+            "plugin '{name}' not found in settings — add it first then upload"
+        )));
+    };
+
     // Ensure uploads directory exists.
-    let uploads_dir = std::path::Path::new(crate::plugins::UPLOADS_DIR);
     tokio::fs::create_dir_all(uploads_dir)
         .await
         .map_err(|e| AppError::BadRequest(format!("failed to create uploads dir: {e}")))?;
-
-    let filename = format!("{name}.wasm");
-    let dest = uploads_dir.join(&filename);
     tokio::fs::write(&dest, &body)
         .await
         .map_err(|e| AppError::BadRequest(format!("failed to write WASM: {e}")))?;
@@ -203,17 +228,10 @@ pub async fn upload_plugin_wasm(
     let sha256 = crate::plugins::sha256_hex(&body);
     tracing::info!(plugin = %name, bytes = body.len(), sha256 = %sha256, path = %dest.display(), "WASM uploaded");
 
-    // Update plugin source to Upload and trigger reload.
-    let mut settings = crate::handlers::settings::load_settings_from_db(&state).await;
-    if let Some(plugin_cfg) = settings.plugins.iter_mut().find(|p| p.name == name) {
-        plugin_cfg.source = PluginSource::Upload {
-            filename: filename.clone(),
-        };
-    } else {
-        return Err(AppError::NotFound(format!(
-            "plugin '{name}' not found in settings — add it first then upload"
-        )));
-    }
+    // Switch the plugin source to Upload and trigger reload.
+    settings.plugins[index].source = PluginSource::Upload {
+        filename: filename.clone(),
+    };
 
     crate::handlers::settings::upsert_settings_to_db_pub(&state.db, &settings)
         .await
