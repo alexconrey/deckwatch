@@ -35,6 +35,7 @@ mod plugin_status;
 mod plugins;
 mod rate_limit;
 mod routes;
+mod security_headers;
 mod state;
 mod telemetry;
 mod watcher;

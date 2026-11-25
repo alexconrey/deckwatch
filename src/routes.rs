@@ -454,19 +454,7 @@ pub fn build_router(
         .merge(registry_api);
 
     if let Some(store) = registry_store {
-        let oci = Router::new()
-            .route("/v2/", get(oci_root).head(oci_root))
-            .route(
-                "/v2/{*rest}",
-                get(oci_dispatch_get)
-                    .head(oci_dispatch_head)
-                    .post(oci_dispatch_post)
-                    .patch(oci_dispatch_patch)
-                    .put(oci_dispatch_put)
-                    .delete(oci_dispatch_delete),
-            )
-            .with_state(store);
-        router = router.merge(oci);
+        router = router.merge(oci_router(store));
     }
 
     // Serve the rendered mdBook manual at `/docs/book/` when the build
@@ -499,6 +487,10 @@ pub fn build_router(
         .layer(axum::middleware::from_fn(
             crate::cross_origin::reject_cross_site,
         ))
+        // Outside everything but the trace layer, so responses that the
+        // layers above produce themselves (a refused cross-site request, an
+        // auth failure) get the headers too.
+        .layer(axum::middleware::from_fn(crate::security_headers::apply))
         .layer(
             TraceLayer::new_for_http()
                 .make_span_with(|request: &axum::http::Request<_>| {
@@ -515,6 +507,26 @@ pub fn build_router(
                         .include_headers(false),
                 ),
         )
+}
+
+/// The OCI Distribution surface, `/v2/`. Every response carries the
+/// registry's own CSP (`security_headers::REGISTRY_POLICY`) on top of the
+/// app-wide headers: manifests and blobs are pushed content served from
+/// deckwatch's origin.
+fn oci_router(store: RegistryStore) -> Router {
+    Router::new()
+        .route("/v2/", get(oci_root).head(oci_root))
+        .route(
+            "/v2/{*rest}",
+            get(oci_dispatch_get)
+                .head(oci_dispatch_head)
+                .post(oci_dispatch_post)
+                .patch(oci_dispatch_patch)
+                .put(oci_dispatch_put)
+                .delete(oci_dispatch_delete),
+        )
+        .with_state(store)
+        .layer(axum::middleware::from_fn(crate::security_headers::registry))
 }
 
 async fn oci_root(

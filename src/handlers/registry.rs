@@ -366,8 +366,7 @@ pub async fn head_manifest(
     let mut headers = HeaderMap::new();
     headers.insert(
         header::CONTENT_TYPE,
-        HeaderValue::from_str(&meta.media_type)
-            .unwrap_or(HeaderValue::from_static("application/octet-stream")),
+        served_manifest_media_type(&meta.media_type),
     );
     headers.insert(
         "Docker-Content-Digest",
@@ -395,8 +394,7 @@ pub async fn get_manifest(
     let mut headers = HeaderMap::new();
     headers.insert(
         header::CONTENT_TYPE,
-        HeaderValue::from_str(&meta.media_type)
-            .unwrap_or(HeaderValue::from_static("application/octet-stream")),
+        served_manifest_media_type(&meta.media_type),
     );
     headers.insert(
         "Docker-Content-Digest",
@@ -1194,6 +1192,35 @@ async fn list_tags_in_fs(dir: &Path) -> Vec<String> {
     out
 }
 
+/// The manifest and index media types of the OCI image spec and Docker's
+/// registry formats: the only ones the registry serves as `Content-Type`.
+const MANIFEST_MEDIA_TYPES: &[&str] = &[
+    "application/vnd.oci.image.manifest.v1+json",
+    "application/vnd.oci.image.index.v1+json",
+    "application/vnd.oci.artifact.manifest.v1+json",
+    "application/vnd.docker.distribution.manifest.v2+json",
+    "application/vnd.docker.distribution.manifest.list.v2+json",
+    "application/vnd.docker.distribution.manifest.v1+json",
+    "application/vnd.docker.distribution.manifest.v1+prettyjws",
+];
+
+/// The `Content-Type` for a manifest stored with media type `stored`: that
+/// type if it is one of [`MANIFEST_MEDIA_TYPES`] (parameters dropped,
+/// matched case-insensitively), otherwise `application/octet-stream`. The
+/// stored type comes from the pushed manifest itself, and serving whatever it
+/// claims would let a push turn into, say, an HTML page on deckwatch's
+/// origin.
+fn served_manifest_media_type(stored: &str) -> HeaderValue {
+    let essence = stored.split(';').next().unwrap_or_default().trim();
+    MANIFEST_MEDIA_TYPES
+        .iter()
+        .find(|known| known.eq_ignore_ascii_case(essence))
+        .map_or(
+            HeaderValue::from_static("application/octet-stream"),
+            |known| HeaderValue::from_static(known),
+        )
+}
+
 /// Detect the media type of a manifest from its JSON body. Falls back to
 /// single-manifest OCI type if the body can't be parsed.
 fn detect_manifest_media_type(body: &[u8]) -> String {
@@ -1441,5 +1468,33 @@ mod tests {
             detect_manifest_media_type(b"not json"),
             "application/vnd.oci.image.manifest.v1+json"
         );
+    }
+
+    #[test]
+    fn only_manifest_media_types_are_served() {
+        for known in MANIFEST_MEDIA_TYPES {
+            assert_eq!(served_manifest_media_type(known), *known);
+        }
+        // Parameters and case don't matter for the known types.
+        assert_eq!(
+            served_manifest_media_type("Application/VND.OCI.Image.Index.v1+json; charset=utf-8"),
+            "application/vnd.oci.image.index.v1+json"
+        );
+        for other in [
+            "text/html",
+            "text/html; charset=utf-8",
+            "image/svg+xml",
+            "application/xhtml+xml",
+            "application/javascript",
+            "application/json",
+            "",
+            "application/vnd.oci.image.manifest.v1+json\r\nX-Injected: 1",
+        ] {
+            assert_eq!(
+                served_manifest_media_type(other),
+                "application/octet-stream",
+                "{other:?}"
+            );
+        }
     }
 }
