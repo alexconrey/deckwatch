@@ -137,20 +137,26 @@
   }
 
   /*
-   * Vuetify 4 lays buttons out with flex instead of grid, and clips them.
-   * Both centre the label, but when it is taller than the button (x-small,
-   * compact buttons) the grid let it hang from the top, uncut, while flex
-   * centres the overflow and the clip cuts it. `safe center` falls back to
-   * start alignment exactly when the content overflows. Text buttons are
-   * unclipped again; their hover/active overlay then needs its own rounded
-   * corners, as in v3. Other variants paint a background that relies on the
-   * clip, so they keep it.
+   * Vuetify 4 lays buttons out with flex instead of grid, and clips them
+   * (overflow: hidden) instead of rounding the layers inside them.
+   * - Both layouts centre the label, but when it is taller than the button
+   *   (x-small, compact buttons) the grid let it hang from the top, uncut,
+   *   while flex centres the overflow and the clip cuts it. `safe center`
+   *   falls back to start alignment exactly when the content overflows.
+   * - The rounded clip also changes how Chromium antialiases the label on
+   *   filled buttons. The geometry is identical, but the glyph pixels differ.
+   * So buttons are unclipped again, and the hover/focus overlay, the tonal
+   * underlay and the ripple get back their own rounded corners, as in v3.
    */
   .v-btn {
     align-items: safe center;
+    overflow: visible;
   }
-  .v-btn--variant-text { overflow: visible; }
-  .v-btn__overlay { border-radius: inherit; }
+  .v-btn__overlay,
+  .v-btn--variant-tonal > .v-btn__underlay,
+  .v-btn > .v-ripple__container {
+    border-radius: inherit;
+  }
 
   .v-slider-thumb__label { font-size: 0.75rem; }
 }
@@ -554,5 +560,115 @@
   }
   .v-container--fluid {
     max-width: 100%;
+  }
+}
+
+/*
+ * 7. Column widths, as Vuetify 3 declared them.
+ * Vuetify 3 declares each column size as a percentage
+ * (.v-col-md-4 { flex: 0 0 33.3333333333%; max-width: 33.3333333333% }),
+ * which the production build's CSS minifier shortens to six digits
+ * (33.3333%). Vuetify 4 computes the width at runtime as
+ * calc(100% * 4 / 12), a hair wider. Chromium lays out in 1/64px steps, so
+ * in some rows a column starts one step further right and its text renders
+ * differently (the plugin marketplace cards). These are Vuetify 3's column
+ * rules (grow, auto and 1-12 at each breakpoint, in its order), on Vuetify
+ * 4's class names (.v-col--md, .v-col--cols-md-4), for the grid legacy mode
+ * in section 5; delete them together.
+ */
+@layer vuetify-overrides {
+  .v-col { flex-basis: 0; flex-grow: 1; max-width: 100%; }
+  .v-col--cols-auto { flex: 0 0 auto; width: auto; max-width: 100%; }
+  .v-col--cols-1 { flex: 0 0 8.3333333333%; max-width: 8.3333333333%; }
+  .v-col--cols-2 { flex: 0 0 16.6666666667%; max-width: 16.6666666667%; }
+  .v-col--cols-3 { flex: 0 0 25%; max-width: 25%; }
+  .v-col--cols-4 { flex: 0 0 33.3333333333%; max-width: 33.3333333333%; }
+  .v-col--cols-5 { flex: 0 0 41.6666666667%; max-width: 41.6666666667%; }
+  .v-col--cols-6 { flex: 0 0 50%; max-width: 50%; }
+  .v-col--cols-7 { flex: 0 0 58.3333333333%; max-width: 58.3333333333%; }
+  .v-col--cols-8 { flex: 0 0 66.6666666667%; max-width: 66.6666666667%; }
+  .v-col--cols-9 { flex: 0 0 75%; max-width: 75%; }
+  .v-col--cols-10 { flex: 0 0 83.3333333333%; max-width: 83.3333333333%; }
+  .v-col--cols-11 { flex: 0 0 91.6666666667%; max-width: 91.6666666667%; }
+  .v-col--cols-12 { flex: 0 0 100%; max-width: 100%; }
+  @media (min-width: 600px) {
+    .v-col--sm { flex-basis: 0; flex-grow: 1; max-width: 100%; }
+    .v-col--cols-sm-auto { flex: 0 0 auto; width: auto; max-width: 100%; }
+    .v-col--cols-sm-1 { flex: 0 0 8.3333333333%; max-width: 8.3333333333%; }
+    .v-col--cols-sm-2 { flex: 0 0 16.6666666667%; max-width: 16.6666666667%; }
+    .v-col--cols-sm-3 { flex: 0 0 25%; max-width: 25%; }
+    .v-col--cols-sm-4 { flex: 0 0 33.3333333333%; max-width: 33.3333333333%; }
+    .v-col--cols-sm-5 { flex: 0 0 41.6666666667%; max-width: 41.6666666667%; }
+    .v-col--cols-sm-6 { flex: 0 0 50%; max-width: 50%; }
+    .v-col--cols-sm-7 { flex: 0 0 58.3333333333%; max-width: 58.3333333333%; }
+    .v-col--cols-sm-8 { flex: 0 0 66.6666666667%; max-width: 66.6666666667%; }
+    .v-col--cols-sm-9 { flex: 0 0 75%; max-width: 75%; }
+    .v-col--cols-sm-10 { flex: 0 0 83.3333333333%; max-width: 83.3333333333%; }
+    .v-col--cols-sm-11 { flex: 0 0 91.6666666667%; max-width: 91.6666666667%; }
+    .v-col--cols-sm-12 { flex: 0 0 100%; max-width: 100%; }
+  }
+  @media (min-width: 960px) {
+    .v-col--md { flex-basis: 0; flex-grow: 1; max-width: 100%; }
+    .v-col--cols-md-auto { flex: 0 0 auto; width: auto; max-width: 100%; }
+    .v-col--cols-md-1 { flex: 0 0 8.3333333333%; max-width: 8.3333333333%; }
+    .v-col--cols-md-2 { flex: 0 0 16.6666666667%; max-width: 16.6666666667%; }
+    .v-col--cols-md-3 { flex: 0 0 25%; max-width: 25%; }
+    .v-col--cols-md-4 { flex: 0 0 33.3333333333%; max-width: 33.3333333333%; }
+    .v-col--cols-md-5 { flex: 0 0 41.6666666667%; max-width: 41.6666666667%; }
+    .v-col--cols-md-6 { flex: 0 0 50%; max-width: 50%; }
+    .v-col--cols-md-7 { flex: 0 0 58.3333333333%; max-width: 58.3333333333%; }
+    .v-col--cols-md-8 { flex: 0 0 66.6666666667%; max-width: 66.6666666667%; }
+    .v-col--cols-md-9 { flex: 0 0 75%; max-width: 75%; }
+    .v-col--cols-md-10 { flex: 0 0 83.3333333333%; max-width: 83.3333333333%; }
+    .v-col--cols-md-11 { flex: 0 0 91.6666666667%; max-width: 91.6666666667%; }
+    .v-col--cols-md-12 { flex: 0 0 100%; max-width: 100%; }
+  }
+  @media (min-width: 1280px) {
+    .v-col--lg { flex-basis: 0; flex-grow: 1; max-width: 100%; }
+    .v-col--cols-lg-auto { flex: 0 0 auto; width: auto; max-width: 100%; }
+    .v-col--cols-lg-1 { flex: 0 0 8.3333333333%; max-width: 8.3333333333%; }
+    .v-col--cols-lg-2 { flex: 0 0 16.6666666667%; max-width: 16.6666666667%; }
+    .v-col--cols-lg-3 { flex: 0 0 25%; max-width: 25%; }
+    .v-col--cols-lg-4 { flex: 0 0 33.3333333333%; max-width: 33.3333333333%; }
+    .v-col--cols-lg-5 { flex: 0 0 41.6666666667%; max-width: 41.6666666667%; }
+    .v-col--cols-lg-6 { flex: 0 0 50%; max-width: 50%; }
+    .v-col--cols-lg-7 { flex: 0 0 58.3333333333%; max-width: 58.3333333333%; }
+    .v-col--cols-lg-8 { flex: 0 0 66.6666666667%; max-width: 66.6666666667%; }
+    .v-col--cols-lg-9 { flex: 0 0 75%; max-width: 75%; }
+    .v-col--cols-lg-10 { flex: 0 0 83.3333333333%; max-width: 83.3333333333%; }
+    .v-col--cols-lg-11 { flex: 0 0 91.6666666667%; max-width: 91.6666666667%; }
+    .v-col--cols-lg-12 { flex: 0 0 100%; max-width: 100%; }
+  }
+  @media (min-width: 1920px) {
+    .v-col--xl { flex-basis: 0; flex-grow: 1; max-width: 100%; }
+    .v-col--cols-xl-auto { flex: 0 0 auto; width: auto; max-width: 100%; }
+    .v-col--cols-xl-1 { flex: 0 0 8.3333333333%; max-width: 8.3333333333%; }
+    .v-col--cols-xl-2 { flex: 0 0 16.6666666667%; max-width: 16.6666666667%; }
+    .v-col--cols-xl-3 { flex: 0 0 25%; max-width: 25%; }
+    .v-col--cols-xl-4 { flex: 0 0 33.3333333333%; max-width: 33.3333333333%; }
+    .v-col--cols-xl-5 { flex: 0 0 41.6666666667%; max-width: 41.6666666667%; }
+    .v-col--cols-xl-6 { flex: 0 0 50%; max-width: 50%; }
+    .v-col--cols-xl-7 { flex: 0 0 58.3333333333%; max-width: 58.3333333333%; }
+    .v-col--cols-xl-8 { flex: 0 0 66.6666666667%; max-width: 66.6666666667%; }
+    .v-col--cols-xl-9 { flex: 0 0 75%; max-width: 75%; }
+    .v-col--cols-xl-10 { flex: 0 0 83.3333333333%; max-width: 83.3333333333%; }
+    .v-col--cols-xl-11 { flex: 0 0 91.6666666667%; max-width: 91.6666666667%; }
+    .v-col--cols-xl-12 { flex: 0 0 100%; max-width: 100%; }
+  }
+  @media (min-width: 2560px) {
+    .v-col--xxl { flex-basis: 0; flex-grow: 1; max-width: 100%; }
+    .v-col--cols-xxl-auto { flex: 0 0 auto; width: auto; max-width: 100%; }
+    .v-col--cols-xxl-1 { flex: 0 0 8.3333333333%; max-width: 8.3333333333%; }
+    .v-col--cols-xxl-2 { flex: 0 0 16.6666666667%; max-width: 16.6666666667%; }
+    .v-col--cols-xxl-3 { flex: 0 0 25%; max-width: 25%; }
+    .v-col--cols-xxl-4 { flex: 0 0 33.3333333333%; max-width: 33.3333333333%; }
+    .v-col--cols-xxl-5 { flex: 0 0 41.6666666667%; max-width: 41.6666666667%; }
+    .v-col--cols-xxl-6 { flex: 0 0 50%; max-width: 50%; }
+    .v-col--cols-xxl-7 { flex: 0 0 58.3333333333%; max-width: 58.3333333333%; }
+    .v-col--cols-xxl-8 { flex: 0 0 66.6666666667%; max-width: 66.6666666667%; }
+    .v-col--cols-xxl-9 { flex: 0 0 75%; max-width: 75%; }
+    .v-col--cols-xxl-10 { flex: 0 0 83.3333333333%; max-width: 83.3333333333%; }
+    .v-col--cols-xxl-11 { flex: 0 0 91.6666666667%; max-width: 91.6666666667%; }
+    .v-col--cols-xxl-12 { flex: 0 0 100%; max-width: 100%; }
   }
 }
