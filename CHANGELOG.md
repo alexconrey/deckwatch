@@ -480,6 +480,15 @@ first.
   Notifications, which reported success while nothing was sent: the
   notification client read the old settings ConfigMap instead of the
   database (see Upgrade notes). (#270)
+- The 0.7.0 database migrations can run again after a crash. On SQLite and
+  MySQL a migration and its record in `seaql_migrations` aren't applied in
+  one transaction, so a deckwatch that stopped part-way through the upgrade
+  (killed, OOM, node lost) left columns or indexes behind and then failed
+  to start ("duplicate column name"). Each of the three migrations now adds
+  a column or index only when it's missing, and sets the default token
+  binding only where none is stored. PostgreSQL already applied them in one
+  transaction. Rolling back to 0.6.x still means restoring the backup (see
+  Upgrade notes).
 - `plugin_failing` and `plugin_recovered` notifications reach the webhook in
   the order the transitions happened. Each was sent from its own task, so a
   receiver could get a target's recovery before its failure. They now go
