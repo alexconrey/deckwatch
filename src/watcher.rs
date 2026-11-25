@@ -2005,7 +2005,7 @@ fn report_fields_released(
         });
 }
 
-async fn reconcile_application_plugins(state: &AppState, sweep: &mut PluginFieldSweep) {
+pub(crate) async fn reconcile_application_plugins(state: &AppState, sweep: &mut PluginFieldSweep) {
     // Snapshot the fingerprint cache once for this reconcile cycle.
     // Each key is `"namespace/name"` and the value is the hash of the last
     // patch JSON we sent to the API server for that workload.

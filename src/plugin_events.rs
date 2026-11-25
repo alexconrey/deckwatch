@@ -875,17 +875,31 @@ pub type TraceContextFn = fn(&tracing::Span) -> Option<String>;
 
 static TRACE_CONTEXT: OnceLock<TraceContextFn> = OnceLock::new();
 
-/// Called once by whatever installs the OpenTelemetry layer, with a function
-/// that reads the span's OpenTelemetry context (for example through
-/// `tracing_opentelemetry::OpenTelemetrySpanExt::context` and a W3C
-/// propagator). Until then, and whenever export is off, plugin requests carry
-/// no `trace_context` and events no trace id. Returns false if a provider was
-/// already installed.
-// Nothing installs one yet: deckwatch doesn't export traces until the
-// OpenTelemetry pipeline (OBS-1, phase Q2) lands.
-#[allow(dead_code)]
+/// Called once at startup when deckwatch exports traces (see `lib.rs`), with
+/// [`otel_traceparent`]. Until then, and whenever trace export is off,
+/// plugin requests carry no `trace_context` and events no trace id. Returns
+/// false if a provider was already installed.
 pub fn install_trace_context_provider(provider: TraceContextFn) -> bool {
     TRACE_CONTEXT.set(provider).is_ok()
+}
+
+/// The W3C `traceparent` of `span` as the OpenTelemetry layer sees it, or
+/// `None` when the layer doesn't track it (export off, or the span filtered
+/// out).
+pub fn otel_traceparent(span: &tracing::Span) -> Option<String> {
+    use opentelemetry::trace::TraceContextExt as _;
+    use tracing_opentelemetry::OpenTelemetrySpanExt as _;
+    let context = span.context();
+    let otel_span = context.span();
+    let span_context = otel_span.span_context();
+    span_context.is_valid().then(|| {
+        format!(
+            "00-{}-{}-{:02x}",
+            span_context.trace_id(),
+            span_context.span_id(),
+            span_context.trace_flags().to_u8()
+        )
+    })
 }
 
 /// The `traceparent` for `span`, or `None` when no OpenTelemetry layer is

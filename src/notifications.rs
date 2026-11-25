@@ -53,6 +53,28 @@ pub enum NotificationEvent {
         namespace: String,
         application: String,
     },
+    /// A plugin target started failing (see `plugin_status`). Sent once per
+    /// run of failures, never on every reconcile. `namespace` and
+    /// `application` are empty for a plugin that failed to load.
+    PluginFailing {
+        namespace: String,
+        application: String,
+        plugin: String,
+        /// The plugin resource id, or empty for `apply()` and load.
+        resource_id: String,
+        export: String,
+        code: String,
+        /// Sanitized plugin text.
+        message: String,
+    },
+    /// A failing plugin target works again.
+    PluginRecovered {
+        namespace: String,
+        application: String,
+        plugin: String,
+        resource_id: String,
+        export: String,
+    },
     /// Fired from the "Test" button on the settings page.
     Test { source: String },
 }
@@ -68,6 +90,10 @@ impl NotificationEvent {
             | Self::PodCrashLoop { namespace, .. }
             | Self::ApplicationCreated { namespace, .. }
             | Self::ApplicationDeleted { namespace, .. } => Some(namespace.as_str()),
+            // A plugin that failed to load concerns every namespace.
+            Self::PluginFailing { namespace, .. } | Self::PluginRecovered { namespace, .. } => {
+                Some(namespace.as_str()).filter(|ns| !ns.is_empty())
+            }
             Self::Test { .. } => None,
         }
     }
@@ -85,6 +111,8 @@ impl NotificationEvent {
             Self::PodCrashLoop { .. } => "pod_crash_loop",
             Self::ApplicationCreated { .. } => "application_created",
             Self::ApplicationDeleted { .. } => "application_deleted",
+            Self::PluginFailing { .. } => "plugin_failing",
+            Self::PluginRecovered { .. } => "plugin_recovered",
             Self::Test { .. } => "test",
         }
     }
@@ -168,9 +196,62 @@ impl NotificationEvent {
                 ":wastebasket: Application deleted — `{}/{}`",
                 namespace, application,
             ),
+            Self::PluginFailing {
+                namespace,
+                application,
+                plugin,
+                resource_id,
+                export,
+                code,
+                message,
+            } => format!(
+                ":rotating_light: Plugin failing — `{}` {}{}() — {}: {}",
+                slack_escape(plugin),
+                plugin_target(namespace, application, resource_id),
+                slack_escape(export),
+                slack_escape(code),
+                slack_escape(message),
+            ),
+            Self::PluginRecovered {
+                namespace,
+                application,
+                plugin,
+                resource_id,
+                export,
+            } => format!(
+                ":white_check_mark: Plugin recovered — `{}` {}{}() works again",
+                slack_escape(plugin),
+                plugin_target(namespace, application, resource_id),
+                slack_escape(export),
+            ),
             Self::Test { source } => format!(":wave: Deckwatch notification test from {}", source,),
         }
     }
+}
+
+/// Escape text for Slack's mrkdwn, so plugin text can't turn into a
+/// mention (`<!channel>`) or a link.
+fn slack_escape(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+}
+
+/// "on `shop/web` (rds) " — empty for plugin-wide state.
+fn plugin_target(namespace: &str, application: &str, resource_id: &str) -> String {
+    if application.is_empty() {
+        return String::new();
+    }
+    let resource = if resource_id.is_empty() {
+        String::new()
+    } else {
+        format!(" ({})", slack_escape(resource_id))
+    };
+    format!(
+        "on `{}/{}`{resource} ",
+        slack_escape(namespace),
+        slack_escape(application)
+    )
 }
 
 /// Fire-and-forget notification dispatcher.
@@ -211,7 +292,7 @@ impl NotificationClient {
 
     async fn send_inner(&self, event: NotificationEvent) -> anyhow::Result<()> {
         // Re-read settings every send so operators can change the URL
-        // without a restart. The read is a single ConfigMap fetch — cheap
+        // without a restart. The read is a single database row — cheap
         // compared to the HTTP POST it enables.
         let Some(settings) = self.load_notifications().await? else {
             return Ok(());
@@ -234,26 +315,15 @@ impl NotificationClient {
         post_webhook(&self.http, &settings.webhook_url, &build_payload(&event)).await
     }
 
+    /// The saved notification settings. Settings live in the database (the
+    /// ConfigMap is only read once, to seed it); reading the ConfigMap here
+    /// meant notifications, the Test button included, silently did nothing.
     async fn load_notifications(&self) -> anyhow::Result<Option<NotificationSettings>> {
-        let api = self.state.configmaps_api(&self.state.settings_namespace)?;
-        let cm = match api.get(&self.state.settings_configmap_name).await {
-            Ok(cm) => cm,
-            Err(_) => return Ok(None),
-        };
-        let raw = cm
-            .data
-            .as_ref()
-            .and_then(|d| d.get(SETTINGS_KEY))
-            .cloned()
-            .unwrap_or_default();
-        if raw.is_empty() {
-            return Ok(None);
-        }
-        let settings: DeckwatchSettings = match serde_json::from_str(&raw) {
-            Ok(s) => s,
-            Err(_) => return Ok(None),
-        };
-        Ok(settings.notifications)
+        Ok(
+            crate::handlers::settings::load_settings_from_db(&self.state)
+                .await
+                .notifications,
+        )
     }
 }
 
@@ -320,12 +390,19 @@ pub fn build_payload(event: &NotificationEvent) -> serde_json::Value {
 
 fn color_for(event: &NotificationEvent) -> &'static str {
     match event {
-        NotificationEvent::BuildFailed { .. } | NotificationEvent::PodCrashLoop { .. } => "danger",
+        NotificationEvent::BuildFailed { .. }
+        | NotificationEvent::PodCrashLoop { .. }
+        | NotificationEvent::PluginFailing { .. } => "danger",
         NotificationEvent::BuildCompleted { .. }
         | NotificationEvent::DeploymentCreated { .. }
-        | NotificationEvent::ApplicationCreated { .. } => "good",
+        | NotificationEvent::ApplicationCreated { .. }
+        | NotificationEvent::PluginRecovered { .. } => "good",
         NotificationEvent::DeploymentDeleted { .. }
         | NotificationEvent::ApplicationDeleted { .. } => "warning",
         _ => "#439FE0",
     }
 }
+
+#[cfg(test)]
+#[path = "notifications_tests.rs"]
+mod tests;

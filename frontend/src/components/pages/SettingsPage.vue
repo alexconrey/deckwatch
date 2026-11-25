@@ -55,6 +55,8 @@ const NOTIFICATION_EVENTS: { value: NotificationEventType; title: string; hint: 
   { value: "pod_crash_loop", title: "Pod crash loop", hint: "CrashLoopBackOff detected (not yet wired)" },
   { value: "application_created", title: "Application created", hint: "New Application via the API" },
   { value: "application_deleted", title: "Application deleted", hint: "Application removed via the API" },
+  { value: "plugin_failing", title: "Plugin failing", hint: "A plugin target starts failing (once per failure, not every reconcile)" },
+  { value: "plugin_recovered", title: "Plugin recovered", hint: "A failing plugin target works again" },
 ];
 
 type SectionId =

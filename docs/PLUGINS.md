@@ -412,8 +412,14 @@ Where they show up:
   and deprovision Events go on every Deployment of the application. The
   chart's ClusterRole grants `create` and `patch` on `events.k8s.io` events;
   set `POD_NAME` (the chart does) to fill `reportingInstance`.
+- **Notifications** (`plugin_failing`, `plugin_recovered`), once per
+  transition into or out of failing, never on every reconcile. See
+  [notifications](SETTINGS.md#configuring-notifications).
 - **The logs**, as `plugin event:` lines inside the call's `plugin {export}`
   span, next to the plugin's own `log_*` output (target `extism::pdk`).
+- **Traces**: when deckwatch exports traces (`OTEL_EXPORTER_OTLP_*`), each
+  call's `plugin {export}` span is exported, and the plugin gets its
+  `trace_context`.
 
 Plugin text is untrusted. Before deckwatch returns, logs or stores it, it
 masks the values it passed the plugin for `secret` config fields (in any form:

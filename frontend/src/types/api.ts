@@ -1094,7 +1094,9 @@ export type NotificationEventType =
   | "deployment_scaled"
   | "pod_crash_loop"
   | "application_created"
-  | "application_deleted";
+  | "application_deleted"
+  | "plugin_failing"
+  | "plugin_recovered";
 
 export interface DiagnosticHistoryItem {
   job_name: string;
