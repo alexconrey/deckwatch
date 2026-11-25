@@ -479,7 +479,7 @@ first.
   cut on character boundaries, a branch is found by its exact ref name (a
   branch whose name merely contains `refs/heads/<branch>` is no longer
   mistaken for it), and a panic in any watcher step is logged as an error
-  and skips only that step for the cycle.
+  and skips only that step for the cycle. (#303)
 - The OpenAPI spec (`/api/docs`) no longer lists the removed addon
   endpoints. (#214)
 - With `tracing.enabled`, the chart's deckwatch, registry and webhook
