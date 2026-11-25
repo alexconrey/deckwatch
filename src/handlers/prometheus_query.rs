@@ -305,8 +305,12 @@ struct PromData {
 #[derive(Debug, Deserialize)]
 struct PromMatrix {
     metric: serde_json::Map<String, serde_json::Value>,
+    /// Range queries (`matrix`).
     #[serde(default)]
     values: Vec<(f64, String)>,
+    /// Instant queries (`vector`).
+    #[serde(default)]
+    value: Option<(f64, String)>,
 }
 
 /// POST a PromQL range query (form-encoded) to `{base_url}/api/v1/query_range`
@@ -319,7 +323,28 @@ pub async fn execute_range(
     end: i64,
     step: u32,
 ) -> Result<Vec<PodSeries>, String> {
-    let url = format!("{base_url}/api/v1/query_range");
+    Ok(execute_range_by(http, base_url, query, start, end, step, "pod")
+        .await?
+        .into_iter()
+        .map(|(pod, points)| PodSeries {
+            pod: pod.unwrap_or_else(|| "aggregate".to_string()),
+            points,
+        })
+        .collect())
+}
+
+/// A range query's series, each keyed by its `label` value (`None` when the
+/// series has no such label). Non-finite values (Prometheus `NaN`, e.g. a
+/// quantile of no data) are dropped.
+async fn execute_range_by(
+    http: &reqwest::Client,
+    base_url: &str,
+    query: &str,
+    start: i64,
+    end: i64,
+    step: u32,
+    label: &str,
+) -> Result<Vec<(Option<String>, Vec<RangePoint>)>, String> {
     let start_s = start.to_string();
     let end_s = end.to_string();
     let step_s = format!("{step}s");
@@ -329,9 +354,68 @@ pub async fn execute_range(
         ("end", end_s.as_str()),
         ("step", step_s.as_str()),
     ];
+    let data = post_query(http, base_url, "query_range", &form, "matrix").await?;
+    Ok(data
+        .result
+        .into_iter()
+        .map(|m| {
+            let key = label_of(&m.metric, label);
+            let points = m
+                .values
+                .into_iter()
+                .filter_map(|(ts, val)| {
+                    let v = val.parse::<f64>().ok().filter(|v| v.is_finite())?;
+                    Some(RangePoint {
+                        t: (ts * 1000.0) as i64,
+                        v,
+                    })
+                })
+                .collect();
+            (key, points)
+        })
+        .collect())
+}
 
-    let timer = K8sTimer::new("prom_query", "range");
-    let res = http.post(&url).form(&form).send().await;
+/// An instant query's samples at `time` (unix seconds), as (labels, value).
+/// Non-finite values are dropped.
+async fn execute_instant(
+    http: &reqwest::Client,
+    base_url: &str,
+    query: &str,
+    time: i64,
+) -> Result<Vec<(serde_json::Map<String, serde_json::Value>, f64)>, String> {
+    let time_s = time.to_string();
+    let form = [("query", query), ("time", time_s.as_str())];
+    let data = post_query(http, base_url, "query", &form, "vector").await?;
+    Ok(data
+        .result
+        .into_iter()
+        .filter_map(|m| {
+            let v = m.value?.1.parse::<f64>().ok().filter(|v| v.is_finite())?;
+            Some((m.metric, v))
+        })
+        .collect())
+}
+
+fn label_of(metric: &serde_json::Map<String, serde_json::Value>, label: &str) -> Option<String> {
+    metric
+        .get(label)
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
+}
+
+/// POST a form-encoded query to `{base_url}/api/v1/{endpoint}` and return
+/// its data, which must be of `result_type`.
+async fn post_query(
+    http: &reqwest::Client,
+    base_url: &str,
+    endpoint: &str,
+    form: &[(&str, &str)],
+    result_type: &str,
+) -> Result<PromData, String> {
+    let url = format!("{base_url}/api/v1/{endpoint}");
+    let timer = K8sTimer::new("prom_query", if endpoint == "query" { "instant" } else { "range" });
+    let res = http.post(&url).form(form).send().await;
 
     let response = match res {
         Ok(r) => r,
@@ -375,32 +459,286 @@ pub async fn execute_range(
         .data
         .ok_or_else(|| "prometheus success response missing data".to_string())?;
 
-    if data.result_type != "matrix" {
-        return Err(format!("expected matrix result, got {}", data.result_type));
+    if data.result_type != result_type {
+        return Err(format!(
+            "expected {result_type} result, got {}",
+            data.result_type
+        ));
+    }
+    Ok(data)
+}
+
+// ---------------------------------------------------------------------------
+// MCP activity: deckwatch's own MCP metrics
+// ---------------------------------------------------------------------------
+
+/// The time windows the MCP activity page offers.
+#[derive(Debug, Deserialize, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ActivityWindow {
+    #[serde(rename = "1h")]
+    Hour,
+    #[default]
+    #[serde(rename = "24h")]
+    Day,
+    #[serde(rename = "7d")]
+    Week,
+}
+
+impl ActivityWindow {
+    fn seconds(self) -> i64 {
+        match self {
+            Self::Hour => 3600,
+            Self::Day => 24 * 3600,
+            Self::Week => 7 * 24 * 3600,
+        }
     }
 
-    Ok(data
-        .result
+    /// Points every this many seconds: 60, 288 or 336 points per window.
+    fn step(self) -> u32 {
+        match self {
+            Self::Hour => 60,
+            Self::Day => 300,
+            Self::Week => 1800,
+        }
+    }
+
+    /// The `rate()` range for the time series.
+    fn rate_range(self) -> &'static str {
+        match self {
+            Self::Hour => "5m",
+            Self::Day => "15m",
+            Self::Week => "1h",
+        }
+    }
+
+    /// The whole window, for `increase()`.
+    fn range(self) -> &'static str {
+        match self {
+            Self::Hour => "1h",
+            Self::Day => "24h",
+            Self::Week => "7d",
+        }
+    }
+}
+
+/// Query params for GET /api/prometheus/mcp_activity.
+#[derive(Debug, Deserialize)]
+pub struct McpActivityQuery {
+    #[serde(default)]
+    pub window: ActivityWindow,
+}
+
+#[derive(Debug, Serialize, Clone)]
+pub struct LabeledSeries {
+    /// The series' label value: the call outcome (`ok`, `error`, `denied`).
+    pub label: String,
+    pub points: Vec<RangePoint>,
+}
+
+#[derive(Debug, Serialize, Clone, PartialEq)]
+pub struct ToolActivity {
+    pub tool: String,
+    /// Calls in the window (Prometheus `increase`, so not always whole).
+    pub calls: f64,
+    pub errors: f64,
+    pub denied: f64,
+    /// The 95th percentile duration in the window, if there were timed calls.
+    pub p95_seconds: Option<f64>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct McpActivityResponse {
+    pub window_seconds: i64,
+    pub step_seconds: u32,
+    /// Tool calls per minute by outcome.
+    pub calls_per_minute: Vec<LabeledSeries>,
+    /// `apply_manifest` calls per minute by outcome.
+    pub apply_manifest_per_minute: Vec<LabeledSeries>,
+    /// The 95th percentile tool call duration over time, in seconds.
+    pub p95_seconds: Vec<RangePoint>,
+    /// Per tool over the window, most calls first, at most [`MAX_TOOLS`].
+    pub tools: Vec<ToolActivity>,
+    /// Set when Prometheus isn't configured or a query failed; the rest is
+    /// then empty.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unavailable_reason: Option<String>,
+}
+
+/// The most tools [`McpActivityResponse::tools`] lists.
+pub const MAX_TOOLS: usize = 25;
+
+/// Tool call counters: the calls deckwatch serves itself, and the ones
+/// mcp-k8s runs. Each call is counted in exactly one of them.
+const CALL_COUNTERS: [&str; 2] = ["deckwatch_mcp_tool_calls_total", "mcp_k8s_tool_calls_total"];
+/// The matching duration histograms (same buckets, one recorder).
+const DURATION_BUCKETS: [&str; 2] = [
+    "deckwatch_mcp_tool_call_duration_seconds_bucket",
+    "mcp_k8s_tool_call_duration_seconds_bucket",
+];
+
+/// `inner` applied to both metric families, each marked with its own
+/// `family` label so `or` keeps the series of both and `sum` adds them up.
+fn both_families(metrics: [&str; 2], inner: impl Fn(&str) -> String) -> String {
+    format!(
+        "label_replace({}, \"family\", \"deckwatch\", \"\", \"\") or \
+         label_replace({}, \"family\", \"mcp_k8s\", \"\", \"\")",
+        inner(metrics[0]),
+        inner(metrics[1])
+    )
+}
+
+/// The PromQL for the MCP activity page. Fixed queries: only the window,
+/// a server-side enum, varies.
+struct ActivityQueries {
+    calls: String,
+    apply_manifest: String,
+    p95: String,
+    tool_totals: String,
+    tool_p95: String,
+}
+
+fn activity_queries(window: ActivityWindow) -> ActivityQueries {
+    let r = window.rate_range();
+    let w = window.range();
+    ActivityQueries {
+        calls: format!(
+            "sum by (status) ({}) * 60",
+            both_families(CALL_COUNTERS, |m| format!("rate({m}[{r}])"))
+        ),
+        apply_manifest: format!(
+            "sum by (status) ({}) * 60",
+            both_families(CALL_COUNTERS, |m| format!(
+                "rate({m}{{tool=\"apply_manifest\"}}[{r}])"
+            ))
+        ),
+        p95: format!(
+            "histogram_quantile(0.95, sum by (le) ({}))",
+            both_families(DURATION_BUCKETS, |m| format!("rate({m}[{r}])"))
+        ),
+        tool_totals: format!(
+            "sum by (tool, status) ({})",
+            both_families(CALL_COUNTERS, |m| format!("increase({m}[{w}])"))
+        ),
+        tool_p95: format!(
+            "histogram_quantile(0.95, sum by (le, tool) ({}))",
+            both_families(DURATION_BUCKETS, |m| format!("increase({m}[{w}])"))
+        ),
+    }
+}
+
+/// Per-tool totals from `sum by (tool, status) (increase(...))` samples and
+/// `histogram_quantile(...) by (tool)` samples: most calls first, at most
+/// [`MAX_TOOLS`].
+fn tool_activity(
+    totals: Vec<(serde_json::Map<String, serde_json::Value>, f64)>,
+    p95: Vec<(serde_json::Map<String, serde_json::Value>, f64)>,
+) -> Vec<ToolActivity> {
+    let mut by_tool: std::collections::BTreeMap<String, ToolActivity> = Default::default();
+    for (labels, value) in totals {
+        let Some(tool) = label_of(&labels, "tool") else {
+            continue;
+        };
+        let entry = by_tool.entry(tool.clone()).or_insert(ToolActivity {
+            tool,
+            calls: 0.0,
+            errors: 0.0,
+            denied: 0.0,
+            p95_seconds: None,
+        });
+        entry.calls += value;
+        match label_of(&labels, "status").as_deref() {
+            Some("error") => entry.errors += value,
+            Some("denied") => entry.denied += value,
+            _ => {}
+        }
+    }
+    for (labels, value) in p95 {
+        if let Some(entry) = label_of(&labels, "tool").and_then(|t| by_tool.get_mut(&t)) {
+            entry.p95_seconds = Some(value);
+        }
+    }
+    let mut tools: Vec<ToolActivity> = by_tool
+        .into_values()
+        .filter(|t| t.calls > 0.0)
+        .collect();
+    tools.sort_by(|a, b| b.calls.total_cmp(&a.calls).then_with(|| a.tool.cmp(&b.tool)));
+    tools.truncate(MAX_TOOLS);
+    tools
+}
+
+fn labeled(series: Vec<(Option<String>, Vec<RangePoint>)>) -> Vec<LabeledSeries> {
+    let mut out: Vec<LabeledSeries> = series
         .into_iter()
-        .map(|m| PodSeries {
-            pod: m
-                .metric
-                .get("pod")
-                .and_then(|v| v.as_str())
-                .unwrap_or("aggregate")
-                .to_string(),
-            points: m
-                .values
-                .into_iter()
-                .filter_map(|(ts, val)| {
-                    val.parse::<f64>().ok().map(|v| RangePoint {
-                        t: (ts * 1000.0) as i64,
-                        v,
-                    })
-                })
-                .collect(),
+        .map(|(label, points)| LabeledSeries {
+            label: label.unwrap_or_else(|| "unknown".to_string()),
+            points,
         })
-        .collect())
+        .collect();
+    out.sort_by(|a, b| a.label.cmp(&b.label));
+    out
+}
+
+/// `GET /api/prometheus/mcp_activity?window=1h|24h|7d`: deckwatch's MCP
+/// tool call metrics for the MCP activity page, from the Prometheus that
+/// scrapes deckwatch. Like the bundled Grafana dashboard, it sums every
+/// deckwatch instance that Prometheus scrapes.
+pub async fn mcp_activity(
+    State(_state): State<AppState>,
+    Query(params): Query<McpActivityQuery>,
+) -> Json<McpActivityResponse> {
+    let http = crate::outbound::global().client(crate::outbound::Purpose::Observability);
+    let now = jiff::Timestamp::now().as_second();
+    Json(activity(prometheus_url().as_deref(), &http, params.window, now).await)
+}
+
+/// The MCP activity for `window` ending at `now` (unix seconds), from the
+/// Prometheus at `prom_url`.
+async fn activity(
+    prom_url: Option<&str>,
+    http: &reqwest::Client,
+    window: ActivityWindow,
+    now: i64,
+) -> McpActivityResponse {
+    let mut response = McpActivityResponse {
+        window_seconds: window.seconds(),
+        step_seconds: window.step(),
+        calls_per_minute: Vec::new(),
+        apply_manifest_per_minute: Vec::new(),
+        p95_seconds: Vec::new(),
+        tools: Vec::new(),
+        unavailable_reason: None,
+    };
+    let Some(prom_url) = prom_url else {
+        response.unavailable_reason = Some(
+            "prometheus not configured (set PROMETHEUS_URL to the Prometheus that scrapes \
+             deckwatch's /metrics)"
+                .to_string(),
+        );
+        return response;
+    };
+    let start = now - window.seconds();
+    let step = window.step();
+    let q = activity_queries(window);
+
+    let (calls, apply_manifest, p95, totals, tool_p95) = tokio::join!(
+        execute_range_by(http, prom_url, &q.calls, start, now, step, "status"),
+        execute_range_by(http, prom_url, &q.apply_manifest, start, now, step, "status"),
+        execute_range_by(http, prom_url, &q.p95, start, now, step, "le"),
+        execute_instant(http, prom_url, &q.tool_totals, now),
+        execute_instant(http, prom_url, &q.tool_p95, now),
+    );
+    match (calls, apply_manifest, p95, totals, tool_p95) {
+        (Ok(calls), Ok(apply_manifest), Ok(p95), Ok(totals), Ok(tool_p95)) => {
+            response.calls_per_minute = labeled(calls);
+            response.apply_manifest_per_minute = labeled(apply_manifest);
+            response.p95_seconds = p95.into_iter().next().map(|(_, p)| p).unwrap_or_default();
+            response.tools = tool_activity(totals, tool_p95);
+        }
+        (Err(e), ..) | (_, Err(e), ..) | (_, _, Err(e), ..) | (.., Err(e), _) | (.., Err(e)) => {
+            response.unavailable_reason = Some(e);
+        }
+    }
+    response
 }
 
 // ---------------------------------------------------------------------------
@@ -525,3 +863,7 @@ mod tests {
 #[cfg(test)]
 #[path = "prometheus_query_tests.rs"]
 mod handlers_prometheus_query_tests;
+
+#[cfg(test)]
+#[path = "prometheus_mcp_activity_tests.rs"]
+mod mcp_activity_tests;

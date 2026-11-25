@@ -228,13 +228,29 @@ pub fn spawn_retention(db: DatabaseConnection, retention: Retention) {
 
 // ---------------------------------------------------------------- query API
 
-#[derive(Debug, Deserialize)]
+/// Query parameters of `GET /api/audit`. Every filter is optional and
+/// matches exactly.
+#[derive(Debug, Default, Deserialize)]
 pub struct AuditQuery {
     pub resource_type: Option<String>,
     pub namespace: Option<String>,
+    /// `api` or `mcp`.
+    pub source: Option<String>,
+    /// The action: `write`, `delete`, `exec` or `read` for MCP rows; `create`,
+    /// `update`, `delete`, ... for API rows.
+    pub action: Option<String>,
+    /// MCP rows: the tool.
+    pub tool: Option<String>,
+    /// MCP rows: the client's self-reported name.
+    pub client: Option<String>,
+    /// MCP rows: `ok`, `error`, `denied` or `cancelled`.
+    pub outcome: Option<String>,
+    /// Only rows at or after this time (RFC 3339).
+    pub since: Option<String>,
+    /// `desc` (newest first, the default) or `asc`.
+    pub order: Option<String>,
     pub limit: Option<u64>,
-    /// Cursor for forward pagination: pass the `next_cursor` from a previous
-    /// response to receive the next page of results (ordered by id ascending).
+    /// The `next_cursor` of the previous page.
     pub cursor: Option<String>,
 }
 
@@ -284,44 +300,107 @@ impl From<audit_entity::Model> for AuditEntry {
     }
 }
 
+/// A page position: the timestamp (nanoseconds) and id of the last row of
+/// the previous page. Rows are ordered by timestamp, then id.
+fn encode_cursor(m: &audit_entity::Model) -> String {
+    format!(
+        "{}~{}",
+        m.timestamp.timestamp_nanos_opt().unwrap_or_default(),
+        m.id
+    )
+}
+
+fn decode_cursor(cursor: &str) -> Option<(DateTimeUtc, String)> {
+    let (nanos, id) = cursor.split_once('~')?;
+    let nanos: i64 = nanos.parse().ok()?;
+    let when = DateTimeUtc::from_timestamp(
+        nanos.div_euclid(1_000_000_000),
+        u32::try_from(nanos.rem_euclid(1_000_000_000)).ok()?,
+    )?;
+    Some((when, id.to_string()))
+}
+
+/// `GET /api/audit`: audit rows, newest first unless `order=asc`, filtered
+/// by the query, in pages of `limit` (at most 200) linked by `next_cursor`.
 pub async fn list_audit_logs(
     State(state): State<AppState>,
     Query(q): Query<AuditQuery>,
 ) -> Result<Json<AuditResponse>, AppError> {
-    let limit = q.limit.unwrap_or(50).min(200);
+    let limit = q.limit.unwrap_or(50).clamp(1, 200);
+    let descending = match q.order.as_deref() {
+        None | Some("desc") => true,
+        Some("asc") => false,
+        Some(other) => {
+            return Err(AppError::BadRequest(format!(
+                "order must be asc or desc, not {other}"
+            )))
+        }
+    };
 
-    let mut query = audit_entity::Entity::find().order_by_asc(audit_entity::Column::Id);
+    let mut query = audit_entity::Entity::find();
+    query = if descending {
+        query
+            .order_by_desc(audit_entity::Column::Timestamp)
+            .order_by_desc(audit_entity::Column::Id)
+    } else {
+        query
+            .order_by_asc(audit_entity::Column::Timestamp)
+            .order_by_asc(audit_entity::Column::Id)
+    };
 
-    // Cursor-based forward pagination: skip all records whose id is <= cursor.
     if let Some(ref cursor) = q.cursor {
-        query = query.filter(audit_entity::Column::Id.gt(cursor.as_str()));
+        let (when, id) = decode_cursor(cursor)
+            .ok_or_else(|| AppError::BadRequest("invalid cursor".to_string()))?;
+        let (ts_past, id_past) = if descending {
+            (
+                audit_entity::Column::Timestamp.lt(when),
+                audit_entity::Column::Id.lt(id),
+            )
+        } else {
+            (
+                audit_entity::Column::Timestamp.gt(when),
+                audit_entity::Column::Id.gt(id),
+            )
+        };
+        query = query.filter(
+            Condition::any().add(ts_past).add(
+                Condition::all()
+                    .add(audit_entity::Column::Timestamp.eq(when))
+                    .add(id_past),
+            ),
+        );
     }
-    if let Some(ref rt) = q.resource_type {
-        query = query.filter(audit_entity::Column::ResourceType.eq(rt.as_str()));
+    if let Some(ref since) = q.since {
+        let since: DateTimeUtc = since.parse().map_err(|_| {
+            AppError::BadRequest(format!("since must be an RFC 3339 time, not {since}"))
+        })?;
+        query = query.filter(audit_entity::Column::Timestamp.gte(since));
     }
-    if let Some(ref ns) = q.namespace {
-        query = query.filter(audit_entity::Column::Namespace.eq(ns.as_str()));
+    for (column, value) in [
+        (audit_entity::Column::ResourceType, &q.resource_type),
+        (audit_entity::Column::Namespace, &q.namespace),
+        (audit_entity::Column::Source, &q.source),
+        (audit_entity::Column::Action, &q.action),
+        (audit_entity::Column::Tool, &q.tool),
+        (audit_entity::Column::ClientName, &q.client),
+        (audit_entity::Column::Outcome, &q.outcome),
+    ] {
+        if let Some(value) = value {
+            query = query.filter(column.eq(value.as_str()));
+        }
     }
 
     // Fetch one extra row to detect whether there is a next page.
-    let rows: Vec<audit_entity::Model> = query
+    let mut rows: Vec<audit_entity::Model> = query
         .limit(limit + 1)
         .all(&state.db)
         .await
         .map_err(|e| AppError::BadRequest(format!("failed to query audit log: {e}")))?;
 
     let has_more = rows.len() as u64 > limit;
-    let items: Vec<AuditEntry> = rows
-        .into_iter()
-        .take(limit as usize)
-        .map(AuditEntry::from)
-        .collect();
-    let next_cursor = if has_more {
-        items.last().map(|e| e.id.clone())
-    } else {
-        None
-    };
-
+    rows.truncate(limit as usize);
+    let next_cursor = has_more.then(|| rows.last().map(encode_cursor)).flatten();
+    let items = rows.into_iter().map(AuditEntry::from).collect();
     Ok(Json(AuditResponse { items, next_cursor }))
 }
 
