@@ -30,19 +30,19 @@ export function activeMenu(page: Page): Locator {
 }
 
 /**
- * Open a select menu with the mouse and return its list. `control` is the
- * select's combobox input.
+ * Open a select menu from the keyboard (focus it, press ArrowDown; Enter would
+ * submit an enclosing form) and return its list. `control` is the select's
+ * combobox input.
  *
- * The control is focused before the click. When the menu finishes opening,
- * Vuetify 4 moves focus into it only if the field is focused by then. With
- * transitions off, that check races the click's own focus, so the menu would
- * render in one of two states depending on load. With the field focused
- * first, it always takes the path a user's click takes (Vuetify 3 renders the
- * same either way).
+ * Not a mouse click: when the menu finishes opening, Vuetify 4 decides where
+ * focus goes from the order of the click's mousedown, focus and the menu's
+ * transition, so with transitions off the open menu renders in one of
+ * several focus states depending on load. Opening from the keyboard gives
+ * one state in Vuetify 4, and in Vuetify 3 the same state as a click.
  */
 export async function openSelect(control: Locator): Promise<Locator> {
   await control.focus();
-  await fieldOf(control).click();
+  await control.press("ArrowDown");
   const menu = activeMenu(control.page());
   await expect(menu).toBeVisible();
   return menu;
