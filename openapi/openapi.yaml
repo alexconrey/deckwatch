@@ -1675,7 +1675,7 @@ components:
                 description: What the environment and the saved settings ask for, used from the next start.
         restart_required:
           type: boolean
-          description: The saved settings send a signal somewhere else than now.
+          description: The saved settings send a signal somewhere other than where it goes now, which takes a restart.
         retired_otlp_endpoint:
           type: object
           nullable: true
