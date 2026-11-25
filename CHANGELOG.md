@@ -488,7 +488,7 @@ first.
   a column or index only when it's missing, and sets the default token
   binding only where none is stored. PostgreSQL already applied them in one
   transaction. Rolling back to 0.6.x still means restoring the backup (see
-  Upgrade notes).
+  Upgrade notes). (#346)
 - `plugin_failing` and `plugin_recovered` notifications reach the webhook in
   the order the transitions happened. Each was sent from its own task, so a
   receiver could get a target's recovery before its failure. They now go
