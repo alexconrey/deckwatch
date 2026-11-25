@@ -12,11 +12,14 @@ use axum::extract::State;
 use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
 use axum::response::IntoResponse;
 use axum::Json;
-use mcp_k8s::telemetry::{self, semconv, ClientInfo, ToolCall, W3cTraceContext};
+use mcp_k8s::telemetry::{
+    self, semconv, ActionClass, ClientInfo, ToolCall, ToolCallSummary, W3cTraceContext,
+};
 use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder, QuerySelect};
 use serde::{Deserialize, Serialize};
 use tracing::{Instrument, Span};
 
+use super::mcp_audit;
 use super::mcp_telemetry::{self, DeckwatchTool, RequestContext};
 use crate::audit;
 use crate::entities::applications as apps_entity;
@@ -77,7 +80,7 @@ pub async fn handle_mcp(
     Json(request): Json<JsonRpcRequest>,
 ) -> impl IntoResponse {
     let start = Instant::now();
-    let ctx = RequestContext::from_headers(&headers);
+    let mut ctx = RequestContext::from_headers(&headers);
     let span = mcp_telemetry::request_span(
         &request.method,
         span_target(&request),
@@ -91,7 +94,8 @@ pub async fn handle_mcp(
         W3cTraceContext::from_meta(&request.params).as_ref(),
         ctx.http_trace.as_ref(),
     );
-    if let Some(trace_id) = crate::telemetry::trace_id(&span) {
+    ctx.trace_id = crate::telemetry::trace_id(&span);
+    if let Some(trace_id) = &ctx.trace_id {
         span.record(semconv::TRACE_ID, trace_id.as_str());
     }
     let request_span = span.clone();
@@ -109,7 +113,7 @@ pub async fn handle_mcp(
             }
             "ping" => Some(success_response(&request, serde_json::json!({}))),
             "tools/list" => Some(handle_tools_list(&state, &request).await),
-            "tools/call" => Some(handle_tool_call(&state, &request).await),
+            "tools/call" => Some(handle_tool_call_in(&state, &request, &ctx).await),
             "prompts/list" => Some(handle_prompts_list(&request)),
             "prompts/get" => Some(handle_prompts_get(&request)),
             _ => Some(method_not_found(&request)),
@@ -282,8 +286,7 @@ async fn handle_tools_list(state: &AppState, request: &JsonRpcRequest) -> JsonRp
     let tuning = loaded.mcp_tuning;
     let agent_feedback_enabled = loaded.agent_feedback_enabled;
 
-    let perms = mcp_k8s::permissions::ActionPermissions::default();
-    let mut tools = mcp_k8s::mcp::tool_definitions(&perms);
+    let mut tools = mcp_k8s::mcp::tool_definitions(&mcp_permissions());
     tools.extend(mcp_k8s::resources::all_tool_definitions());
     tools.extend(deckwatch_tool_definitions());
 
@@ -305,7 +308,23 @@ async fn handle_tools_list(state: &AppState, request: &JsonRpcRequest) -> JsonRp
     // Replace the upstream apply_manifest definition with one that clearly
     // documents YAML/JSON support (the upstream only accepts JSON silently).
     tools.retain(|t| t.get("name").and_then(|n| n.as_str()) != Some("apply_manifest"));
-    tools.push(serde_json::json!({
+    tools.push(apply_manifest_tool_definition());
+
+    // Replace the upstream exec_pod definition; our implementation is non-interactive
+    // and returns collected output rather than attempting a WebSocket upgrade.
+    tools.retain(|t| t.get("name").and_then(|n| n.as_str()) != Some("exec_pod"));
+    tools.push(exec_pod_tool_definition());
+
+    let tools = tools
+        .into_iter()
+        .map(|t| inject_mcp_hint(t, &tuning))
+        .collect::<Vec<_>>();
+    success_response(request, serde_json::json!({ "tools": tools }))
+}
+
+/// deckwatch's `apply_manifest`: like mcp-k8s's, but YAML is accepted too.
+fn apply_manifest_tool_definition() -> serde_json::Value {
+    serde_json::json!({
         "name": "apply_manifest",
         "description": "Apply a Kubernetes manifest. Accepts YAML or JSON. Equivalent to kubectl apply -f.",
         "inputSchema": {
@@ -317,12 +336,12 @@ async fn handle_tools_list(state: &AppState, request: &JsonRpcRequest) -> JsonRp
             "required": ["manifest"],
             "additionalProperties": false
         }
-    }));
+    })
+}
 
-    // Replace the upstream exec_pod definition; our implementation is non-interactive
-    // and returns collected output rather than attempting a WebSocket upgrade.
-    tools.retain(|t| t.get("name").and_then(|n| n.as_str()) != Some("exec_pod"));
-    tools.push(serde_json::json!({
+/// deckwatch's non-interactive `exec_pod`.
+fn exec_pod_tool_definition() -> serde_json::Value {
+    serde_json::json!({
         "name": "exec_pod",
         "description": "Run a command in a running pod container and return the output. For interactive shells, use the deckwatch UI instead.",
         "inputSchema": {
@@ -336,13 +355,22 @@ async fn handle_tools_list(state: &AppState, request: &JsonRpcRequest) -> JsonRp
             "required": ["namespace", "pod_name", "command"],
             "additionalProperties": false
         }
-    }));
+    })
+}
 
-    let tools = tools
-        .into_iter()
-        .map(|t| inject_mcp_hint(t, &tuning))
-        .collect::<Vec<_>>();
-    success_response(request, serde_json::json!({ "tools": tools }))
+/// The definitions of every tool deckwatch serves itself
+/// (`mcp_telemetry::DECKWATCH_TOOLS`), as `tools/list` lists them;
+/// `submit_agent_feedback` is listed only when agent feedback is on.
+pub(super) fn served_tool_definitions() -> Vec<serde_json::Value> {
+    let mut tools = deckwatch_tool_definitions();
+    tools.extend([
+        agent_feedback_tool_definition(),
+        enhanced_update_deployment_tool_definition(),
+        enhanced_create_pod_tool_definition(),
+        apply_manifest_tool_definition(),
+        exec_pod_tool_definition(),
+    ]);
+    tools
 }
 
 /// Map a tool name to its resource group for hint injection.
@@ -1033,18 +1061,26 @@ fn agent_feedback_tool_definition() -> serde_json::Value {
 // tools/call dispatch
 // ---------------------------------------------------------------------------
 
+/// `tools/call` outside any session, for tests.
+#[cfg(test)]
 async fn handle_tool_call(state: &AppState, request: &JsonRpcRequest) -> JsonRpcResponse {
+    handle_tool_call_in(state, request, &RequestContext::default()).await
+}
+
+/// `tools/call`, with what the HTTP request said (session, trace id).
+async fn handle_tool_call_in(
+    state: &AppState,
+    request: &JsonRpcRequest,
+    ctx: &RequestContext,
+) -> JsonRpcResponse {
     let params = &request.params;
     let tool_name = params["name"].as_str().unwrap_or("");
     let args = &params["arguments"];
     let start = Instant::now();
 
-    let result = if let Some(tool) = mcp_telemetry::deckwatch_tool(tool_name) {
-        Some(call_deckwatch_tool(state, tool, args).await)
-    } else if telemetry::is_known_tool(tool_name) {
-        // mcp-k8s instruments its own tools: span attributes, the duration
-        // metric and log events, and mcp_k8s_tool_calls_total.
-        mcp_k8s::mcp::handle_tool(&mcp_k8s_client(state), tool_name, args).await
+    let own = mcp_telemetry::deckwatch_tool(tool_name);
+    let result = if own.is_some() || telemetry::is_known_tool(tool_name) {
+        call_tool(state, ctx, tool_name, own, args).await
     } else {
         None
     };
@@ -1098,37 +1134,144 @@ tokio::task_local! {
     static DELEGATED: Cell<bool>;
 }
 
-/// Run one of deckwatch's own tools in a `ToolCall`, so it gets the span
-/// attributes, duration metric event and log line mcp-k8s tools get. A call
-/// it hands to mcp-k8s's `handle_tool` reports into this one, so it is
-/// still one call.
-async fn call_deckwatch_tool(
+/// A guardrail's refusal of a tool call.
+struct Denial {
+    /// `namespace_allowlist`, or the mcp-k8s permission rule.
+    rule: String,
+    /// The error the client gets.
+    message: String,
+}
+
+/// The guardrail that refuses a call, checked before it runs:
+///
+/// - deckwatch's namespace allowlist, for the namespace the call targets
+///   (its `namespace` argument, else an `apply_manifest` manifest's). Every
+///   tool enforces it too; checking here records the refusal as a denial,
+///   for reads as well, and covers tools that might miss it.
+/// - mcp-k8s's permission settings, for mcp-k8s tools (including the ones
+///   deckwatch intercepts): the same `ActionPermissions` mcp-k8s checks.
+fn guardrail(
     state: &AppState,
-    tool: &DeckwatchTool,
+    perms: &mcp_k8s::permissions::ActionPermissions,
+    tool: &str,
     args: &serde_json::Value,
-) -> Result<String, String> {
+    summary: &ToolCallSummary,
+) -> Option<Denial> {
+    let namespace = args
+        .get("namespace")
+        .and_then(serde_json::Value::as_str)
+        .filter(|ns| !ns.is_empty())
+        .or(summary.target.namespace.as_deref());
+    if let Some(ns) = namespace.filter(|ns| !state.is_namespace_allowed(ns)) {
+        return Some(Denial {
+            rule: "namespace_allowlist".to_string(),
+            message: crate::error::AppError::NamespaceNotAllowed(ns.to_string()).to_string(),
+        });
+    }
+    if telemetry::is_known_tool(tool) {
+        if let Some(rule) = perms.denied_by(tool) {
+            let action = mcp_k8s::permissions::ActionPermissions::action_for_tool(tool);
+            return Some(Denial {
+                rule,
+                message: format!("action '{action}' is not allowed on this tool: {tool}"),
+            });
+        }
+    }
+    None
+}
+
+/// Run one tool call, deckwatch's own or mcp-k8s's: in one `ToolCall` (the
+/// span attributes, duration metric event and log line), behind the
+/// guardrails, and with its SEC-22 audit row. A call deckwatch hands to
+/// mcp-k8s's `handle_tool` reports into the same `ToolCall`, so it is still
+/// one call.
+///
+/// Returns `None` if no tool served it (mcp-k8s lists a few tools that
+/// `handle_tool` doesn't serve, such as its multi-cluster ones).
+async fn call_tool(
+    state: &AppState,
+    ctx: &RequestContext,
+    name: &str,
+    own: Option<&DeckwatchTool>,
+    args: &serde_json::Value,
+) -> Option<Result<String, String>> {
     let start = Instant::now();
+    let action = own.map_or_else(|| ActionClass::for_tool(name), |tool| tool.action);
     let call = ToolCall::start_with_action(
-        tool.name,
-        &mcp_telemetry::telemetry_arguments(tool.name, args),
-        tool.action,
+        name,
+        &mcp_telemetry::telemetry_arguments(name, args),
+        action,
     );
+    let denial = guardrail(state, &mcp_permissions(), name, args, call.summary());
+    let audit = mcp_audit::audited(action, denial.is_some()).then(|| {
+        let mut record = mcp_audit::CallRecord::new(name, own, action, call.summary(), args, ctx);
+        if let Some(denial) = &denial {
+            record.deny(&denial.rule);
+        }
+        mcp_audit::PendingAudit::new(&state.db, record, start)
+    });
+
+    if let Some(denial) = denial {
+        call.deny(&denial.rule);
+        let result = Err(denial.message);
+        call.finish(&result);
+        if let Some(audit) = audit {
+            audit.finish(mcp_audit::Outcome::Denied);
+        }
+        // mcp-k8s never saw the call, so deckwatch counts it.
+        crate::metrics::record_mcp_tool_call(name, "denied", start.elapsed().as_secs_f64());
+        return Some(result);
+    }
+
     let (result, delegated) = DELEGATED
         .scope(Cell::new(false), async {
-            let result = call
-                .run(dispatch_deckwatch_tool(state, tool.name, args))
-                .await;
-            (result, DELEGATED.with(Cell::get))
+            // REST handlers the tool reuses don't add audit rows of their
+            // own: this call's row covers them.
+            // Both dispatchers are large futures: boxed, so a call doesn't
+            // need a deep stack (debug builds overflow test threads).
+            let body = audit::within_mcp_call(async {
+                match own {
+                    Some(tool) => {
+                        Some(Box::pin(dispatch_deckwatch_tool(state, tool.name, args)).await)
+                    }
+                    None => {
+                        Box::pin(mcp_k8s::mcp::handle_tool(
+                            &mcp_k8s_client(state),
+                            name,
+                            args,
+                        ))
+                        .await
+                    }
+                }
+            });
+            let result = call.run(body).await;
+            (result, own.is_none() || DELEGATED.with(Cell::get))
         })
         .await;
+
+    let Some(result) = result else {
+        call.abandon();
+        if let Some(audit) = audit {
+            audit.abandon();
+        }
+        return None;
+    };
     call.finish(&result);
+    if let Some(audit) = audit {
+        audit.finish(if result.is_ok() {
+            mcp_audit::Outcome::Ok
+        } else {
+            mcp_audit::Outcome::Error
+        });
+    }
     // deckwatch_mcp_tool_calls_total counts the calls deckwatch served
-    // itself; one it handed to mcp-k8s is in mcp_k8s_tool_calls_total.
+    // itself; mcp_k8s_tool_calls_total counts the ones mcp-k8s ran,
+    // including those a deckwatch tool handed to it.
     if !delegated {
         let status = if result.is_ok() { "ok" } else { "error" };
-        crate::metrics::record_mcp_tool_call(tool.name, status, start.elapsed().as_secs_f64());
+        crate::metrics::record_mcp_tool_call(name, status, start.elapsed().as_secs_f64());
     }
-    result
+    Some(result)
 }
 
 /// Dispatch one of deckwatch's own tools (`mcp_telemetry::DECKWATCH_TOOLS`).
@@ -1173,11 +1316,6 @@ async fn dispatch_deckwatch_tool(
         "deprovision_resource" => tool_deprovision_resource(state, args).await,
         "refresh_resource" => tool_refresh_resource(state, args).await,
         "submit_agent_feedback" => tool_submit_agent_feedback(state, args).await,
-        // Intercept k8s deployment mutation tools so they are audit-logged.
-        "create_deployment" => tool_mcp_create_deployment(state, args).await,
-        "delete_deployment" => tool_mcp_delete_deployment(state, args).await,
-        "scale_deployment" => tool_mcp_scale_deployment(state, args).await,
-        "restart_deployment" => tool_mcp_restart_deployment(state, args).await,
         // Intercept update_deployment and create_pod to add service_account support.
         "update_deployment" => tool_mcp_update_deployment(state, args).await,
         "create_pod" => tool_mcp_create_pod(state, args).await,
@@ -1189,12 +1327,18 @@ async fn dispatch_deckwatch_tool(
     }
 }
 
+/// The mcp-k8s permission settings for MCP calls: one place to build them
+/// (SEC-4/SEC-24 will make them configurable). Today every action is allowed.
+fn mcp_permissions() -> mcp_k8s::permissions::ActionPermissions {
+    mcp_k8s::permissions::ActionPermissions::default()
+}
+
 /// An mcp-k8s client for one call, with deckwatch's namespace allowlist.
 fn mcp_k8s_client(state: &AppState) -> mcp_k8s::K8sClient {
     mcp_k8s::K8sClient::new(
         state.kube_client.clone(),
         state.allowed_namespaces.clone(),
-        mcp_k8s::permissions::ActionPermissions::default(),
+        mcp_permissions(),
     )
 }
 
@@ -1561,18 +1705,6 @@ async fn tool_create_application(
         .await;
     }
 
-    audit::log_action(
-        &state.db,
-        "create",
-        "application",
-        name,
-        ns,
-        &format!("MCP: created application '{name}'"),
-        "",
-    )
-    .await
-    .ok();
-
     serde_json::to_string_pretty(&detail).map_err(|e| e.to_string())
 }
 
@@ -1621,18 +1753,6 @@ async fn tool_configure_gitops(
     .await
     .map_err(|e| format!("{e}"))?;
 
-    audit::log_action(
-        &state.db,
-        "upsert",
-        "gitops",
-        &format!("{ns}/{name}"),
-        ns,
-        "MCP: set gitops config",
-        "",
-    )
-    .await
-    .ok();
-
     serde_json::to_string_pretty(&result.0).map_err(|e| e.to_string())
 }
 
@@ -1649,18 +1769,6 @@ async fn tool_trigger_gitops_build(
     )
     .await
     .map_err(|e| format!("{e}"))?;
-
-    audit::log_action(
-        &state.db,
-        "trigger",
-        "gitops",
-        &format!("{ns}/{name}"),
-        ns,
-        "MCP: triggered gitops build",
-        "",
-    )
-    .await
-    .ok();
 
     serde_json::to_string_pretty(&result.0).map_err(|e| e.to_string())
 }
@@ -2283,18 +2391,6 @@ async fn tool_enable_plugin(state: &AppState, args: &serde_json::Value) -> Resul
     state.plugin_patch_fingerprints.lock().await.clear();
     let events = state.plugin_telemetry.last_load(name).unwrap_or_default();
 
-    audit::log_action(
-        &state.db,
-        "enable",
-        "plugin",
-        name,
-        "",
-        &format!("MCP: enabled plugin '{name}'"),
-        "",
-    )
-    .await
-    .ok();
-
     let text = serde_json::json!({
         "name": name,
         "enabled": true,
@@ -2340,18 +2436,6 @@ async fn tool_disable_plugin(state: &AppState, args: &serde_json::Value) -> Resu
     // Clearing fingerprints forces a fresh reconcile on the next cycle so
     // resources injected by this plugin are no longer applied.
     state.plugin_patch_fingerprints.lock().await.clear();
-
-    audit::log_action(
-        &state.db,
-        "disable",
-        "plugin",
-        name,
-        "",
-        &format!("MCP: disabled plugin '{name}'"),
-        "",
-    )
-    .await
-    .ok();
 
     Ok(serde_json::json!({
         "name": name,
@@ -2860,10 +2944,10 @@ async fn tool_refresh_resource(
     Ok(with_plugin_output(text, &events))
 }
 
-// ── Deployment mutation tools (intercepted from mcp-k8s for audit logging) ──
+// ── mcp-k8s tools deckwatch intercepts ──
 
 /// Hand a call of an intercepted tool to mcp-k8s. Inside
-/// [`call_deckwatch_tool`], mcp-k8s reports into the running `ToolCall` and
+/// [`call_tool`], mcp-k8s reports into the running `ToolCall` and
 /// counts the call in `mcp_k8s_tool_calls_total`.
 async fn mcp_k8s_tool(
     state: &AppState,
@@ -2874,91 +2958,6 @@ async fn mcp_k8s_tool(
     mcp_k8s::mcp::handle_tool(&mcp_k8s_client(state), tool_name, args)
         .await
         .unwrap_or_else(|| Err(format!("unknown tool: {tool_name}")))
-}
-
-async fn tool_mcp_create_deployment(
-    state: &AppState,
-    args: &serde_json::Value,
-) -> Result<String, String> {
-    let result = mcp_k8s_tool(state, "create_deployment", args).await?;
-    let ns = args["namespace"].as_str().unwrap_or("");
-    let name = args["name"].as_str().unwrap_or("");
-    audit::log_action(
-        &state.db,
-        "create",
-        "deployment",
-        name,
-        ns,
-        "MCP: create_deployment",
-        "",
-    )
-    .await
-    .ok();
-    Ok(result)
-}
-
-async fn tool_mcp_delete_deployment(
-    state: &AppState,
-    args: &serde_json::Value,
-) -> Result<String, String> {
-    let result = mcp_k8s_tool(state, "delete_deployment", args).await?;
-    let ns = args["namespace"].as_str().unwrap_or("");
-    let name = args["name"].as_str().unwrap_or("");
-    audit::log_action(
-        &state.db,
-        "delete",
-        "deployment",
-        name,
-        ns,
-        "MCP: delete_deployment",
-        "",
-    )
-    .await
-    .ok();
-    Ok(result)
-}
-
-async fn tool_mcp_scale_deployment(
-    state: &AppState,
-    args: &serde_json::Value,
-) -> Result<String, String> {
-    let result = mcp_k8s_tool(state, "scale_deployment", args).await?;
-    let ns = args["namespace"].as_str().unwrap_or("");
-    let name = args["name"].as_str().unwrap_or("");
-    let replicas = args["replicas"].as_i64().unwrap_or(0);
-    audit::log_action(
-        &state.db,
-        "scale",
-        "deployment",
-        name,
-        ns,
-        &format!("MCP: scaled deployment to {replicas} replicas"),
-        "",
-    )
-    .await
-    .ok();
-    Ok(result)
-}
-
-async fn tool_mcp_restart_deployment(
-    state: &AppState,
-    args: &serde_json::Value,
-) -> Result<String, String> {
-    let result = mcp_k8s_tool(state, "restart_deployment", args).await?;
-    let ns = args["namespace"].as_str().unwrap_or("");
-    let name = args["name"].as_str().unwrap_or("");
-    audit::log_action(
-        &state.db,
-        "restart",
-        "deployment",
-        name,
-        ns,
-        "MCP: restart_deployment",
-        "",
-    )
-    .await
-    .ok();
-    Ok(result)
 }
 
 async fn tool_mcp_update_deployment(
@@ -3016,24 +3015,6 @@ async fn tool_mcp_update_deployment(
         .await
         .map_err(|e| e.to_string())?;
     }
-
-    audit::log_action(
-        &state.db,
-        "update",
-        "deployment",
-        name,
-        ns,
-        &format!(
-            "MCP: update_deployment{}",
-            service_account
-                .as_deref()
-                .map(|sa| format!(", serviceAccount={sa}"))
-                .unwrap_or_default()
-        ),
-        "",
-    )
-    .await
-    .ok();
 
     Ok(result.unwrap_or_else(|| format!("Deployment {name} updated in namespace {ns}")))
 }
@@ -3304,18 +3285,6 @@ async fn tool_associate_plugin(
         .await
         .map_err(|e| format!("database error: {e}"))?;
 
-    crate::audit::log_action(
-        &state.db,
-        "create",
-        "application-plugin",
-        &canonical_name,
-        ns,
-        &format!("MCP: associated plugin '{canonical_name}' with application '{app_name}'"),
-        "",
-    )
-    .await
-    .ok();
-
     Ok(format!(
         "Plugin '{canonical_name}' associated with application '{app_name}' in namespace '{ns}'. \
          The plugin reconciler will begin running it against all deployments within 30 seconds."
@@ -3354,18 +3323,6 @@ async fn tool_disassociate_plugin(
             "plugin '{plugin_name}' is not associated with application '{app_name}' in namespace '{ns}'"
         ));
     }
-
-    crate::audit::log_action(
-        &state.db,
-        "delete",
-        "application-plugin",
-        plugin_name,
-        ns,
-        &format!("MCP: removed plugin '{plugin_name}' from application '{app_name}'"),
-        "",
-    )
-    .await
-    .ok();
 
     Ok(format!(
         "Plugin '{plugin_name}' disassociated from application '{app_name}' in namespace '{ns}'."
@@ -3667,3 +3624,7 @@ mod plugin_events_tests;
 #[cfg(test)]
 #[path = "mcp_tool_telemetry_tests.rs"]
 mod tool_telemetry_tests;
+
+#[cfg(test)]
+#[path = "mcp_tool_audit_tests.rs"]
+mod tool_audit_tests;

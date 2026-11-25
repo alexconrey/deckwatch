@@ -22,7 +22,11 @@ use crate::test_tracing::{capture, Captured, CapturedEvent, CapturedSpan};
 // ---------------------------------------------------------------------------
 
 /// POST one JSON-RPC message to `/mcp`, as axum calls the handler.
-async fn post(state: &AppState, headers: HeaderMap, message: Value) -> (HeaderMap, Value) {
+pub(super) async fn post(
+    state: &AppState,
+    headers: HeaderMap,
+    message: Value,
+) -> (HeaderMap, Value) {
     let request: JsonRpcRequest = serde_json::from_value(message).expect("JSON-RPC request");
     let response = handle_mcp(State(state.clone()), headers, Json(request))
         .await
@@ -39,7 +43,7 @@ async fn post(state: &AppState, headers: HeaderMap, message: Value) -> (HeaderMa
     (headers, body)
 }
 
-fn call(tool: &str, arguments: Value) -> Value {
+pub(super) fn call(tool: &str, arguments: Value) -> Value {
     json!({
         "jsonrpc": "2.0",
         "id": 7,
@@ -48,7 +52,7 @@ fn call(tool: &str, arguments: Value) -> Value {
     })
 }
 
-fn message(method: &str, params: Value) -> Value {
+pub(super) fn message(method: &str, params: Value) -> Value {
     json!({ "jsonrpc": "2.0", "id": 1, "method": method, "params": params })
 }
 
@@ -108,7 +112,7 @@ fn one_request<'a>(captured: &'a Captured, what: &str) -> Request<'a> {
 /// A Kubernetes API that answers every request with a 404 Status whose
 /// message echoes the request URL and body, as real API servers echo names
 /// and invalid values. Telemetry must never record error text.
-fn echo_client() -> kube::Client {
+pub(super) fn echo_client() -> kube::Client {
     let service = tower::service_fn(|req: axum::http::Request<kube::client::Body>| async move {
         let uri = req.uri().to_string();
         let body = req.into_body().collect_bytes().await.unwrap_or_default();
@@ -169,7 +173,8 @@ async fn every_tool_call_is_one_span_one_metric_event_one_log_line() {
             "delete",
             "error",
         ),
-        // interceptors that hand the call to mcp-k8s: still one call
+        // mcp-k8s tools, and interceptors that hand the call to mcp-k8s:
+        // still one call
         (
             "create_deployment",
             json!({"namespace": "prod", "name": "web", "image": "nginx"}),
@@ -560,7 +565,7 @@ fn request_method_labels_are_bounded() {
 
 /// Every tool definition deckwatch lists, the deckwatch-served definition
 /// winning where mcp-k8s defines the same name.
-async fn listed_definitions(state: &AppState) -> BTreeMap<String, Value> {
+pub(super) async fn listed_definitions(state: &AppState) -> BTreeMap<String, Value> {
     let req = JsonRpcRequest {
         jsonrpc: "2.0".to_string(),
         id: Some(json!(1)),
@@ -627,8 +632,8 @@ async fn every_classified_tool_is_dispatched() {
 /// Unique, non-overlapping markers: fixed width plus a terminator, so no
 /// canary is a substring of another.
 #[derive(Default)]
-struct Canaries {
-    by_marker: Vec<(String, String)>,
+pub(super) struct Canaries {
+    pub(super) by_marker: Vec<(String, String)>,
 }
 
 impl Canaries {
@@ -671,7 +676,7 @@ impl Canaries {
     }
 
     /// Arguments for a JSON schema, every string a canary unique to its path.
-    fn fill(&mut self, schema: &Value, path: &str) -> Value {
+    pub(super) fn fill(&mut self, schema: &Value, path: &str) -> Value {
         if let Some(alt) = schema
             .get("oneOf")
             .or_else(|| schema.get("anyOf"))
@@ -727,7 +732,7 @@ async fn canary_no_argument_value_of_a_deckwatch_tool_reaches_telemetry() {
     let state = echo_state().await;
     let defs = listed_definitions(&state).await;
     let allowed: BTreeSet<&str> = ALLOWED_ARGUMENTS.iter().map(|(k, _)| *k).collect();
-    // apply_manifest's target comes from the manifest.
+    // A manifest's target fields may be recorded (apply_manifest).
     let manifest_target = [
         "manifest.kind",
         "manifest.apiVersion",
@@ -765,8 +770,7 @@ async fn canary_no_argument_value_of_a_deckwatch_tool_reaches_telemetry() {
         let haystack = captured.haystack();
         for (marker, path) in &canaries.by_marker {
             let top_level_allowed = allowed.contains(path.as_str());
-            let may_appear = top_level_allowed
-                || (tool.name == "apply_manifest" && manifest_target.contains(&path.as_str()));
+            let may_appear = top_level_allowed || manifest_target.contains(&path.as_str());
             let appears = haystack.contains(marker.as_str());
             if appears && !may_appear {
                 failures.push(format!("{}: value of `{path}` leaked", tool.name));

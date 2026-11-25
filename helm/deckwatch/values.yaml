@@ -229,6 +229,15 @@ database:
     storageClass: ""
     accessMode: ReadWriteOnce
 
+# Audit log retention. The audit log records every change made through the
+# UI or API, and every MCP tool call that writes, deletes or execs, or that a
+# guardrail denied. Rows past either limit are pruned hourly; 0 turns a limit
+# off. Set here rather than in Settings so the settings API can't shorten
+# the audit trail.
+audit:
+  retentionDays: 365
+  maxRows: 100000
+
 templates:
   configMapName: "deckwatch-templates"
   overrides: []
