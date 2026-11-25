@@ -36,12 +36,14 @@ mod plugins;
 mod rate_limit;
 mod routes;
 mod state;
+mod telemetry;
 mod watcher;
 mod webhook_registration;
 mod webhook_tls;
 
 use clap::Parser;
 use tokio::net::TcpListener;
+use tracing_subscriber::util::SubscriberInitExt as _;
 
 use config::Config;
 use handlers::registry::RegistryStore;
@@ -53,10 +55,16 @@ use state::AppState;
 pub async fn run() {
     let _ = rustls::crypto::ring::default_provider().install_default();
 
-    tracing_subscriber::fmt()
-        .with_env_filter(logging::env_filter())
-        .json()
-        .init();
+    // JSON logs on stdout, plus OpenTelemetry export of deckwatch's own
+    // telemetry when an OTEL_EXPORTER_OTLP_*ENDPOINT is set (src/telemetry.rs).
+    let telemetry = telemetry::Telemetry::from_env();
+    telemetry::subscriber(
+        logging::env_filter(),
+        telemetry.telemetry(),
+        std::io::stdout,
+    )
+    .init();
+    telemetry.log();
 
     metrics::init();
 
