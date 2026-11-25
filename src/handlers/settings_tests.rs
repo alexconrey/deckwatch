@@ -1176,3 +1176,359 @@ async fn disabling_a_plugin_in_settings_unloads_it_right_away() {
         .expect("put");
     assert!(state.plugins.read().await.is_empty());
 }
+
+// ── deckwatch's own telemetry: observability endpoints ─────────────────────
+
+const COLLECTOR: &str = "http://otel-collector.observability:4318";
+const PROMETHEUS: &str = "http://prometheus.monitoring:9090/api/v1/otlp/v1/metrics";
+
+fn observability(otlp_endpoint: &str, otlp_metrics_endpoint: &str) -> ObservabilitySettings {
+    ObservabilitySettings {
+        otlp_endpoint: otlp_endpoint.to_string(),
+        otlp_metrics_endpoint: otlp_metrics_endpoint.to_string(),
+    }
+}
+
+#[tokio::test]
+async fn get_always_returns_the_observability_object() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let (state, _) = seeded_state(tmp.path()).await;
+    let Json(got) = get_settings(State(state)).await.expect("get");
+    assert_eq!(got.observability, Some(ObservabilitySettings::default()));
+}
+
+#[tokio::test]
+async fn put_validates_and_normalizes_the_otlp_endpoints() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let (state, _) = seeded_state(tmp.path()).await;
+
+    let Json(mut payload) = get_settings(State(state.clone())).await.expect("get");
+    payload.observability = Some(observability(&format!(" {COLLECTOR}/ "), PROMETHEUS));
+    let Json(saved) = put_settings(State(state.clone()), Json(payload))
+        .await
+        .expect("put");
+    let expected = observability(COLLECTOR, PROMETHEUS);
+    assert_eq!(saved.observability.as_ref(), Some(&expected));
+    assert_eq!(
+        load_settings_from_db(&state).await.observability,
+        Some(expected)
+    );
+
+    // Clearing both stores no block; GET still returns an empty one.
+    let Json(mut payload) = get_settings(State(state.clone())).await.expect("get");
+    payload.observability = Some(ObservabilitySettings::default());
+    let _ = put_settings(State(state.clone()), Json(payload))
+        .await
+        .expect("put");
+    assert_eq!(load_settings_from_db(&state).await.observability, None);
+}
+
+#[tokio::test]
+async fn put_rejects_invalid_otlp_endpoints_and_keeps_the_stored_ones() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let (state, _) = seeded_state(tmp.path()).await;
+
+    for (bad, field) in [
+        (
+            observability("https://user:secret@otlp.example.com", ""),
+            "otlp_endpoint",
+        ),
+        (
+            observability("https://otlp.example.com/?api-key=x", ""),
+            "otlp_endpoint",
+        ),
+        // The retired gRPC setting's format is not converted.
+        (
+            observability("deckwatch-tempo.deckwatch.svc:4317", ""),
+            "otlp_endpoint",
+        ),
+        (
+            observability("", "http://prometheus.monitoring:9090"),
+            "otlp_metrics_endpoint",
+        ),
+    ] {
+        let Json(mut payload) = get_settings(State(state.clone())).await.expect("get");
+        payload.observability = Some(bad.clone());
+        let err = put_settings(State(state.clone()), Json(payload))
+            .await
+            .err()
+            .unwrap_or_else(|| panic!("{bad:?} must be rejected"));
+        let AppError::BadRequest(msg) = err else {
+            panic!("expected 400 for {bad:?}");
+        };
+        assert!(msg.contains(&format!("observability.{field}: ")), "{msg}");
+    }
+    assert_eq!(load_settings_from_db(&state).await.observability, None);
+}
+
+#[tokio::test]
+async fn put_without_observability_or_tracing_keeps_them() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let (state, _) = seeded_state(tmp.path()).await;
+    let tracing_settings = TracingSettings {
+        backend_kind: "jaeger".to_string(),
+        query_url: "http://jaeger-query.observability:16686".to_string(),
+        ui_url: "https://jaeger.example.com".to_string(),
+        ..Default::default()
+    };
+    let Json(mut payload) = get_settings(State(state.clone())).await.expect("get");
+    payload.observability = Some(observability(COLLECTOR, ""));
+    payload.tracing = Some(tracing_settings.clone());
+    let _ = put_settings(State(state.clone()), Json(payload))
+        .await
+        .expect("put");
+
+    // An older client, or a page that builds its payload field by field.
+    let Json(mut payload) = get_settings(State(state.clone())).await.expect("get");
+    payload.observability = None;
+    payload.tracing = None;
+    payload.prometheus_enabled = false;
+    let _ = put_settings(State(state.clone()), Json(payload))
+        .await
+        .expect("put");
+
+    let stored = load_settings_from_db(&state).await;
+    assert!(!stored.prometheus_enabled);
+    assert_eq!(stored.observability, Some(observability(COLLECTOR, "")));
+    let tracing = stored.tracing.expect("the trace viewer's settings survive");
+    assert_eq!(tracing.query_url, tracing_settings.query_url);
+    assert_eq!(tracing.ui_url, tracing_settings.ui_url);
+    assert_eq!(tracing.backend_kind, "jaeger");
+}
+
+#[tokio::test]
+async fn otlp_endpoint_changes_are_audit_logged() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let (state, _) = seeded_state(tmp.path()).await;
+
+    let Json(mut payload) = get_settings(State(state.clone())).await.expect("get");
+    payload.observability = Some(observability(COLLECTOR, ""));
+    let _ = put_settings(State(state.clone()), Json(payload))
+        .await
+        .expect("put");
+    // Saving again without a change logs nothing more.
+    let Json(payload) = get_settings(State(state.clone())).await.expect("get");
+    let _ = put_settings(State(state.clone()), Json(payload))
+        .await
+        .expect("put");
+
+    let entries: Vec<_> = audit_entries(&state)
+        .await
+        .into_iter()
+        .filter(|e| e.resource_name.starts_with("observability."))
+        .collect();
+    assert_eq!(entries.len(), 1, "{entries:?}");
+    assert_eq!(entries[0].resource_name, "observability.otlp_endpoint");
+    assert_eq!(
+        entries[0].detail,
+        format!(
+            "observability.otlp_endpoint changed from not set to {COLLECTOR}; deckwatch's own \
+             telemetry uses it after a restart"
+        )
+    );
+}
+
+// ── GET /api/settings/observability ─────────────────────────────────────────
+
+/// An environment holding only `vars`.
+fn env(vars: &[(&str, &str)]) -> impl Fn(&str) -> Option<String> {
+    let vars: Vec<(String, String)> = vars
+        .iter()
+        .map(|(k, v)| (String::from(*k), String::from(*v)))
+        .collect();
+    move |name| vars.iter().find(|(k, _)| k == name).map(|(_, v)| v.clone())
+}
+
+fn with_observability(o: ObservabilitySettings) -> DeckwatchSettings {
+    DeckwatchSettings {
+        observability: Some(o),
+        ..Default::default()
+    }
+}
+
+/// What `run` recorded at startup for `settings`.
+fn running_for(
+    get: impl Fn(&str) -> Option<String>,
+    settings: &DeckwatchSettings,
+) -> [SignalStatus; 3] {
+    let plan = Plan::resolve(get, &settings.observability.clone().unwrap_or_default());
+    plan.all().clone().map(|s| s.status())
+}
+
+#[test]
+fn the_status_reports_each_signals_endpoint_and_where_it_comes_from() {
+    let settings = with_observability(observability(COLLECTOR, PROMETHEUS));
+    let vars = [(
+        "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT",
+        "https://user:secret@tempo.example.com/v1/traces",
+    )];
+    let status = observability_status(env(&vars), &settings, None, None);
+    let json = serde_json::to_value(&status).expect("serialize");
+    assert_eq!(
+        json,
+        serde_json::json!({
+            "signals": [
+                {
+                    "signal": "traces",
+                    "running": null,
+                    "configured": {
+                        "source": "env",
+                        "endpoint": "https://***@tempo.example.com/v1/traces",
+                        "from": "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT",
+                        "exported": true,
+                        "reason": null,
+                    },
+                },
+                {
+                    "signal": "metrics",
+                    "running": null,
+                    "configured": {
+                        "source": "settings",
+                        "endpoint": PROMETHEUS,
+                        "from": "observability.otlp_metrics_endpoint",
+                        "exported": true,
+                        "reason": null,
+                    },
+                },
+                {
+                    "signal": "logs",
+                    "running": null,
+                    "configured": {
+                        "source": "settings",
+                        "endpoint": format!("{COLLECTOR}/v1/logs"),
+                        "from": "observability.otlp_endpoint",
+                        "exported": true,
+                        "reason": null,
+                    },
+                },
+            ],
+            "restart_required": false,
+            "retired_otlp_endpoint": null,
+        })
+    );
+}
+
+#[test]
+fn a_changed_endpoint_takes_a_restart() {
+    let at_startup = with_observability(observability(COLLECTOR, ""));
+    let running = running_for(env(&[]), &at_startup);
+
+    let unchanged = observability_status(env(&[]), &at_startup, Some(running.clone()), None);
+    assert!(!unchanged.restart_required);
+    assert_eq!(unchanged.signals[0].running, Some(running[0].clone()));
+
+    for saved in [
+        observability("https://otel-collector.example.com", ""),
+        observability(COLLECTOR, PROMETHEUS),
+        ObservabilitySettings::default(),
+    ] {
+        let status = observability_status(
+            env(&[]),
+            &with_observability(saved.clone()),
+            Some(running.clone()),
+            None,
+        );
+        assert!(status.restart_required, "{saved:?}");
+    }
+
+    // A variable wins whatever settings say, so changing them changes nothing.
+    let vars = [("OTEL_EXPORTER_OTLP_ENDPOINT", "http://env-collector:4318")];
+    let running = running_for(env(&vars), &at_startup);
+    let status = observability_status(
+        env(&vars),
+        &with_observability(observability(
+            "https://otel-collector.example.com",
+            PROMETHEUS,
+        )),
+        Some(running),
+        None,
+    );
+    assert!(!status.restart_required);
+    assert!(status
+        .signals
+        .iter()
+        .all(|s| s.configured.source == crate::telemetry::endpoints::Source::Env));
+}
+
+#[test]
+fn the_retired_otlp_endpoint_gets_a_notice() {
+    let status = observability_status(
+        env(&[]),
+        &DeckwatchSettings::default(),
+        None,
+        Some("deckwatch-tempo.deckwatch.svc:4317"),
+    );
+    let notice = status.retired_otlp_endpoint.expect("notice");
+    assert_eq!(notice.value, "deckwatch-tempo.deckwatch.svc:4317");
+    assert!(
+        notice
+            .message
+            .starts_with("tracing.otlp_endpoint (deckwatch-tempo.deckwatch.svc:4317) is retired"),
+        "{}",
+        notice.message
+    );
+    assert!(notice.message.contains("OTLP/HTTP"), "{}", notice.message);
+    assert!(
+        notice.message.contains("not converted"),
+        "{}",
+        notice.message
+    );
+    // Nothing is derived from it.
+    assert!(status
+        .signals
+        .iter()
+        .all(|s| s.configured.source == crate::telemetry::endpoints::Source::Unset));
+}
+
+#[tokio::test]
+async fn the_retired_otlp_endpoint_is_reported_until_the_new_one_is_set() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let (state, mut settings) = seeded_state(tmp.path()).await;
+    settings.tracing = Some(TracingSettings {
+        otlp_endpoint: "deckwatch-tempo.deckwatch.svc:4317".to_string(),
+        otlp_insecure: true,
+        ..Default::default()
+    });
+    upsert_settings_to_db(&state.db, &settings)
+        .await
+        .expect("seed");
+
+    let Json(status) = get_observability_status(State(state.clone()))
+        .await
+        .expect("status");
+    assert_eq!(status.signals.len(), 3);
+    assert_eq!(
+        status.retired_otlp_endpoint.map(|n| n.value).as_deref(),
+        Some("deckwatch-tempo.deckwatch.svc:4317")
+    );
+
+    let Json(mut payload) = get_settings(State(state.clone())).await.expect("get");
+    payload.observability = Some(observability(COLLECTOR, ""));
+    let _ = put_settings(State(state.clone()), Json(payload))
+        .await
+        .expect("put");
+    let Json(status) = get_observability_status(State(state.clone()))
+        .await
+        .expect("status");
+    assert!(status.retired_otlp_endpoint.is_none());
+    // The old value stays stored, untouched.
+    assert_eq!(
+        load_settings_from_db(&state)
+            .await
+            .tracing
+            .map(|t| t.otlp_endpoint)
+            .as_deref(),
+        Some("deckwatch-tempo.deckwatch.svc:4317")
+    );
+    // Without endpoint variables in the test's environment, the endpoint
+    // configured now is the one from settings.
+    let env_endpoint = ["", "TRACES_", "LOGS_"].iter().any(|signal| {
+        std::env::var(format!("OTEL_EXPORTER_OTLP_{signal}ENDPOINT")).is_ok_and(|v| !v.is_empty())
+    });
+    if !env_endpoint {
+        assert_eq!(
+            status.signals[0].configured.endpoint,
+            format!("{COLLECTOR}/v1/traces")
+        );
+    }
+}

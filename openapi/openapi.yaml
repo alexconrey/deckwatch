@@ -697,8 +697,9 @@ paths:
       description: |
         Secrets come back masked on GET; masked values are restored from the
         stored copy. `credentials` and git token bindings are server-managed
-        and ignored here. Omitting `endpoints` keeps the stored endpoints.
-        Every endpoint change is written to the audit log.
+        and ignored here. Omitting `endpoints`, `observability` or `tracing`
+        keeps the stored value. Every endpoint change, OTLP endpoints included,
+        is written to the audit log.
 
         A plugin's masked `config` values are restored only while it runs the
         same code: when its `source` changes, or its `sha256` pin changes or is
@@ -711,7 +712,7 @@ paths:
             schema: { $ref: "#/components/schemas/DeckwatchSettings" }
       responses:
         "200": { description: Updated }
-        "400": { description: "Invalid endpoint (scheme, userinfo, query, host) or AI provider region, or a masked plugin value that can't be restored" }
+        "400": { description: "Invalid endpoint or OTLP endpoint (scheme, userinfo, query, host) or AI provider region, or a masked plugin value that can't be restored" }
 
   /api/settings/credentials:
     post:
@@ -751,6 +752,26 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/OutboundStatus" }
+
+  /api/settings/observability:
+    get:
+      tags: [Settings]
+      summary: Where deckwatch's own telemetry goes, now and after a restart
+      description: |
+        For each signal (traces, metrics, logs): the endpoint deckwatch exports
+        it to now, as set up at startup (`running`), and the one the
+        environment and the saved settings ask for, which applies from the
+        next start (`configured`). Per signal, an
+        `OTEL_EXPORTER_OTLP_*ENDPOINT` variable wins over the settings.
+        `retired_otlp_endpoint` is set while the retired
+        `tracing.otlp_endpoint` is set and `observability.otlp_endpoint`
+        isn't. See docs/TRACING.md, "deckwatch's own telemetry".
+      responses:
+        "200":
+          description: Export status
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ObservabilityStatus" }
 
   # ------------------------------------------- plugin-provisioned resources
   /api/namespaces/{ns}/applications/{name}/resources:
@@ -1594,6 +1615,74 @@ components:
         endpoints:
           allOf: [{ $ref: "#/components/schemas/EndpointSettings" }]
           description: Always present on GET. Omit on PUT to keep the stored endpoints.
+        observability:
+          allOf: [{ $ref: "#/components/schemas/ObservabilitySettings" }]
+          description: Always present on GET. Omit on PUT to keep the stored endpoints.
+
+    ObservabilitySettings:
+      type: object
+      description: |
+        Where deckwatch exports its own telemetry over OTLP/HTTP; "" = not
+        set. http:// or https://, no userinfo, query or fragment, at most
+        2048 characters. Read at startup: a change applies after a restart.
+        An `OTEL_EXPORTER_OTLP_*ENDPOINT` variable wins, per signal.
+      properties:
+        otlp_endpoint:
+          type: string
+          description: OTLP/HTTP base URL of a collector, for traces and logs; `/v1/traces` and `/v1/logs` are appended.
+          example: "http://otel-collector.observability:4318"
+        otlp_metrics_endpoint:
+          type: string
+          description: Full URL of an OTLP metrics receiver, used as is.
+          example: "http://prometheus.monitoring:9090/api/v1/otlp/v1/metrics"
+
+    OtlpSignalExport:
+      type: object
+      required: [source, endpoint, from, exported, reason]
+      properties:
+        source:   { type: string, enum: [env, settings, unset] }
+        endpoint: { type: string, description: 'Where the signal is sent, credentials masked; "" when unset' }
+        from:
+          type: string
+          nullable: true
+          description: The environment variable or setting the endpoint comes from.
+          example: observability.otlp_endpoint
+        exported: { type: boolean }
+        reason:
+          type: string
+          nullable: true
+          description: Why it isn't exported although it has an endpoint.
+          example: OTEL_TRACES_EXPORTER=none
+
+    ObservabilityStatus:
+      type: object
+      required: [signals, restart_required, retired_otlp_endpoint]
+      properties:
+        signals:
+          type: array
+          description: Traces, metrics and logs, in that order.
+          items:
+            type: object
+            required: [signal, running, configured]
+            properties:
+              signal: { type: string, enum: [traces, metrics, logs] }
+              running:
+                allOf: [{ $ref: "#/components/schemas/OtlpSignalExport" }]
+                nullable: true
+                description: What deckwatch exports to now, as set up at startup.
+              configured:
+                allOf: [{ $ref: "#/components/schemas/OtlpSignalExport" }]
+                description: What the environment and the saved settings ask for, used from the next start.
+        restart_required:
+          type: boolean
+          description: The saved settings send a signal somewhere else than now.
+        retired_otlp_endpoint:
+          type: object
+          nullable: true
+          required: [value, message]
+          properties:
+            value:   { type: string, example: "deckwatch-tempo.deckwatch.svc:4317" }
+            message: { type: string }
 
     EndpointId:
       type: string

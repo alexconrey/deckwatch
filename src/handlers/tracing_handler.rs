@@ -162,7 +162,7 @@ pub async fn list_traces(
 /// A missing block, an unreadable CM, or a parse failure all resolve to the
 /// default settings -- mirrors the `settings::get_settings` pattern so an
 /// unbootstrapped install still returns 200 with `unavailable_reason` set.
-async fn load_tracing_settings(state: &AppState) -> TracingSettings {
+pub(crate) async fn load_tracing_settings(state: &AppState) -> TracingSettings {
     let Ok(api) = state.configmaps_api(&state.settings_namespace) else {
         return TracingSettings::default();
     };

@@ -4,9 +4,9 @@ use axum::body::Body;
 use axum::http::{HeaderMap, StatusCode};
 use opentelemetry::logs::AnyValue;
 use opentelemetry::trace::Status;
-use opentelemetry_sdk::logs::InMemoryLogExporter;
+use opentelemetry_sdk::logs::{InMemoryLogExporter, SimpleLogProcessor};
 use opentelemetry_sdk::metrics::InMemoryMetricExporter;
-use opentelemetry_sdk::trace::InMemorySpanExporter;
+use opentelemetry_sdk::trace::{InMemorySpanExporter, SimpleSpanProcessor};
 use tower::ServiceExt as _;
 
 use super::*;
@@ -23,6 +23,13 @@ fn env(vars: &[(&str, &str)]) -> impl Fn(&str) -> Option<String> {
         .map(|(k, v)| (k.to_string(), v.to_string()))
         .collect();
     move |name| vars.iter().find(|(k, _)| k == name).map(|(_, v)| v.clone())
+}
+
+/// The signals the `OTEL_*` variables alone ask for, and their configuration
+/// problems.
+fn signals_from(get: impl Fn(&str) -> Option<String>) -> (Signals, Vec<Notice>) {
+    let plan = Plan::resolve(get, &ObservabilitySettings::default());
+    (plan.signals(), plan.notices)
 }
 
 const NONE: Signals = Signals {
@@ -53,10 +60,15 @@ fn nothing_is_exported_when_unconfigured() {
     ];
     for vars in without_endpoint {
         assert_eq!(signals_from(env(vars)), (NONE, vec![]), "{vars:?}");
-        // No providers, so no exporter threads, and nothing to log.
-        let init = Telemetry::from_lookup(env(vars));
-        assert!(init.telemetry().is_none(), "{vars:?}");
-        assert!(init.notices.is_empty(), "{vars:?}");
+        // Nothing attached, so no exporter threads, and nothing to log.
+        let telemetry = Telemetry::new();
+        let plan = telemetry.start_with(env(vars));
+        assert_eq!(telemetry.signals(), NONE, "{vars:?}");
+        assert!(plan.notices.is_empty(), "{vars:?}");
+        assert_eq!(
+            telemetry.running(),
+            Signal::ALL.map(|_| SignalStatus::unset())
+        );
     }
 }
 
@@ -248,9 +260,10 @@ fn unconfigured_log_output_is_unchanged() {
             .finish(),
         emit_sample,
     );
+    // With the OpenTelemetry layers in place, all off.
     let after = Buffer::default();
     tracing::subscriber::with_default(
-        subscriber(EnvFilter::new(DEFAULT_LOG_FILTER), None, after.clone()),
+        subscriber(EnvFilter::new(DEFAULT_LOG_FILTER), after.clone()).0,
         emit_sample,
     );
 
@@ -263,26 +276,26 @@ fn unconfigured_log_output_is_unchanged() {
 // Configured: the layers, with in-memory exporters
 // ---------------------------------------------------------------------------
 
-/// [`Telemetry`] with in-memory exporters for `signals`, behind simple
-/// (synchronous) processors instead of the batch ones.
+/// In-memory exporters for `signals`, to attach to a [`Telemetry`].
 struct InMemory {
+    signals: Signals,
     spans: InMemorySpanExporter,
     logs: InMemoryLogExporter,
     metrics: InMemoryMetricExporter,
-    telemetry: Telemetry,
+    meter_provider: Option<SdkMeterProvider>,
+    /// The pipelines they are attached to, kept for as long as the test runs
+    /// (`run` keeps its own for the life of the process). Dropping one shuts
+    /// its providers down, and the in-memory exporters forget their records
+    /// on shutdown.
+    pipelines: Mutex<Vec<Telemetry>>,
 }
 
 fn in_memory(signals: Signals) -> InMemory {
-    let spans = InMemorySpanExporter::default();
-    let logs = InMemoryLogExporter::default();
     let metrics = InMemoryMetricExporter::default();
-    let telemetry = Telemetry {
-        tracer_provider: signals.traces.then(|| {
-            SdkTracerProvider::builder()
-                .with_simple_exporter(spans.clone())
-                .with_resource(resource())
-                .build()
-        }),
+    InMemory {
+        signals,
+        spans: InMemorySpanExporter::default(),
+        logs: InMemoryLogExporter::default(),
         meter_provider: signals.metrics.then(|| {
             SdkMeterProvider::builder()
                 .with_reader(PeriodicReader::builder(metrics.clone()).build())
@@ -290,29 +303,41 @@ fn in_memory(signals: Signals) -> InMemory {
                 .with_view(mcp_duration_view)
                 .build()
         }),
-        logger_provider: signals.logs.then(|| {
-            SdkLoggerProvider::builder()
-                .with_simple_exporter(logs.clone())
-                .with_resource(resource())
-                .build()
-        }),
-    };
-    InMemory {
-        spans,
-        logs,
         metrics,
-        telemetry,
+        pipelines: Mutex::default(),
     }
 }
 
 impl InMemory {
-    /// The subscriber `run` installs, with the default log filter.
+    /// The exporters for [`Telemetry::attach`], behind simple (synchronous)
+    /// processors instead of the batch ones.
+    fn exporters(&self) -> Exporters {
+        Exporters {
+            traces: self.signals.traces.then(|| {
+                Box::new(SimpleSpanProcessor::new(self.spans.clone())) as Box<dyn SpanProcessor>
+            }),
+            metrics: self.meter_provider.clone(),
+            logs: self.signals.logs.then(|| {
+                Box::new(SimpleLogProcessor::new(self.logs.clone())) as Box<dyn LogProcessor>
+            }),
+        }
+    }
+
+    /// The subscriber `run` installs, with the default log filter and these
+    /// exporters attached.
     fn subscriber(&self) -> impl Subscriber + Send + Sync {
-        subscriber(
-            EnvFilter::new(DEFAULT_LOG_FILTER),
-            Some(&self.telemetry),
-            std::io::sink,
-        )
+        self.subscriber_with(EnvFilter::new(DEFAULT_LOG_FILTER))
+    }
+
+    fn subscriber_with(&self, filter: EnvFilter) -> impl Subscriber + Send + Sync {
+        let (subscriber, telemetry) = subscriber(filter, std::io::sink);
+        assert_eq!(telemetry.attach(self.exporters()), self.signals);
+        self.pipelines.lock().unwrap().push(telemetry);
+        subscriber
+    }
+
+    fn meter_provider(&self) -> &SdkMeterProvider {
+        self.meter_provider.as_ref().expect("metrics are attached")
     }
 
     fn spans(&self) -> Vec<opentelemetry_sdk::trace::SpanData> {
@@ -510,12 +535,7 @@ fn the_export_path_is_never_exported() {
         ..NONE
     });
     // As if RUST_LOG=trace.
-    let subscriber = subscriber(
-        EnvFilter::new("trace"),
-        Some(&otel.telemetry),
-        std::io::sink,
-    );
-    tracing::subscriber::with_default(subscriber, || {
+    tracing::subscriber::with_default(otel.subscriber_with(EnvFilter::new("trace")), || {
         let span = tracing::info_span!("request");
         let _entered = span.enter();
         tracing::debug!(target: "hyper_util::client::legacy::pool", "connecting");
@@ -547,12 +567,7 @@ fn metric_events_become_metrics() {
             "counted"
         );
     });
-    otel.telemetry
-        .meter_provider
-        .as_ref()
-        .unwrap()
-        .force_flush()
-        .unwrap();
+    otel.meter_provider().force_flush().unwrap();
 
     let exported = otel.metrics.get_finished_metrics().unwrap();
     let names: Vec<&str> = exported
@@ -565,6 +580,151 @@ fn metric_events_become_metrics() {
         names.contains(&"deckwatch_telemetry_test_events"),
         "{names:?}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Two phases: the layers start off and switch on when attached
+// ---------------------------------------------------------------------------
+
+#[test]
+fn layers_switch_on_when_their_exporter_is_attached() {
+    let otel = in_memory(Signals {
+        traces: true,
+        logs: true,
+        ..NONE
+    });
+    let (subscriber, telemetry) = subscriber(EnvFilter::new(DEFAULT_LOG_FILTER), std::io::sink);
+    tracing::subscriber::with_default(subscriber, || {
+        // Before: nothing reaches OpenTelemetry, and spans have no trace id.
+        let before = tracing::info_span!("before attach");
+        before.in_scope(|| tracing::info!("logged before attach"));
+        assert_eq!(trace_id(&before), None);
+
+        assert_eq!(
+            telemetry.attach(otel.exporters()),
+            Signals {
+                traces: true,
+                logs: true,
+                ..NONE
+            }
+        );
+        assert_eq!(telemetry.signals(), otel.signals);
+
+        let after = tracing::info_span!("after attach");
+        after.in_scope(|| tracing::info!("logged after attach"));
+        assert!(trace_id(&after).is_some());
+        // A span that started before is still not exported.
+        before.in_scope(|| tracing::info!("logged in a span from before"));
+    });
+
+    let spans = otel.spans();
+    let names: Vec<&str> = spans.iter().map(|s| s.name.as_ref()).collect();
+    assert_eq!(names, ["after attach"]);
+    let records = otel.log_records();
+    let bodies: Vec<_> = records.iter().filter_map(|r| r.record.body()).collect();
+    assert_eq!(
+        bodies,
+        [
+            &AnyValue::from("logged after attach"),
+            &AnyValue::from("logged in a span from before")
+        ]
+    );
+    let cx = records[0].record.trace_context().expect("trace context");
+    assert_eq!(cx.trace_id, spans[0].span_context.trace_id());
+    assert!(records[1].record.trace_context().is_none());
+}
+
+#[test]
+fn a_signal_attached_later_changes_what_the_others_take() {
+    // Traces first, as when they come from the environment and logs from
+    // settings: events are span events until logs are attached.
+    let traces = in_memory(Signals {
+        traces: true,
+        ..NONE
+    });
+    let logs = in_memory(Signals { logs: true, ..NONE });
+    let (subscriber, telemetry) = subscriber(EnvFilter::new(DEFAULT_LOG_FILTER), std::io::sink);
+    tracing::subscriber::with_default(subscriber, || {
+        telemetry.attach(traces.exporters());
+        tracing::info_span!("first").in_scope(|| tracing::info!("a span event"));
+        telemetry.attach(logs.exporters());
+        tracing::info_span!("second").in_scope(|| tracing::info!("a log record"));
+    });
+
+    let spans = traces.spans();
+    let events = |name: &str| -> Vec<String> {
+        spans
+            .iter()
+            .find(|s| s.name == name)
+            .unwrap()
+            .events
+            .iter()
+            .map(|e| e.name.to_string())
+            .collect()
+    };
+    assert_eq!(events("first"), ["a span event"]);
+    assert!(events("second").is_empty());
+    let records = logs.log_records();
+    assert_eq!(records.len(), 1);
+    assert_eq!(
+        records[0].record.body(),
+        Some(&AnyValue::from("a log record"))
+    );
+}
+
+#[test]
+fn metric_events_count_once_metrics_are_attached() {
+    let otel = in_memory(Signals {
+        metrics: true,
+        ..NONE
+    });
+    let (subscriber, telemetry) = subscriber(EnvFilter::new(DEFAULT_LOG_FILTER), std::io::sink);
+    tracing::subscriber::with_default(subscriber, || {
+        tracing::info!(
+            monotonic_counter.deckwatch_telemetry_late_events = 5_u64,
+            "before"
+        );
+        telemetry.attach(otel.exporters());
+        tracing::info!(
+            monotonic_counter.deckwatch_telemetry_late_events = 2_u64,
+            "after"
+        );
+    });
+    otel.meter_provider().force_flush().unwrap();
+
+    use opentelemetry_sdk::metrics::data::{AggregatedMetrics, MetricData};
+    let exported = otel.metrics.get_finished_metrics().unwrap();
+    let counter = exported
+        .iter()
+        .flat_map(|rm| rm.scope_metrics())
+        .flat_map(|sm| sm.metrics())
+        .find(|m| m.name() == "deckwatch_telemetry_late_events")
+        .expect("the counter");
+    let AggregatedMetrics::U64(MetricData::Sum(sum)) = counter.data() else {
+        panic!("not a u64 sum: {:?}", counter.data());
+    };
+    let values: Vec<u64> = sum.data_points().map(|p| p.value()).collect();
+    assert_eq!(values, [2]);
+}
+
+#[test]
+fn a_signal_is_attached_once() {
+    let first = in_memory(Signals {
+        traces: true,
+        ..NONE
+    });
+    let second = in_memory(Signals {
+        traces: true,
+        ..NONE
+    });
+    let (subscriber, telemetry) = subscriber(EnvFilter::new(DEFAULT_LOG_FILTER), std::io::sink);
+    assert!(telemetry.attach(first.exporters()).traces);
+    assert_eq!(telemetry.attach(second.exporters()), NONE);
+    tracing::subscriber::with_default(subscriber, || {
+        tracing::info_span!("exported once").in_scope(|| {});
+    });
+    assert_eq!(first.spans().len(), 1);
+    assert!(second.spans().is_empty());
 }
 
 // ---------------------------------------------------------------------------
@@ -680,12 +840,7 @@ async fn mcp_metric_events_become_the_duration_histogram_and_nothing_else() {
     let otel = in_memory(ALL);
     let _guard = tracing::subscriber::set_default(otel.subscriber());
     mcp_tool_call(None, None).await;
-    otel.telemetry
-        .meter_provider
-        .as_ref()
-        .unwrap()
-        .force_flush()
-        .unwrap();
+    otel.meter_provider().force_flush().unwrap();
 
     use opentelemetry_sdk::metrics::data::{AggregatedMetrics, MetricData};
     let exported = otel.metrics.get_finished_metrics().unwrap();
@@ -772,7 +927,17 @@ async fn collector(body: Vec<u8>) -> (std::net::SocketAddr, Received) {
 /// `request` through [`ObservabilityClient`] from a plain OS thread with no
 /// Tokio runtime, like the SDK's batch processors.
 async fn send_from_plain_thread(request: Request<Bytes>) -> Result<Response<Bytes>, HttpError> {
-    let client = ObservabilityClient::new(tokio::runtime::Handle::current());
+    send_from_plain_thread_with(
+        ObservabilityClient::new(tokio::runtime::Handle::current()),
+        request,
+    )
+    .await
+}
+
+async fn send_from_plain_thread_with(
+    client: ObservabilityClient,
+    request: Request<Bytes>,
+) -> Result<Response<Bytes>, HttpError> {
     tokio::task::spawn_blocking(move || {
         std::thread::spawn(move || futures::executor::block_on(client.send_bytes(request)))
             .join()
@@ -845,4 +1010,177 @@ async fn the_exporter_refuses_oversized_responses() {
         err.downcast_ref::<ResponseBodyTooLarge>().is_some(),
         "{err}"
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_endpoint_from_settings_gets_no_exporter_headers() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let (addr, received) = collector(b"accepted".to_vec()).await;
+
+    // What the SDK sends when OTEL_EXPORTER_OTLP_HEADERS is set.
+    let request = Request::post(format!("http://{addr}/v1/traces"))
+        .header("content-type", "application/x-protobuf")
+        .header("content-encoding", "gzip")
+        .header("user-agent", "OTel-OTLP-Exporter-Rust/0.33.1")
+        .header("authorization", "Bearer otlp-token")
+        .header("x-api-key", "otlp-key")
+        .body(Bytes::from_static(b"spans"))
+        .unwrap();
+    let client =
+        ObservabilityClient::new(tokio::runtime::Handle::current()).without_exporter_headers();
+    let response = send_from_plain_thread_with(client, request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let received = received.lock().unwrap();
+    let (headers, body) = &received[0];
+    assert_eq!(body.as_ref(), b"spans");
+    assert_eq!(headers["content-type"], "application/x-protobuf");
+    assert_eq!(headers["content-encoding"], "gzip");
+    assert!(headers.get("authorization").is_none(), "{headers:?}");
+    assert!(headers.get("x-api-key").is_none(), "{headers:?}");
+    assert_eq!(headers["user-agent"], outbound::user_agent().as_str());
+}
+
+type Posted = Arc<Mutex<Vec<(String, HeaderMap)>>>;
+
+/// An OTLP receiver stand-in on 127.0.0.1 that records the path and headers
+/// of every POST and accepts it.
+async fn otlp_receiver() -> (std::net::SocketAddr, Posted) {
+    let posted = Posted::default();
+    let app = axum::Router::new().fallback({
+        let posted = posted.clone();
+        move |uri: axum::http::Uri, headers: HeaderMap| async move {
+            posted
+                .lock()
+                .unwrap()
+                .push((uri.path().to_string(), headers));
+            StatusCode::OK
+        }
+    });
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    (addr, posted)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_second_phase_exports_to_the_endpoints_in_settings() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let (addr, posted) = otlp_receiver().await;
+    let (subscriber, telemetry) = subscriber(EnvFilter::new(DEFAULT_LOG_FILTER), std::io::sink);
+    let _guard = tracing::subscriber::set_default(subscriber);
+
+    // Startup: no variable sets an endpoint, so nothing is exported yet.
+    assert!(!telemetry.start_with(env(&[])).signals().any());
+    assert_eq!(telemetry.signals(), NONE);
+
+    // Once settings are read: the collector endpoint carries traces and logs.
+    let settings = ObservabilitySettings {
+        otlp_endpoint: format!("http://{addr}/otlp/"),
+        otlp_metrics_endpoint: String::new(),
+    };
+    telemetry.apply_settings_with(env(&[]), &settings);
+    assert_eq!(
+        telemetry.signals(),
+        Signals {
+            traces: true,
+            logs: true,
+            ..NONE
+        }
+    );
+
+    tracing::info_span!("settings phase").in_scope(|| tracing::info!("sent to the collector"));
+    let flushed = telemetry.clone();
+    tokio::task::spawn_blocking(move || {
+        flushed.inner.tracer_provider.force_flush().unwrap();
+        flushed.inner.logger_provider.force_flush().unwrap();
+    })
+    .await
+    .unwrap();
+
+    let posted = posted.lock().unwrap();
+    let mut paths: Vec<&str> = posted.iter().map(|(path, _)| path.as_str()).collect();
+    paths.sort_unstable();
+    paths.dedup();
+    assert_eq!(paths, ["/otlp/v1/logs", "/otlp/v1/traces"]);
+    for (_, headers) in posted.iter() {
+        assert_eq!(headers["content-type"], "application/x-protobuf");
+    }
+
+    let running = telemetry.running();
+    assert_eq!(
+        running[0],
+        SignalStatus {
+            source: Source::Settings,
+            endpoint: format!("http://{addr}/otlp/v1/traces"),
+            from: Some("observability.otlp_endpoint".to_string()),
+            exported: true,
+            reason: None,
+        }
+    );
+    assert_eq!(running[1], SignalStatus::unset());
+    assert_eq!(running[2].endpoint, format!("http://{addr}/otlp/v1/logs"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_environment_keeps_its_signals_in_the_second_phase() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let (addr, _) = otlp_receiver().await;
+    let traces_endpoint = format!("http://{addr}/env/v1/traces");
+    let vars = [(
+        "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT",
+        traces_endpoint.as_str(),
+    )];
+    let telemetry = Telemetry::new();
+
+    let plan = telemetry.start_with(env(&vars));
+    assert_eq!(
+        telemetry.signals(),
+        Signals {
+            traces: true,
+            ..NONE
+        }
+    );
+    assert_eq!(plan.signal(Signal::Traces).source, Source::Env);
+
+    let settings = ObservabilitySettings {
+        otlp_endpoint: format!("http://{addr}/collector"),
+        otlp_metrics_endpoint: format!("http://{addr}/api/v1/otlp/v1/metrics"),
+    };
+    telemetry.apply_settings_with(env(&vars), &settings);
+    assert_eq!(telemetry.signals(), ALL);
+    let running = telemetry.running();
+    assert_eq!(running[0].source, Source::Env);
+    assert_eq!(running[0].endpoint, traces_endpoint);
+    assert_eq!(
+        running[0].from.as_deref(),
+        Some("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT")
+    );
+    assert_eq!(running[1].source, Source::Settings);
+    assert_eq!(
+        running[1].endpoint,
+        format!("http://{addr}/api/v1/otlp/v1/metrics")
+    );
+    assert_eq!(running[2].source, Source::Settings);
+    assert_eq!(
+        running[2].endpoint,
+        format!("http://{addr}/collector/v1/logs")
+    );
+}
+
+#[test]
+fn signals_the_environment_turns_off_are_reported_as_running_nowhere() {
+    let telemetry = Telemetry::new();
+    telemetry.start_with(env(&[("OTEL_SDK_DISABLED", "true")]));
+    let settings = ObservabilitySettings {
+        otlp_endpoint: "http://otel-collector.observability:4318".to_string(),
+        otlp_metrics_endpoint: String::new(),
+    };
+    // Nothing to attach, so no runtime is needed.
+    telemetry.apply_settings_with(env(&[("OTEL_SDK_DISABLED", "true")]), &settings);
+    assert_eq!(telemetry.signals(), NONE);
+    let traces = &telemetry.running()[0];
+    assert_eq!(traces.source, Source::Settings);
+    assert!(!traces.exported);
+    assert_eq!(traces.reason.as_deref(), Some("OTEL_SDK_DISABLED=true"));
 }

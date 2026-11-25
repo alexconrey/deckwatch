@@ -15,6 +15,9 @@ use crate::outbound::{
     display_origin, Endpoint, EndpointBinding, EndpointId, EndpointPolicy, EndpointSettings,
 };
 use crate::state::AppState;
+use crate::telemetry::endpoints::{
+    EndpointField, ObservabilitySettings, Plan, Signal, SignalStatus,
+};
 
 const SETTINGS_KEY: &str = "settings";
 const DB_SETTINGS_KEY: &str = "main";
@@ -55,12 +58,21 @@ pub struct DeckwatchSettings {
     /// the secret name per deployment.
     #[serde(default)]
     pub git_token_secrets: Vec<GitTokenSecret>,
-    /// Distributed-tracing wiring for the OpenTelemetry Collector and the
-    /// trace-viewer UI. Optional so a settings ConfigMap that predates
-    /// this field still deserializes; a missing block means "tracing not
-    /// configured" and the tracing handler returns `unavailable_reason`.
+    /// The trace viewer: where deckwatch queries traces and links to them.
+    /// Optional so a settings ConfigMap that predates this field still
+    /// deserializes; a missing block means "tracing not configured" and the
+    /// tracing handler returns `unavailable_reason`. A PUT that omits it
+    /// keeps the stored value (the Settings page doesn't edit it).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tracing: Option<TracingSettings>,
+    /// Where deckwatch sends its own traces, log lines and metrics over
+    /// OTLP/HTTP (Settings → Observability). Read at startup, so a change
+    /// applies at the next restart, and an `OTEL_EXPORTER_OTLP_*ENDPOINT`
+    /// variable wins, per signal (`crate::telemetry::endpoints`). GET always
+    /// returns the object; a PUT that omits it keeps the stored value.
+    /// Validated on PUT, and every change is audit-logged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observability: Option<ObservabilitySettings>,
     /// Runtime toggle for Prometheus monitoring features (PodMonitor CRD
     /// management, per-deployment scrape configuration). When false, the
     /// monitoring endpoints return 404 and the frontend hides the section.
@@ -341,30 +353,31 @@ pub struct GitTokenSecret {
     pub binding: Option<EndpointBinding>,
 }
 
-/// Distributed-tracing consumer settings. Written by the operator, read by
-/// the tracing handler and the OpenTelemetry Collector. See
-/// `docs/TRACING.md` sec 6.3 for the mapping to values.yaml.
+/// The trace viewer's settings: where the tracing handler queries trace
+/// summaries (`query_url`) and where the UI links to a trace (`ui_url`,
+/// `backend_kind`). Written by the operator, through Helm
+/// (`settings.defaults.tracing`, see `docs/TRACING.md` sec 6.3) or the
+/// settings API.
 ///
-/// Split into `otlp_endpoint` (write path: where the sidecar collector
-/// exports to) and `query_url` (read path: where deckwatch pulls trace
-/// summaries from) because Tempo/Jaeger typically expose different ports
-/// for each -- 4317/gRPC vs 3200/HTTP for Tempo, 4317/gRPC vs 16686/HTTP
-/// for Jaeger. Collapsing them into one field would force operators to
-/// pick which one to break.
+/// `otlp_endpoint` and `otlp_insecure` are retired: they described a gRPC
+/// write path for the OpenTelemetry Collector plugin, which is gone, and
+/// nothing exports to them. deckwatch's own export uses
+/// [`ObservabilitySettings`] (OTLP/HTTP). They stay so stored documents keep
+/// their values, and while `otlp_endpoint` is set and
+/// `observability.otlp_endpoint` isn't, deckwatch asks for the OTLP/HTTP
+/// endpoint ([`retired_otlp_endpoint`]). The old value is not converted.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct TracingSettings {
     /// `tempo` | `jaeger`. Controls the trace-URL template used by the
     /// frontend "Open in UI" deep-link. Blank/unknown defaults to `tempo`.
     #[serde(default)]
     pub backend_kind: String,
-    /// OTLP gRPC endpoint the OpenTelemetry Collector exports to.
-    /// Empty means no external tracing backend is configured --
-    /// operators must set this for spans to actually leave the pod.
+    /// Retired: was an OTLP/gRPC endpoint (`host:port`) for the OpenTelemetry
+    /// Collector plugin. Not used; see [`TracingSettings`].
     #[serde(default)]
     pub otlp_endpoint: String,
-    /// True when the OTLP endpoint is plaintext gRPC. In-cluster deployments
-    /// typically want `true`; managed backends (Grafana Cloud, Honeycomb)
-    /// need `false`.
+    /// Retired with `otlp_endpoint`: whether that endpoint was plaintext.
+    /// Not used.
     #[serde(default)]
     pub otlp_insecure: bool,
     /// HTTP URL the tracing handler proxies through to fetch trace summaries.
@@ -593,6 +606,9 @@ pub async fn get_settings(
     settings
         .endpoints
         .get_or_insert_with(EndpointSettings::default);
+    settings
+        .observability
+        .get_or_insert_with(ObservabilitySettings::default);
     // This route is public (the SPA reads `auth` from it before login), so
     // it must never return secrets: replace them with MASKED_VALUE.
     mask_secrets(&mut settings, &public_plugin_config_keys(&state).await);
@@ -870,6 +886,11 @@ pub async fn put_settings(
 
     let policy = crate::outbound::global().policy();
     let endpoint_changes = apply_endpoint_update(&mut settings, &stored, &policy)?;
+    let observability_changes = apply_observability_update(&mut settings, &stored)?;
+    // The Settings page doesn't edit (or send) the trace viewer's settings.
+    if settings.tracing.is_none() {
+        settings.tracing.clone_from(&stored.tracing);
+    }
     validate_ai_provider_region(&settings.ai_provider)?;
     // Plugins that now run other code.
     let plugin_changes: Vec<(String, &str)> = settings
@@ -927,6 +948,22 @@ pub async fn put_settings(
         }
     }
 
+    for change in &observability_changes {
+        if let Err(e) = crate::audit::log_action(
+            &state.db,
+            "update",
+            "settings",
+            change.field.setting(),
+            "",
+            &change.describe(),
+            "",
+        )
+        .await
+        {
+            tracing::warn!(error = %e, "failed to write audit log for OTLP endpoint change");
+        }
+    }
+
     // A removed or disabled plugin stops running now, even the last one.
     crate::plugins::unload_disabled(&state, &settings).await;
 
@@ -968,9 +1005,65 @@ pub async fn put_settings(
     result
         .endpoints
         .get_or_insert_with(EndpointSettings::default);
+    result
+        .observability
+        .get_or_insert_with(ObservabilitySettings::default);
     mask_secrets(&mut result, &public_plugin_config_keys(&state).await);
 
     Ok(Json(result))
+}
+
+/// One OTLP endpoint changed by a settings PUT.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ObservabilityChange {
+    pub field: EndpointField,
+    /// Stored value before ("" = not set).
+    pub from: String,
+    /// Stored value after ("" = not set).
+    pub to: String,
+}
+
+impl ObservabilityChange {
+    /// Audit-log text.
+    pub fn describe(&self) -> String {
+        let show = |v: &str| {
+            if v.is_empty() {
+                "not set".to_string()
+            } else {
+                v.to_string()
+            }
+        };
+        format!(
+            "{} changed from {} to {}; deckwatch's own telemetry uses it after a restart",
+            self.field.setting(),
+            show(&self.from),
+            show(&self.to)
+        )
+    }
+}
+
+/// Validate and normalize `incoming.observability` against `stored`. A
+/// missing block keeps the stored one. Returns the endpoints that changed.
+pub fn apply_observability_update(
+    incoming: &mut DeckwatchSettings,
+    stored: &DeckwatchSettings,
+) -> Result<Vec<ObservabilityChange>, AppError> {
+    let before = stored.observability.clone().unwrap_or_default();
+    let after = match incoming.observability.take() {
+        None => before.clone(),
+        Some(requested) => requested.validated().map_err(AppError::BadRequest)?,
+    };
+    let changes = [EndpointField::Otlp, EndpointField::OtlpMetrics]
+        .into_iter()
+        .filter(|field| before.get(*field) != after.get(*field))
+        .map(|field| ObservabilityChange {
+            field,
+            from: before.get(field).to_string(),
+            to: after.get(field).to_string(),
+        })
+        .collect();
+    incoming.observability = (!after.is_empty()).then_some(after);
+    Ok(changes)
 }
 
 /// One endpoint changed by a settings PUT.
@@ -1212,6 +1305,7 @@ fn default_settings(state: &AppState) -> DeckwatchSettings {
         oci_registries: Vec::new(),
         git_token_secrets: Vec::new(),
         tracing: Some(TracingSettings::default()),
+        observability: None,
         prometheus_enabled: true,
         ai_claude_enabled: true,
         ai_codex_enabled: true,
@@ -1687,6 +1781,141 @@ pub async fn get_outbound_status(
 ) -> Result<Json<OutboundStatus>, AppError> {
     let settings = load_settings_from_db(&state).await;
     Ok(Json(outbound_status(&settings, crate::outbound::global())))
+}
+
+// ---- deckwatch's own telemetry ----
+
+/// `GET /api/settings/observability`: where each signal of deckwatch's own
+/// telemetry goes now and after a restart, and the notice about the retired
+/// `tracing.otlp_endpoint`, for the Settings page.
+#[derive(Debug, Serialize)]
+pub struct ObservabilityStatus {
+    /// Traces, metrics and logs, in that order.
+    pub signals: Vec<ObservabilitySignal>,
+    /// The saved settings send a signal somewhere other than where it goes
+    /// now: deckwatch reads the endpoints at startup, so that takes a
+    /// restart.
+    pub restart_required: bool,
+    /// Set while the retired `tracing.otlp_endpoint` is set and
+    /// `observability.otlp_endpoint` isn't.
+    pub retired_otlp_endpoint: Option<RetiredOtlpEndpoint>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ObservabilitySignal {
+    pub signal: Signal,
+    /// What deckwatch exports the signal to now, as set up when it started.
+    /// `None` until startup has read the settings.
+    pub running: Option<SignalStatus>,
+    /// What the environment and the saved settings ask for: deckwatch uses
+    /// it from its next start.
+    pub configured: SignalStatus,
+}
+
+/// The notice about the retired `tracing.otlp_endpoint`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct RetiredOtlpEndpoint {
+    /// The old value, credentials masked.
+    pub value: String,
+    pub message: String,
+}
+
+impl RetiredOtlpEndpoint {
+    fn new(value: &str) -> RetiredOtlpEndpoint {
+        let value = crate::redact::url(value);
+        RetiredOtlpEndpoint {
+            message: format!(
+                "tracing.otlp_endpoint ({value}) is retired and deckwatch doesn't use it. Set \
+                 observability.otlp_endpoint to your collector's OTLP/HTTP endpoint, such as \
+                 http://otel-collector.observability:4318. The old value was an OTLP/gRPC \
+                 endpoint (usually port 4317, where OTLP/HTTP is usually 4318), and it is not \
+                 converted."
+            ),
+            value,
+        }
+    }
+}
+
+/// Compute [`ObservabilityStatus`]: `configured` from the `OTEL_*` variables
+/// (read through `get`) and `settings`, `running` from what startup set up,
+/// and `retired`, the value of `tracing.otlp_endpoint` if it is still set
+/// ([`retired_otlp_endpoint`]).
+pub fn observability_status(
+    get: impl Fn(&str) -> Option<String>,
+    settings: &DeckwatchSettings,
+    running: Option<[SignalStatus; 3]>,
+    retired: Option<&str>,
+) -> ObservabilityStatus {
+    let plan = Plan::resolve(get, &settings.observability.clone().unwrap_or_default());
+    let signals: Vec<ObservabilitySignal> = plan
+        .all()
+        .iter()
+        .enumerate()
+        .map(|(i, configured)| ObservabilitySignal {
+            signal: configured.signal,
+            running: running.as_ref().map(|r| r[i].clone()),
+            configured: configured.status(),
+        })
+        .collect();
+    let restart_required = signals.iter().any(|s| {
+        s.running.as_ref().is_some_and(|running| {
+            running.source != s.configured.source || running.endpoint != s.configured.endpoint
+        })
+    });
+    ObservabilityStatus {
+        signals,
+        restart_required,
+        retired_otlp_endpoint: retired.map(RetiredOtlpEndpoint::new),
+    }
+}
+
+pub async fn get_observability_status(
+    State(state): State<AppState>,
+) -> Result<Json<ObservabilityStatus>, AppError> {
+    let settings = load_settings_from_db(&state).await;
+    let retired = retired_otlp_endpoint(&state, &settings).await;
+    Ok(Json(observability_status(
+        |name| std::env::var(name).ok(),
+        &settings,
+        crate::telemetry::global().map(|t| t.running()),
+        retired.as_deref(),
+    )))
+}
+
+/// The retired `tracing.otlp_endpoint`, while it is still set and
+/// `observability.otlp_endpoint` isn't. Stored settings first, then the
+/// settings ConfigMap, where the chart renders `settings.defaults.tracing`
+/// and where the trace viewer reads its settings from.
+pub async fn retired_otlp_endpoint(
+    state: &AppState,
+    settings: &DeckwatchSettings,
+) -> Option<String> {
+    let set = |value: &str| Some(value.trim().to_string()).filter(|v| !v.is_empty());
+    if settings
+        .observability
+        .as_ref()
+        .and_then(|o| set(&o.otlp_endpoint))
+        .is_some()
+    {
+        return None;
+    }
+    if let Some(value) = settings
+        .tracing
+        .as_ref()
+        .and_then(|t| set(&t.otlp_endpoint))
+    {
+        return Some(value);
+    }
+    let from_configmap = crate::handlers::tracing_handler::load_tracing_settings(state).await;
+    set(&from_configmap.otlp_endpoint)
+}
+
+/// At startup, log the notice about the retired `tracing.otlp_endpoint`
+/// when it applies.
+pub async fn warn_about_retired_otlp_endpoint(state: &AppState, settings: &DeckwatchSettings) {
+    if let Some(value) = retired_otlp_endpoint(state, settings).await {
+        tracing::warn!("{}", RetiredOtlpEndpoint::new(&value).message);
+    }
 }
 
 #[cfg(test)]
