@@ -228,21 +228,20 @@ pub async fn upload_plugin_wasm(
     if let Some(cfg) = plugin_snapshot {
         tokio::spawn(async move {
             let s = crate::handlers::settings::DeckwatchSettings {
-                plugins: vec![cfg],
+                plugins: vec![cfg.clone()],
                 ..Default::default()
             };
             let reloaded = crate::plugins::fetch_plugins(&s, &state_clone).await;
             if reloaded.is_empty() {
                 tracing::warn!(plugin = %name_clone, "uploaded plugin failed to load; it is now unloaded");
             }
-            let mut plugins = state_clone.plugins.write().await;
-            crate::plugins::merge_reloaded_plugin(&mut plugins, &name_clone, reloaded);
-            // fetch_plugins set the gauge from the single-plugin fetch; restore
-            // it to the real number of loaded plugins.
-            crate::metrics::set_plugins_loaded(plugins.len() as f64);
-            tracing::info!(plugin = %name_clone, loaded = plugins.len(), "plugin reload after upload");
-            drop(plugins);
-            state_clone.plugin_patch_fingerprints.lock().await.clear();
+            let installed = crate::plugins::install_reload(
+                &state_clone,
+                crate::plugins::ReloadedFrom::One(&cfg),
+                reloaded,
+            )
+            .await;
+            tracing::info!(plugin = %name_clone, installed, "plugin reload after upload");
         });
     }
 

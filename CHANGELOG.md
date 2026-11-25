@@ -454,6 +454,13 @@ first.
   with `"configured"`. (#207)
 - Uploading a plugin no longer unloads every other plugin until the next
   reload, and `deckwatch_plugins_loaded` reports the real count. (#209)
+- **Removed and disabled plugins stop running.** Removing the last plugin in
+  Settings left it loaded, still running on every reconcile and deployment
+  change, until deckwatch restarted; now a settings save unloads every plugin
+  it removes or disables before it responds. And a background reload that
+  finished after a newer change (another save, MCP `disable_plugin`) put its
+  older result back, reviving a disabled plugin or an old config; a reload
+  whose plugin settings changed while it ran is now dropped. (#XXX)
 - Removing an application's last plugin resource releases what the plugin
   applied to its Deployments and CronJobs within one reconcile (10 s). Before,
   those fields stayed, and plugins kept acting on them: deckwatch-plugin-aws

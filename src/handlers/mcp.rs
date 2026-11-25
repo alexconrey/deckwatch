@@ -2373,29 +2373,31 @@ async fn tool_enable_plugin(state: &AppState, args: &serde_json::Value) -> Resul
     // Load the plugin now, so the result says whether it works: fetch,
     // checksum, metadata() and version-check problems come back as events.
     // Other loaded plugins are left alone.
-    let snap = settings::plugin_fetch_settings(state, vec![enabled_cfg]).await;
+    let snap = settings::plugin_fetch_settings(state, vec![enabled_cfg.clone()]).await;
     let reloaded = crate::plugins::fetch_plugins(&snap, state).await;
     let loaded = !reloaded.is_empty();
-    {
-        let mut plugins = state.plugins.write().await;
-        crate::plugins::merge_reloaded_plugin(&mut plugins, name, reloaded);
-        // fetch_plugins set the gauge from the single-plugin load.
-        crate::metrics::set_plugins_loaded(plugins.len() as f64);
-        tracing::info!(
-            plugin = name,
-            loaded,
-            count = plugins.len(),
-            "plugin loaded after enable"
-        );
-    }
-    state.plugin_patch_fingerprints.lock().await.clear();
+    // A disable or change that landed while it loaded wins.
+    let installed = crate::plugins::install_reload(
+        state,
+        crate::plugins::ReloadedFrom::One(&enabled_cfg),
+        reloaded,
+    )
+    .await;
+    tracing::info!(
+        plugin = name,
+        loaded,
+        installed,
+        "plugin loaded after enable"
+    );
     let events = state.plugin_telemetry.last_load(name).unwrap_or_default();
 
     let text = serde_json::json!({
         "name": name,
         "enabled": true,
-        "loaded": loaded,
-        "status": if loaded {
+        "loaded": loaded && installed,
+        "status": if !installed {
+            "enabled, but its settings changed while it loaded, so this load was dropped"
+        } else if loaded {
             "enabled and loaded"
         } else {
             "enabled, but the plugin failed to load; see the plugin events below"
@@ -2537,16 +2539,21 @@ async fn tool_update_plugin_config(
         .await
         .map_err(|e| format!("failed to save settings: {e}"))?;
 
-    // Reload the plugin with updated config in the background.
+    // Reload the plugin with updated config in the background, unless the
+    // plugin settings change again meanwhile.
     if s.plugins.iter().any(|p| p.name == name && p.enabled) {
         let state_clone = state.clone();
         let plugins_cfg = s.plugins.clone();
         tokio::spawn(async move {
-            let snap = settings::plugin_fetch_settings(&state_clone, plugins_cfg).await;
+            let snap = settings::plugin_fetch_settings(&state_clone, plugins_cfg.clone()).await;
             let loaded = crate::plugins::fetch_plugins(&snap, &state_clone).await;
             tracing::info!(count = loaded.len(), "plugins reloaded after config update");
-            *state_clone.plugins.write().await = loaded;
-            state_clone.plugin_patch_fingerprints.lock().await.clear();
+            crate::plugins::install_reload(
+                &state_clone,
+                crate::plugins::ReloadedFrom::All(&plugins_cfg),
+                loaded,
+            )
+            .await;
         });
     }
 

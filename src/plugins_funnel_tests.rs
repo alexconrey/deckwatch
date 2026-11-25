@@ -504,3 +504,98 @@ fn a_service_account_conflict_is_a_policy_rejection_but_reapplying_is_not() {
         assert_eq!(report.wanted_service_accounts.len(), 1);
     }
 }
+
+// ---------------------------------------------------------------------------
+// Installing a reload's result
+// ---------------------------------------------------------------------------
+
+fn configured(name: &str, enabled: bool) -> PluginConfig {
+    PluginConfig {
+        name: name.into(),
+        enabled,
+        source: PluginSource::Url {
+            url: format!("https://plugins.example.com/{name}.wasm"),
+        },
+        token_secret: None,
+        allowed_hosts: vec![],
+        config: Default::default(),
+        inherit_env_keys: vec![],
+        inherit_env_file_keys: Default::default(),
+        sha256: None,
+        mcp_tuning: Default::default(),
+    }
+}
+
+async fn save_plugins(state: &AppState, plugins: Vec<PluginConfig>) {
+    let mut settings = crate::handlers::settings::load_settings_from_db(state).await;
+    settings.plugins = plugins;
+    crate::handlers::settings::upsert_settings_to_db_pub(&state.db, &settings)
+        .await
+        .unwrap();
+}
+
+fn loaded_names(plugins: &[LoadedPlugin]) -> Vec<&str> {
+    plugins.iter().map(|p| p.name.as_str()).collect()
+}
+
+/// A reload started from settings that have changed since can't bring back
+/// what the change removed.
+#[tokio::test]
+async fn a_reload_from_outdated_settings_is_dropped() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = crate::plugin_fixture::test_state(dir.path(), vec![], None).await;
+    let started_from = vec![configured("aws", true), configured("otel", true)];
+    let result = vec![
+        FixturePlugin::new().loaded("aws"),
+        FixturePlugin::new().loaded("otel"),
+    ];
+
+    // `aws` was disabled while the reload ran.
+    save_plugins(
+        &state,
+        vec![configured("aws", false), configured("otel", true)],
+    )
+    .await;
+    *state.plugins.write().await = vec![FixturePlugin::new().loaded("otel")];
+    assert!(!install_reload(&state, ReloadedFrom::All(&started_from), result.clone()).await);
+    assert_eq!(loaded_names(&state.plugins.read().await), ["otel"]);
+
+    // A single-plugin reload (upload, enable_plugin) of a plugin whose
+    // config changed, or that was removed, is dropped too.
+    let mut changed = configured("aws", true);
+    changed.config.insert("K".into(), "new".into());
+    save_plugins(&state, vec![changed]).await;
+    let one = configured("aws", true);
+    assert!(!install_reload(&state, ReloadedFrom::One(&one), result[..1].to_vec()).await);
+    save_plugins(&state, vec![]).await;
+    assert!(!install_reload(&state, ReloadedFrom::One(&one), result[..1].to_vec()).await);
+    assert_eq!(loaded_names(&state.plugins.read().await), ["otel"]);
+
+    // Unchanged settings: installed.
+    save_plugins(&state, started_from.clone()).await;
+    assert!(install_reload(&state, ReloadedFrom::All(&started_from), result.clone()).await);
+    assert_eq!(loaded_names(&state.plugins.read().await), ["aws", "otel"]);
+    let replacement = vec![FixturePlugin::new().loaded("aws")];
+    assert!(install_reload(&state, ReloadedFrom::One(&started_from[0]), replacement).await);
+    assert_eq!(loaded_names(&state.plugins.read().await), ["aws", "otel"]);
+}
+
+#[tokio::test]
+async fn unload_disabled_drops_what_settings_no_longer_enable() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = crate::plugin_fixture::test_state(
+        dir.path(),
+        vec![
+            FixturePlugin::new().loaded("aws"),
+            FixturePlugin::new().loaded("otel"),
+        ],
+        None,
+    )
+    .await;
+    let settings = DeckwatchSettings {
+        plugins: vec![configured("aws", false)],
+        ..Default::default()
+    };
+    unload_disabled(&state, &settings).await;
+    assert!(state.plugins.read().await.is_empty());
+}

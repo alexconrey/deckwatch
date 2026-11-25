@@ -658,6 +658,77 @@ pub fn merge_reloaded_plugin(
     }
 }
 
+/// Which plugin settings a reload loaded from, to tell whether its result is
+/// still current when it finishes.
+pub enum ReloadedFrom<'a> {
+    /// Every configured plugin (a settings save, `update_plugin_config`): the
+    /// result replaces the loaded set.
+    All(&'a [PluginConfig]),
+    /// One plugin (an upload, `enable_plugin`): the result replaces that
+    /// plugin only ([`merge_reloaded_plugin`]).
+    One(&'a PluginConfig),
+}
+
+/// Install the result of a reload, unless the plugin settings changed while
+/// it ran. Returns whether it was installed.
+///
+/// Reloads run from the settings saved when they started, and can take a
+/// while (downloads, `metadata()`). A newer save, `disable_plugin` or a
+/// removal may have landed meanwhile; installing the older result would
+/// bring back a plugin that was just disabled or removed, or an old config.
+/// The settings are compared while holding the write lock, and every change
+/// to plugin settings is saved before it touches the loaded set, so a newer
+/// change is either seen here (and the result dropped: that change installs
+/// its own) or applied after this install.
+pub async fn install_reload(
+    state: &AppState,
+    from: ReloadedFrom<'_>,
+    reloaded: Vec<LoadedPlugin>,
+) -> bool {
+    let mut plugins = state.plugins.write().await;
+    let current = crate::handlers::settings::load_settings_from_db(state)
+        .await
+        .plugins;
+    let same = |a: &[PluginConfig], b: &[PluginConfig]| {
+        serde_json::to_value(a).ok() == serde_json::to_value(b).ok()
+    };
+    let still_current = match &from {
+        ReloadedFrom::All(configs) => same(&current, configs),
+        ReloadedFrom::One(cfg) => current
+            .iter()
+            .find(|c| c.name == cfg.name)
+            .is_some_and(|c| same(std::slice::from_ref(c), std::slice::from_ref(*cfg))),
+    };
+    if !still_current {
+        tracing::info!("plugin settings changed during a reload; its result is dropped");
+        return false;
+    }
+    match from {
+        ReloadedFrom::All(_) => *plugins = reloaded,
+        ReloadedFrom::One(cfg) => merge_reloaded_plugin(&mut plugins, &cfg.name, reloaded),
+    }
+    // fetch_plugins set the gauge from what it loaded; set it from the set.
+    metrics::set_plugins_loaded(plugins.len() as f64);
+    drop(plugins);
+    state.plugin_patch_fingerprints.lock().await.clear();
+    true
+}
+
+/// Drop every loaded plugin that `settings` doesn't enable, right away: a
+/// plugin that was removed or disabled stops running without waiting for a
+/// reload. Call it after saving `settings`.
+pub async fn unload_disabled(state: &AppState, settings: &DeckwatchSettings) {
+    let enabled = enabled_plugin_names(settings);
+    let mut plugins = state.plugins.write().await;
+    let before = plugins.len();
+    plugins.retain(|p| enabled.contains(&p.name));
+    if plugins.len() != before {
+        metrics::set_plugins_loaded(plugins.len() as f64);
+        drop(plugins);
+        state.plugin_patch_fingerprints.lock().await.clear();
+    }
+}
+
 /// Current UTC time as an RFC 3339 string, without a direct `chrono` dependency.
 fn now_rfc3339() -> String {
     let d = std::time::SystemTime::now()

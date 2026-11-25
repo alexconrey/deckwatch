@@ -325,3 +325,80 @@ async fn get_events_shows_plugin_events_fenced() {
     let at = text.find(INJECTION).unwrap();
     assert!(begin < at && at < end, "{text}");
 }
+
+/// Serve `bytes` on localhost, each response held until `release` is
+/// notified; returns the URL and how many responses were sent.
+async fn serve_gated(
+    bytes: Vec<u8>,
+    release: std::sync::Arc<tokio::sync::Notify>,
+) -> (String, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+    let served = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counter = served.clone();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let app = axum::Router::new().route(
+        "/plugin.wasm",
+        axum::routing::get(move || {
+            let bytes = bytes.clone();
+            let release = release.clone();
+            let counter = counter.clone();
+            async move {
+                release.notified().await;
+                counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                bytes
+            }
+        }),
+    );
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    (format!("http://{addr}/plugin.wasm"), served)
+}
+
+/// A background reload that finishes after `disable_plugin` used to put the
+/// disabled plugin back.
+#[tokio::test]
+async fn a_reload_finishing_after_a_disable_does_not_bring_the_plugin_back() {
+    let plugin = FixturePlugin::new().export("apply", Behavior::output("{}"));
+    let release = std::sync::Arc::new(tokio::sync::Notify::new());
+    let (url, served) = serve_gated(plugin.wasm(), release.clone()).await;
+    let dir = tempfile::tempdir().unwrap();
+    let state = test_state(dir.path(), vec![plugin.loaded("demo")], None).await;
+    configure(&state, &url, None).await;
+    let mut s = settings::load_settings_from_db(&state).await;
+    s.plugins[0].enabled = true;
+    settings::upsert_settings_to_db_pub(&state.db, &s)
+        .await
+        .unwrap();
+
+    // A config change starts a background reload, held on the download.
+    call(
+        &state,
+        "update_plugin_config",
+        json!({ "name": "demo", "config": { "K": "v" } }),
+    )
+    .await
+    .unwrap();
+    // Meanwhile the plugin is disabled.
+    call(&state, "disable_plugin", json!({ "name": "demo" }))
+        .await
+        .unwrap();
+    assert!(state.plugins.read().await.is_empty());
+
+    // Let the download through and the reload finish: it records the load,
+    // then installs or drops the result.
+    assert!(state.plugin_telemetry.last_load("demo").is_none());
+    release.notify_one();
+    for _ in 0..500 {
+        if state.plugin_telemetry.last_load("demo").is_some() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert_eq!(served.load(std::sync::atomic::Ordering::SeqCst), 1);
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    assert!(
+        state.plugins.read().await.is_empty(),
+        "the stale reload brought the disabled plugin back"
+    );
+}
