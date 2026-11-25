@@ -158,7 +158,7 @@ first.
   and `-`, not starting with `.`) and name a configured plugin before
   anything is written; otherwise the route returns `400` or `404`. Plugins
   with an `upload` source whose file name isn't a plain name in the uploads
-  directory are no longer read. (#XXX)
+  directory are no longer read. (#300)
 - **Cross-site request forgery and WebSocket hijacking.** Any web page a user
   had open could drive deckwatch through their browser: read API responses
   (CORS allowed every origin, so for example decoded Secrets through
