@@ -1185,19 +1185,14 @@ async fn fetch_bytes(
         .map_err(|e| anyhow::anyhow!("{}", crate::outbound::error_chain(&e)))?;
     let status = resp.status();
     if !status.is_success() {
-        return Err(anyhow::anyhow!("HTTP {status} fetching plugin from {url}"));
+        return Err(plugin_fetch_status_error(status, &url));
     }
     let bytes = resp.bytes().await?.to_vec();
 
     // Log a warning (but allow load) when no checksum is configured, so
     // development workflows aren't blocked while still surfacing the gap.
     if !verify_checksum(cfg, &bytes)? {
-        tracing::warn!(
-            plugin = %cfg.name,
-            url = %url,
-            "no sha256 checksum configured for plugin — \
-             consider pinning a checksum in settings to prevent supply-chain tampering"
-        );
+        warn_unpinned_plugin(&cfg.name, &url);
     }
 
     Ok(bytes)
@@ -1224,6 +1219,27 @@ async fn read_upload(
 
 /// Check `bytes` against the plugin's `sha256` pin, rejecting a mismatch so
 /// tampered or corrupted WASM never loads. `Ok(false)` when there's no pin.
+/// Warn that a plugin loaded without a sha256 pin. Plugin source URLs can
+/// carry credentials in their userinfo, query or fragment, so the URL is
+/// logged through [`crate::redact::url`].
+fn warn_unpinned_plugin(plugin: &str, url: &str) {
+    tracing::warn!(
+        plugin = %plugin,
+        url = %crate::redact::url(url),
+        "no sha256 checksum configured for plugin — \
+         consider pinning a checksum in settings to prevent supply-chain tampering"
+    );
+}
+
+/// The error for a non-success response when downloading a plugin. It ends
+/// up in logs and API responses, so the URL is redacted.
+fn plugin_fetch_status_error(status: reqwest::StatusCode, url: &str) -> anyhow::Error {
+    anyhow::anyhow!(
+        "HTTP {status} fetching plugin from {}",
+        crate::redact::url(url)
+    )
+}
+
 fn verify_checksum(cfg: &PluginConfig, bytes: &[u8]) -> anyhow::Result<bool> {
     let Some(expected_hex) = &cfg.sha256 else {
         return Ok(false);
@@ -2874,6 +2890,35 @@ fn build_resources(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const SECRET_URL: &str =
+        "https://builder:hunter2@plugins.example.com/p.wasm?token=s3cr3t-q#frag-s3cr3t";
+
+    /// The missing-checksum warning never logs a source URL's credentials (#349).
+    #[tokio::test]
+    async fn unpinned_plugin_warning_redacts_the_source_url() {
+        let ((), captured) =
+            crate::test_tracing::capture(async { warn_unpinned_plugin("demo", SECRET_URL) }).await;
+        let logged = captured.haystack();
+        assert!(logged.contains("no sha256 checksum configured"), "{logged}");
+        assert!(logged.contains("plugins.example.com"), "{logged}");
+        for secret in ["hunter2", "s3cr3t-q", "frag-s3cr3t", "builder:"] {
+            assert!(!logged.contains(secret), "{secret} leaked: {logged}");
+        }
+    }
+
+    /// The download error, which is logged and returned, redacts the URL (#349).
+    #[test]
+    fn plugin_fetch_status_error_redacts_the_source_url() {
+        let msg = plugin_fetch_status_error(reqwest::StatusCode::NOT_FOUND, SECRET_URL).to_string();
+        assert!(
+            msg.contains("404") && msg.contains("plugins.example.com"),
+            "{msg}"
+        );
+        for secret in ["hunter2", "s3cr3t-q", "frag-s3cr3t", "builder:"] {
+            assert!(!msg.contains(secret), "{secret} leaked: {msg}");
+        }
+    }
 
     /// `PluginMetadata` deserializes with `resources: []` when the field is absent.
     /// This ensures old WASM plugins (compiled before resources support) still load cleanly.
