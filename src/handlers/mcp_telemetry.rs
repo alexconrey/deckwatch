@@ -171,11 +171,11 @@ pub const DECKWATCH_TOOLS: &[DeckwatchTool] = &[
     ),
     // Agent feedback
     tool("submit_agent_feedback", Write, "agent-feedback", &[]),
-    // mcp-k8s tools deckwatch intercepts: update_deployment and create_pod
-    // add a service account, apply_manifest accepts YAML, and exec_pod is
-    // deckwatch's own non-interactive implementation.
+    // mcp-k8s tools deckwatch intercepts: update_deployment adds a service
+    // account, apply_manifest accepts YAML, and exec_pod is deckwatch's own
+    // non-interactive implementation. (mcp-k8s's create_pod takes a service
+    // account itself since 0.6, so deckwatch no longer replaces it.)
     tool("update_deployment", Write, "deployment", &[]),
-    tool("create_pod", Write, "pod", &[]),
     tool("apply_manifest", Write, "manifest", &[]),
     tool("exec_pod", Exec, "pod", &[]),
 ];

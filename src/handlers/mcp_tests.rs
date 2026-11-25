@@ -412,7 +412,7 @@ async fn test_update_deployment_service_account_in_schema() {
 }
 
 // ---------------------------------------------------------------------------
-// create_pod — service_account field
+// create_pod — mcp-k8s's, which takes a service account itself
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
@@ -432,10 +432,12 @@ async fn test_create_pod_service_account_in_schema() {
         .find(|t| t["name"] == "create_pod")
         .expect("create_pod must be in tools list");
 
+    // mcp-k8s's schema; it also accepts `service_account`, deckwatch's old
+    // argument, as an alias.
     let props = &create_pod["inputSchema"]["properties"];
     assert!(
-        props.get("service_account").is_some(),
-        "create_pod schema must include service_account"
+        props.get("service_account_name").is_some(),
+        "create_pod schema must include service_account_name"
     );
     assert!(
         props.get("env").is_some(),

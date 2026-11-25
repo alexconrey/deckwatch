@@ -20,6 +20,7 @@ use serde::{Deserialize, Serialize};
 use tracing::{Instrument, Span};
 
 use super::mcp_audit;
+use super::mcp_guardrails;
 use super::mcp_schema;
 use super::mcp_telemetry::{self, DeckwatchTool, RequestContext};
 use crate::audit;
@@ -226,6 +227,10 @@ async fn handle_initialize(state: &AppState, request: &JsonRpcRequest) -> JsonRp
     for guidance in &fixed_guidance {
         instructions_parts.push(guidance.to_string());
     }
+    // mcp-k8s's own guidance: prefer the typed tools, report a guardrail
+    // rejection instead of working around it, and use apply_manifest only on
+    // the user's explicit request.
+    instructions_parts.push(mcp_k8s::mcp::SERVER_INSTRUCTIONS.to_string());
 
     // Inject per-plugin MCP tuning blocks from admin-saved values.
     {
@@ -285,54 +290,75 @@ async fn handle_initialize(state: &AppState, request: &JsonRpcRequest) -> JsonRp
 async fn handle_tools_list(state: &AppState, request: &JsonRpcRequest) -> JsonRpcResponse {
     let loaded = settings::load_settings_from_db(state).await;
     let tuning = loaded.mcp_tuning;
-    let agent_feedback_enabled = loaded.agent_feedback_enabled;
+    let perms = mcp_permissions(&tuning);
 
-    let mut tools = mcp_k8s::mcp::tool_definitions(&mcp_permissions());
-    tools.extend(mcp_k8s::resources::all_tool_definitions());
-    tools.extend(deckwatch_tool_definitions());
-
-    if agent_feedback_enabled {
-        tools.push(agent_feedback_tool_definition());
-    }
-
-    // Replace mcp-k8s update_deployment and create_pod with deckwatch's
-    // enhanced versions that add service_account support.
-    tools.retain(|t| {
-        !matches!(
-            t.get("name").and_then(|n| n.as_str()),
-            Some("update_deployment") | Some("create_pod")
-        )
-    });
-    tools.push(enhanced_update_deployment_tool_definition());
-    tools.push(enhanced_create_pod_tool_definition());
-
-    // Replace the upstream apply_manifest definition with one that clearly
-    // documents YAML/JSON support (the upstream only accepts JSON silently).
-    tools.retain(|t| t.get("name").and_then(|n| n.as_str()) != Some("apply_manifest"));
-    tools.push(apply_manifest_tool_definition());
-
-    // Replace the upstream exec_pod definition; our implementation is non-interactive
-    // and returns collected output rather than attempting a WebSocket upgrade.
-    tools.retain(|t| t.get("name").and_then(|n| n.as_str()) != Some("exec_pod"));
-    tools.push(exec_pod_tool_definition());
-
-    let tools = tools
+    let tools = listed_tools(&perms, loaded.agent_feedback_enabled)
         .into_iter()
         .map(|t| inject_mcp_hint(t, &tuning))
         .collect::<Vec<_>>();
     success_response(request, serde_json::json!({ "tools": tools }))
 }
 
-/// deckwatch's `apply_manifest`: like mcp-k8s's, but YAML is accepted too.
+/// The tools `tools/list` offers under `perms`, each once: the mcp-k8s
+/// tools `tool_definitions` allows (so `apply_manifest` only while it is on),
+/// less the ones deckwatch doesn't serve
+/// ([`mcp_guardrails::is_unserved`]), with deckwatch's definitions of the
+/// mcp-k8s tools it replaces or serves itself, then deckwatch's own tools.
+pub(super) fn listed_tools(
+    perms: &mcp_k8s::permissions::ActionPermissions,
+    agent_feedback_enabled: bool,
+) -> Vec<serde_json::Value> {
+    let own = deckwatch_tool_definitions();
+    let own_names: std::collections::HashSet<String> = own
+        .iter()
+        .filter_map(|t| t["name"].as_str().map(str::to_string))
+        .collect();
+    let mut tools: Vec<serde_json::Value> = mcp_k8s::mcp::tool_definitions(perms)
+        .into_iter()
+        .filter_map(|tool| {
+            let name = tool["name"].as_str()?;
+            if mcp_guardrails::is_unserved(name) || own_names.contains(name) {
+                return None;
+            }
+            Some(match name {
+                // service_account support on the patch
+                "update_deployment" => enhanced_update_deployment_tool_definition(),
+                // YAML as well as JSON
+                "apply_manifest" => apply_manifest_tool_definition(),
+                // non-interactive, string command
+                "exec_pod" => exec_pod_tool_definition(),
+                _ => tool,
+            })
+        })
+        .collect();
+    tools.extend(own);
+    if agent_feedback_enabled {
+        tools.push(agent_feedback_tool_definition());
+    }
+    tools
+}
+
+/// deckwatch's `apply_manifest`: mcp-k8s's, with YAML accepted too. It
+/// keeps mcp-k8s's warnings and its `destructiveHint`, so MCP clients ask
+/// the user before each call.
 fn apply_manifest_tool_definition() -> serde_json::Value {
     serde_json::json!({
         "name": "apply_manifest",
-        "description": "Apply a Kubernetes manifest. Accepts YAML or JSON. Equivalent to kubectl apply -f.",
+        "description": "Raw server-side apply of an arbitrary Kubernetes manifest, given as YAML or JSON (like kubectl apply -f). UNRESTRICTED: unlike every other write tool it skips the workload guardrails, so it can create privileged pods, hostPath mounts, RBAC bindings, webhooks, CRDs and any other kind. Only the namespace allowlist still applies. Only call it when the user has explicitly asked for this manifest to be applied: show them the complete manifest and get their confirmation first. Never choose it yourself in place of a typed create_*/update_* tool, and never use it to get around a rejection from another tool. Returns the applied object's metadata (name, namespace, kind, resource_version).",
+        // MCP tool annotations, as mcp-k8s sets them: clients such as Claude
+        // Code ask the user before running a destructive tool.
+        "annotations": {
+            "title": "Apply raw manifest (unrestricted)",
+            "readOnlyHint": false,
+            "destructiveHint": true,
+            "idempotentHint": true,
+            "openWorldHint": false
+        },
         "inputSchema": {
             "type": "object",
             "properties": {
-                "namespace": { "type": "string", "description": "Target namespace (uses manifest namespace if not specified)" },
-                "manifest": { "type": "string", "description": "Kubernetes manifest in YAML or JSON format" }
+                "manifest": { "type": "string", "description": "The Kubernetes manifest, as YAML or JSON" },
+                "namespace": { "type": "string", "description": "Target namespace for a namespaced kind. Fills metadata.namespace when the manifest has none; if both are set they must match. Subject to the namespace allowlist." }
             },
             "required": ["manifest"],
             "additionalProperties": false
@@ -366,7 +392,6 @@ pub(super) fn served_tool_definitions() -> Vec<serde_json::Value> {
     let mut tools = native_tool_definitions();
     tools.extend([
         enhanced_update_deployment_tool_definition(),
-        enhanced_create_pod_tool_definition(),
         apply_manifest_tool_definition(),
         exec_pod_tool_definition(),
     ]);
@@ -1109,6 +1134,8 @@ async fn handle_tool_call_in(
     } else {
         result
     };
+    // mcp-k8s's refusals name its server's flags; add the deckwatch setting.
+    let result = result.map_err(mcp_guardrails::with_setting_hint);
 
     match result {
         Ok(text) => success_response(
@@ -1150,7 +1177,10 @@ struct Denial {
 ///   tool enforces it too; checking here records the refusal as a denial,
 ///   for reads as well, and covers tools that might miss it.
 /// - mcp-k8s's permission settings, for mcp-k8s tools (including the ones
-///   deckwatch intercepts): the same `ActionPermissions` mcp-k8s checks.
+///   deckwatch intercepts): the same `ActionPermissions` mcp-k8s checks,
+///   which turn `apply_manifest` off when the setting says so.
+///
+/// The workload policy runs inside mcp-k8s, on the object a tool builds.
 fn guardrail(
     state: &AppState,
     perms: &mcp_k8s::permissions::ActionPermissions,
@@ -1172,10 +1202,12 @@ fn guardrail(
     if telemetry::is_known_tool(tool) {
         if let Some(rule) = perms.denied_by(tool) {
             let action = mcp_k8s::permissions::ActionPermissions::action_for_tool(tool);
-            return Some(Denial {
-                rule,
-                message: format!("action '{action}' is not allowed on this tool: {tool}"),
-            });
+            let message = if tool == "apply_manifest" && !perms.apply_manifest_enabled {
+                mcp_guardrails::apply_manifest_disabled()
+            } else {
+                format!("action '{action}' is not allowed on this tool: {tool}")
+            };
+            return Some(Denial { rule, message });
         }
     }
     None
@@ -1203,7 +1235,8 @@ async fn call_tool(
         &mcp_telemetry::telemetry_arguments(name, args),
         action,
     );
-    let denial = guardrail(state, &mcp_permissions(), name, args, call.summary());
+    let perms = current_mcp_permissions(state).await;
+    let denial = guardrail(state, &perms, name, args, call.summary());
     let audit = mcp_audit::audited(action, denial.is_some()).then(|| {
         let mut record = mcp_audit::CallRecord::new(name, own, action, call.summary(), args, ctx);
         if let Some(denial) = &denial {
@@ -1240,7 +1273,7 @@ async fn call_tool(
                     }),
                     None => {
                         Box::pin(mcp_k8s::mcp::handle_tool(
-                            &mcp_k8s_client(state),
+                            &mcp_k8s_client(state, &perms),
                             name,
                             args,
                         ))
@@ -1320,9 +1353,8 @@ async fn dispatch_deckwatch_tool(
         "deprovision_resource" => tool_deprovision_resource(state, args).await,
         "refresh_resource" => tool_refresh_resource(state, args).await,
         "submit_agent_feedback" => tool_submit_agent_feedback(state, args).await,
-        // Intercept update_deployment and create_pod to add service_account support.
+        // Intercept update_deployment to add service_account support.
         "update_deployment" => tool_mcp_update_deployment(state, args).await,
-        "create_pod" => tool_mcp_create_pod(state, args).await,
         // Intercept apply_manifest to accept YAML or JSON (upstream only handles JSON).
         "apply_manifest" => tool_mcp_apply_manifest(state, args).await,
         // Intercept exec_pod to avoid WebSocket upgrade failures in MCP context.
@@ -1331,18 +1363,45 @@ async fn dispatch_deckwatch_tool(
     }
 }
 
-/// The mcp-k8s permission settings for MCP calls: one place to build them
-/// (SEC-4/SEC-24 will make them configurable). Today every action is allowed.
-fn mcp_permissions() -> mcp_k8s::permissions::ActionPermissions {
-    mcp_k8s::permissions::ActionPermissions::default()
+/// The mcp-k8s permission settings for MCP calls, from the guardrail
+/// settings (Settings → MCP Tuning, `mcp_tuning.guardrails`): every action
+/// allowed, the workload policy, `apply_manifest` and Secret values as set
+/// there. `tools/list` and every `tools/call` build them from the settings
+/// they read, so a change applies to the next request.
+fn mcp_permissions(tuning: &settings::McpTuning) -> mcp_k8s::permissions::ActionPermissions {
+    tuning.effective_guardrails().permissions()
+}
+
+/// [`mcp_permissions`] from the stored settings, read on every tool call
+/// from the database only (no Kubernetes API call). Never saved: the
+/// defaults. Unreadable: the defaults with `apply_manifest` off, so a
+/// database problem never relaxes a guardrail.
+async fn current_mcp_permissions(state: &AppState) -> mcp_k8s::permissions::ActionPermissions {
+    match settings::load_stored_settings(&state.db).await {
+        Ok(stored) => mcp_permissions(&stored.map(|s| s.mcp_tuning).unwrap_or_default()),
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                "can't read the MCP guardrail settings; using the defaults with apply_manifest off"
+            );
+            mcp_guardrails::McpGuardrails {
+                apply_manifest_enabled: false,
+                ..Default::default()
+            }
+            .permissions()
+        }
+    }
 }
 
 /// An mcp-k8s client for one call, with deckwatch's namespace allowlist.
-fn mcp_k8s_client(state: &AppState) -> mcp_k8s::K8sClient {
+fn mcp_k8s_client(
+    state: &AppState,
+    perms: &mcp_k8s::permissions::ActionPermissions,
+) -> mcp_k8s::K8sClient {
     mcp_k8s::K8sClient::new(
         state.kube_client.clone(),
         state.allowed_namespaces.clone(),
-        mcp_permissions(),
+        perms.clone(),
     )
 }
 
@@ -2958,7 +3017,8 @@ async fn mcp_k8s_tool(
     args: &serde_json::Value,
 ) -> Result<String, String> {
     let _ = DELEGATED.try_with(|delegated| delegated.set(true));
-    mcp_k8s::mcp::handle_tool(&mcp_k8s_client(state), tool_name, args)
+    let perms = current_mcp_permissions(state).await;
+    mcp_k8s::mcp::handle_tool(&mcp_k8s_client(state, &perms), tool_name, args)
         .await
         .unwrap_or_else(|| Err(format!("unknown tool: {tool_name}")))
 }
@@ -3020,86 +3080,6 @@ async fn tool_mcp_update_deployment(
     }
 
     Ok(result.unwrap_or_else(|| format!("Deployment {name} updated in namespace {ns}")))
-}
-
-async fn tool_mcp_create_pod(state: &AppState, args: &serde_json::Value) -> Result<String, String> {
-    use k8s_openapi::api::core::v1::{Container, EnvVar, Pod, PodSpec};
-    use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
-    use kube::api::PostParams;
-    use std::collections::BTreeMap;
-
-    let service_account = args["service_account"].as_str().map(|s| s.to_string());
-
-    // If no service_account is needed, delegate entirely to mcp-k8s.
-    if service_account.is_none() {
-        return mcp_k8s_tool(state, "create_pod", args).await;
-    }
-
-    let ns = args["namespace"].as_str().ok_or("namespace is required")?;
-    let name = args["name"].as_str().ok_or("name is required")?;
-    let image = args["image"].as_str().ok_or("image is required")?;
-    let command: Option<Vec<String>> = args
-        .get("command")
-        .and_then(|v| serde_json::from_value(v.clone()).ok());
-    let restart_policy = args["restart_policy"]
-        .as_str()
-        .unwrap_or("Never")
-        .to_string();
-
-    let env: Option<Vec<EnvVar>> = args.get("env").and_then(|v| {
-        v.as_object().map(|map| {
-            map.iter()
-                .map(|(k, val)| EnvVar {
-                    name: k.clone(),
-                    value: val.as_str().map(|s| s.to_string()),
-                    ..Default::default()
-                })
-                .collect()
-        })
-    });
-
-    let mut labels = BTreeMap::new();
-    labels.insert("app".to_string(), name.to_string());
-    labels.insert(
-        "app.kubernetes.io/managed-by".to_string(),
-        "deckwatch".to_string(),
-    );
-
-    let pod = Pod {
-        metadata: ObjectMeta {
-            name: Some(name.to_string()),
-            namespace: Some(ns.to_string()),
-            labels: Some(labels),
-            ..Default::default()
-        },
-        spec: Some(PodSpec {
-            service_account_name: service_account,
-            containers: vec![Container {
-                name: name.to_string(),
-                image: Some(image.to_string()),
-                command,
-                env,
-                ..Default::default()
-            }],
-            restart_policy: Some(restart_policy),
-            ..Default::default()
-        }),
-        ..Default::default()
-    };
-
-    // Use state.pods_api() to enforce the namespace allowlist.
-    let pods_api = state.pods_api(ns).map_err(|e| e.to_string())?;
-    let created = pods_api
-        .create(&PostParams::default(), &pod)
-        .await
-        .map_err(|e| e.to_string())?;
-
-    let result = serde_json::json!({
-        "name": created.metadata.name,
-        "namespace": ns,
-        "phase": created.status.as_ref().and_then(|s| s.phase.clone()).unwrap_or_else(|| "Pending".to_string()),
-    });
-    serde_json::to_string_pretty(&result).map_err(|e| e.to_string())
 }
 
 fn enhanced_update_deployment_tool_definition() -> serde_json::Value {
@@ -3183,27 +3163,6 @@ fn enhanced_update_deployment_tool_definition() -> serde_json::Value {
                 "service_account": { "type": "string", "description": "Service account name to assign to the deployment's pod template (optional)" }
             },
             "required": ["namespace", "name"],
-            "additionalProperties": false
-        }
-    })
-}
-
-fn enhanced_create_pod_tool_definition() -> serde_json::Value {
-    serde_json::json!({
-        "name": "create_pod",
-        "description": "Create a standalone pod. Useful for debugging, one-shot tasks, or running a quick container. Supports assigning a service account.",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "namespace": { "type": "string", "description": "Kubernetes namespace" },
-                "name": { "type": "string", "description": "Pod name" },
-                "image": { "type": "string", "description": "Container image" },
-                "command": { "type": "array", "items": { "type": "string" }, "description": "Command to run (optional)" },
-                "env": { "type": "object", "description": "Environment variables as key-value string pairs (optional)", "additionalProperties": { "type": "string" } },
-                "restart_policy": { "type": "string", "description": "Restart policy (default: Never)", "enum": ["Never", "Always", "OnFailure"] },
-                "service_account": { "type": "string", "description": "Service account name to assign to the pod (optional)" }
-            },
-            "required": ["namespace", "name", "image"],
             "additionalProperties": false
         }
     })
@@ -3635,3 +3594,7 @@ mod tool_audit_tests;
 #[cfg(test)]
 #[path = "mcp_validate_plugin_tests.rs"]
 mod validate_plugin_tests;
+
+#[cfg(test)]
+#[path = "mcp_guardrail_tool_tests.rs"]
+mod guardrail_tool_tests;

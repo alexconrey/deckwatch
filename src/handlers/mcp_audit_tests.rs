@@ -51,6 +51,7 @@ fn a_row_has_the_target_keys_allowlisted_values_and_client() {
         "image": "nginx:1.27",
         "env": { "TOKEN": "s3cr3t" },
         "command": ["sh", "-c", "echo s3cr3t"],
+        "debug_canary": "s3cr3t",
     });
     let row = record("create_deployment", &args, &ctx_with_client())
         .row(Outcome::Ok, Duration::from_millis(12));
@@ -67,9 +68,9 @@ fn a_row_has_the_target_keys_allowlisted_values_and_client() {
         json!({
             "tool": "create_deployment",
             "outcome": "ok",
-            // mcp-k8s's create_deployment declares no `command`: an
+            // mcp-k8s's create_deployment declares no `debug_canary`: an
             // undeclared key is only counted, as `?`.
-            "argument_keys": ["env", "image", "name", "namespace", "?"],
+            "argument_keys": ["command", "env", "image", "name", "namespace", "?"],
             "arguments": { "namespace": "prod", "name": "web", "image": "nginx:1.27" },
             "client": { "name": "claude-code", "version": "2.1.0", "self_reported": true },
             "session_id": "0123456789abcdef0123456789abcdef",

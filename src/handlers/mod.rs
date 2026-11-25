@@ -22,6 +22,7 @@ pub mod license;
 pub mod logs;
 pub mod mcp;
 pub mod mcp_audit;
+pub mod mcp_guardrails;
 pub mod mcp_schema;
 pub mod mcp_telemetry;
 pub mod monitoring;

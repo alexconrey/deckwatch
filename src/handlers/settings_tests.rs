@@ -1532,3 +1532,132 @@ async fn the_retired_otlp_endpoint_is_reported_until_the_new_one_is_set() {
         );
     }
 }
+
+// ── MCP Tuning: the mcp-k8s guardrails ─────────────────────────────────────
+
+fn guardrails(value: serde_json::Value) -> McpGuardrails {
+    serde_json::from_value(value).expect("guardrails")
+}
+
+#[tokio::test]
+async fn get_always_returns_the_guardrails_with_their_defaults() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let (state, _) = seeded_state(tmp.path()).await;
+    let Json(got) = get_settings(State(state)).await.expect("get");
+    let g = got.mcp_tuning.guardrails.expect("guardrails");
+    assert_eq!(g, McpGuardrails::default());
+    assert!(g.apply_manifest_enabled, "apply_manifest is on by default");
+    assert!(!g.secret_decode_enabled, "Secret values are off by default");
+}
+
+#[tokio::test]
+async fn put_validates_normalizes_and_audits_the_guardrails() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let (state, _) = seeded_state(tmp.path()).await;
+    let before = audit_entries(&state).await.len();
+
+    let Json(mut payload) = get_settings(State(state.clone())).await.expect("get");
+    payload.mcp_tuning.guardrails = Some(guardrails(serde_json::json!({
+        "exceptions": ["allow_node_port", "allow_node_port"],
+        "allowed_custom_resource_groups": [" Cert-Manager.io "],
+        "apply_manifest_enabled": false,
+    })));
+    let Json(saved) = put_settings(State(state.clone()), Json(payload))
+        .await
+        .expect("put");
+    let expected = guardrails(serde_json::json!({
+        "exceptions": ["allow_node_port"],
+        "allowed_custom_resource_groups": ["cert-manager.io"],
+        "apply_manifest_enabled": false,
+    }));
+    assert_eq!(saved.mcp_tuning.guardrails.as_ref(), Some(&expected));
+    assert_eq!(
+        load_settings_from_db(&state).await.mcp_tuning.guardrails,
+        Some(expected)
+    );
+
+    let entries = audit_entries(&state).await;
+    let mut changes: Vec<(String, String)> = entries[before..]
+        .iter()
+        .filter(|e| e.resource_name.starts_with("mcp_tuning.guardrails."))
+        .map(|e| (e.resource_name.clone(), e.detail.clone()))
+        .collect();
+    changes.sort();
+    assert_eq!(
+        changes.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>(),
+        [
+            "mcp_tuning.guardrails.allowed_custom_resource_groups",
+            "mcp_tuning.guardrails.apply_manifest_enabled",
+            "mcp_tuning.guardrails.exceptions",
+        ]
+    );
+    assert!(
+        changes[1].1.contains("changed from true to false"),
+        "{changes:?}"
+    );
+
+    // Back to the defaults: stored as no block, GET still returns them.
+    let Json(mut payload) = get_settings(State(state.clone())).await.expect("get");
+    payload.mcp_tuning.guardrails = Some(McpGuardrails::default());
+    let _ = put_settings(State(state.clone()), Json(payload))
+        .await
+        .expect("put");
+    assert_eq!(
+        load_settings_from_db(&state).await.mcp_tuning.guardrails,
+        None
+    );
+}
+
+#[tokio::test]
+async fn put_rejects_invalid_guardrails_and_keeps_the_stored_ones() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let (state, _) = seeded_state(tmp.path()).await;
+    for bad in [
+        serde_json::json!({ "exceptions": ["allow_everything"] }),
+        serde_json::json!({ "allowed_custom_resource_groups": ["not a group"] }),
+        serde_json::json!({ "allowed_custom_resource_groups": ["apps"] }),
+    ] {
+        let Json(mut payload) = get_settings(State(state.clone())).await.expect("get");
+        payload.mcp_tuning.guardrails = Some(guardrails(bad.clone()));
+        let err = put_settings(State(state.clone()), Json(payload))
+            .await
+            .err()
+            .unwrap_or_else(|| panic!("{bad} must be rejected"));
+        let AppError::BadRequest(msg) = err else {
+            panic!("expected 400 for {bad}");
+        };
+        assert!(msg.contains("mcp_tuning.guardrails."), "{msg}");
+    }
+    assert_eq!(
+        load_settings_from_db(&state).await.mcp_tuning.guardrails,
+        None
+    );
+}
+
+/// A client that omits the block (or an older one that doesn't know it)
+/// doesn't reset an admin's choices to the defaults.
+#[tokio::test]
+async fn put_without_guardrails_keeps_them() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let (state, _) = seeded_state(tmp.path()).await;
+    let off = guardrails(serde_json::json!({ "apply_manifest_enabled": false }));
+    let Json(mut payload) = get_settings(State(state.clone())).await.expect("get");
+    payload.mcp_tuning.guardrails = Some(off.clone());
+    let _ = put_settings(State(state.clone()), Json(payload))
+        .await
+        .expect("put");
+
+    let Json(mut payload) = get_settings(State(state.clone())).await.expect("get");
+    payload.mcp_tuning.guardrails = None;
+    payload.mcp_tuning.global = Some("Ask before deleting anything.".to_string());
+    let _ = put_settings(State(state.clone()), Json(payload))
+        .await
+        .expect("put");
+
+    let stored = load_settings_from_db(&state).await.mcp_tuning;
+    assert_eq!(
+        stored.global.as_deref(),
+        Some("Ask before deleting anything.")
+    );
+    assert_eq!(stored.guardrails, Some(off));
+}
