@@ -13,6 +13,7 @@ mod m20260814_000002_perf_indices;
 mod m20261124_000001_gitops_token_binding;
 mod m20261124_000002_plugin_status;
 mod m20261124_000003_audit_log_mcp;
+pub(crate) mod schema;
 
 use sea_orm_migration::prelude::*;
 
