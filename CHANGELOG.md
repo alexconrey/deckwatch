@@ -460,7 +460,7 @@ first.
   it removes or disables before it responds. And a background reload that
   finished after a newer change (another save, MCP `disable_plugin`) put its
   older result back, reviving a disabled plugin or an old config; a reload
-  whose plugin settings changed while it ran is now dropped. (#XXX)
+  whose plugin settings changed while it ran is now dropped. (#347)
 - Removing an application's last plugin resource releases what the plugin
   applied to its Deployments and CronJobs within one reconcile (10 s). Before,
   those fields stayed, and plugins kept acting on them: deckwatch-plugin-aws
