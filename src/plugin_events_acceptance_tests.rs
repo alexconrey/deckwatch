@@ -67,9 +67,13 @@ pub(crate) async fn get_events(state: &AppState, ns: &str) -> String {
         "params": { "name": "get_events", "arguments": { "namespace": ns } },
     }))
     .unwrap();
-    let response = crate::handlers::mcp::handle_mcp(State(state.clone()), Json(request))
-        .await
-        .into_response();
+    let response = crate::handlers::mcp::handle_mcp(
+        State(state.clone()),
+        axum::http::HeaderMap::new(),
+        Json(request),
+    )
+    .await
+    .into_response();
     let body = axum::body::to_bytes(response.into_body(), 1 << 22)
         .await
         .unwrap();

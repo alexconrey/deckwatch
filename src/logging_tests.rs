@@ -73,3 +73,57 @@ fn default_filter_drops_debug_and_other_targets() {
     });
     assert!(kept.is_empty(), "unexpected events kept: {kept:?}");
 }
+
+/// A `MakeWriter` collecting everything written to it.
+#[derive(Clone, Default)]
+struct Buffer(Arc<Mutex<Vec<u8>>>);
+
+impl std::io::Write for Buffer {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(buf);
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Buffer {
+    type Writer = Buffer;
+    fn make_writer(&'a self) -> Self::Writer {
+        self.clone()
+    }
+}
+
+#[test]
+fn metric_events_stay_out_of_the_console_but_reach_other_layers() {
+    let console = Buffer::default();
+    // Stands in for an OpenTelemetry MetricsLayer next to the console layer.
+    let metrics_layer = Targets::default();
+    let subscriber = tracing_subscriber::registry()
+        .with(EnvFilter::new(DEFAULT_LOG_FILTER))
+        .with(json_layer(console.clone()))
+        .with(metrics_layer.clone());
+    tracing::subscriber::with_default(subscriber, || {
+        // What mcp-k8s emits for one MCP request.
+        tracing::event!(
+            target: "mcp_k8s::telemetry::metrics",
+            tracing::Level::INFO,
+            {
+                { mcp_k8s::telemetry::semconv::HISTOGRAM_MCP_SERVER_OPERATION_DURATION } = 0.25,
+                { mcp_k8s::telemetry::semconv::MCP_METHOD_NAME } = "tools/call",
+            }
+        );
+        tracing::info!(target: "mcp_k8s::telemetry", "tool call finished");
+    });
+
+    let console = String::from_utf8(console.0.lock().unwrap().clone()).unwrap();
+    let lines: Vec<&str> = console.lines().collect();
+    assert_eq!(lines.len(), 1, "{console}");
+    assert!(lines[0].contains("tool call finished"), "{console}");
+    assert!(!console.contains("histogram."), "{console}");
+    assert_eq!(
+        *metrics_layer.0.lock().unwrap(),
+        ["mcp_k8s::telemetry::metrics", "mcp_k8s::telemetry"]
+    );
+}

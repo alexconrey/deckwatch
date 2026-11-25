@@ -185,10 +185,13 @@ pub(crate) async fn mcp_tool(
         "params": { "name": tool, "arguments": args },
     }))
     .unwrap();
-    let response =
-        crate::handlers::mcp::handle_mcp(axum::extract::State(state.clone()), axum::Json(request))
-            .await
-            .into_response();
+    let response = crate::handlers::mcp::handle_mcp(
+        axum::extract::State(state.clone()),
+        axum::http::HeaderMap::new(),
+        axum::Json(request),
+    )
+    .await
+    .into_response();
     let body = axum::body::to_bytes(response.into_body(), 1 << 22)
         .await
         .unwrap();

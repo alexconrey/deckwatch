@@ -30,24 +30,31 @@
 
 use std::sync::{Arc, Mutex};
 
+use mcp_k8s::telemetry::{semconv as mcp_semconv, W3cTraceContext};
 use opentelemetry::context::FutureExt as _;
-use opentelemetry::trace::TracerProvider as _;
+use opentelemetry::propagation::TextMapPropagator as _;
+use opentelemetry::trace::{TraceContextExt as _, TracerProvider as _};
 use opentelemetry::{Key, KeyValue};
 use opentelemetry_appender_tracing::layer::OpenTelemetryTracingBridge;
 use opentelemetry_http::{Bytes, HttpClient, HttpError, Request, Response, ResponseBodyTooLarge};
 use opentelemetry_otlp::{Protocol, WithExportConfig as _, WithHttpConfig as _};
 use opentelemetry_sdk::logs::SdkLoggerProvider;
-use opentelemetry_sdk::metrics::{PeriodicReader, SdkMeterProvider};
+use opentelemetry_sdk::metrics::{
+    Aggregation, Instrument, PeriodicReader, SdkMeterProvider, Stream,
+};
+use opentelemetry_sdk::propagation::TraceContextPropagator;
 use opentelemetry_sdk::resource::{EnvResourceDetector, ResourceDetector as _};
 use opentelemetry_sdk::trace::SdkTracerProvider;
 use opentelemetry_sdk::Resource;
-use tracing::{Level, Metadata, Subscriber};
+use tracing::{Level, Metadata, Span, Subscriber};
+use tracing_opentelemetry::OpenTelemetrySpanExt as _;
 use tracing_subscriber::filter::filter_fn;
 use tracing_subscriber::fmt::MakeWriter;
 use tracing_subscriber::layer::SubscriberExt as _;
 use tracing_subscriber::registry::LookupSpan;
 use tracing_subscriber::{EnvFilter, Layer};
 
+use crate::logging::is_log_line;
 use crate::outbound::{self, Purpose};
 
 /// `service.name` when neither `OTEL_SERVICE_NAME` nor
@@ -244,6 +251,7 @@ impl Telemetry {
                         SdkMeterProvider::builder()
                             .with_reader(PeriodicReader::builder(exporter).build())
                             .with_resource(resource.clone())
+                            .with_view(mcp_duration_view)
                             .build(),
                     )
                 }
@@ -289,7 +297,8 @@ impl Telemetry {
     /// Every layer skips [`on_export_path`] targets. The trace layer takes
     /// spans; it takes events too (as span events) only when logs are not
     /// exported, except error events, which it always takes so they set the
-    /// span's status.
+    /// span's status. Metric events (mcp-k8s's duration histogram, see
+    /// [`crate::logging::is_log_line`]) go to the metrics layer only.
     pub fn layer<S>(&self) -> Option<Box<dyn Layer<S> + Send + Sync + 'static>>
     where
         S: Subscriber + for<'a> LookupSpan<'a> + Send + Sync,
@@ -299,7 +308,8 @@ impl Telemetry {
         if let Some(provider) = &self.tracer_provider {
             let spans_filter = filter_fn(move |meta: &Metadata<'_>| {
                 !on_export_path(meta.target())
-                    && (meta.is_span() || !logs_exported || *meta.level() == Level::ERROR)
+                    && (meta.is_span()
+                        || (is_log_line(meta) && (!logs_exported || *meta.level() == Level::ERROR)))
             });
             layers.push(
                 tracing_opentelemetry::layer()
@@ -318,7 +328,9 @@ impl Telemetry {
         if let Some(provider) = &self.logger_provider {
             layers.push(
                 OpenTelemetryTracingBridge::new(provider)
-                    .with_filter(filter_fn(|meta| !on_export_path(meta.target())))
+                    .with_filter(filter_fn(|meta| {
+                        !on_export_path(meta.target()) && is_log_line(meta)
+                    }))
                     .boxed(),
             );
         }
@@ -382,6 +394,77 @@ pub fn on_export_path(target: &str) -> bool {
         .any(|prefix| target.starts_with(prefix))
 }
 
+/// `MetricsLayer` creates instruments without a unit or buckets, so this view
+/// gives mcp-k8s's `mcp.server.operation.duration` histogram the MCP
+/// conventions' unit (`s`) and bucket boundaries, and keeps only its
+/// low-cardinality attributes: even if a field is added to the metric event,
+/// it can't become an attribute.
+pub fn mcp_duration_view(instrument: &Instrument) -> Option<Stream> {
+    if instrument.name() != mcp_semconv::MCP_SERVER_OPERATION_DURATION {
+        return None;
+    }
+    Stream::builder()
+        .with_unit(mcp_semconv::MCP_SERVER_OPERATION_DURATION_UNIT)
+        .with_description(
+            "Duration of MCP requests as observed by deckwatch, from receipt to response.",
+        )
+        .with_aggregation(Aggregation::ExplicitBucketHistogram {
+            boundaries: mcp_semconv::MCP_SERVER_OPERATION_DURATION_BUCKETS.to_vec(),
+            record_min_max: true,
+        })
+        .with_allowed_attribute_keys(
+            mcp_semconv::METRIC_ATTRIBUTES
+                .iter()
+                .map(|k| Key::from_static_str(k)),
+        )
+        .build()
+        .ok()
+}
+
+/// Make the W3C trace context an MCP request carries the remote parent of
+/// its server span. `params._meta.traceparent` (the MCP conventions) wins;
+/// the HTTP `traceparent` header is the fallback, and becomes a link when
+/// both are set. Call it before `span` is first entered. A no-op unless
+/// traces are exported.
+pub fn set_remote_parent(
+    span: &Span,
+    meta: Option<&W3cTraceContext>,
+    http: Option<&W3cTraceContext>,
+) {
+    let propagator = TraceContextPropagator::new();
+    let extract = |c: &W3cTraceContext| {
+        let mut carrier = std::collections::HashMap::new();
+        carrier.insert("traceparent".to_string(), c.traceparent.clone());
+        if let Some(state) = &c.tracestate {
+            carrier.insert("tracestate".to_string(), state.clone());
+        }
+        let cx = propagator.extract(&carrier);
+        cx.span().span_context().is_valid().then_some(cx)
+    };
+    match (meta.and_then(extract), http.and_then(extract)) {
+        (Some(parent), http) => {
+            let _ = span.set_parent(parent);
+            if let Some(http) = http {
+                span.add_link(http.span().span_context().clone());
+            }
+        }
+        (None, Some(parent)) => {
+            let _ = span.set_parent(parent);
+        }
+        (None, None) => {}
+    }
+}
+
+/// The W3C trace id of `span`, when traces are exported. Reading it starts
+/// the OpenTelemetry span, so call it after [`set_remote_parent`].
+pub fn trace_id(span: &Span) -> Option<String> {
+    let cx = span.context();
+    let span_context = cx.span().span_context().clone();
+    span_context
+        .is_valid()
+        .then(|| span_context.trace_id().to_string())
+}
+
 /// deckwatch's subscriber: `filter`, one JSON line per event to `writer`
 /// (stdout in production), and the OpenTelemetry layers when `telemetry` is
 /// set. Without them it formats exactly what
@@ -396,7 +479,7 @@ where
 {
     let base = tracing_subscriber::registry()
         .with(filter)
-        .with(tracing_subscriber::fmt::layer().json().with_writer(writer));
+        .with(crate::logging::json_layer(writer));
     let otel = telemetry.and_then(|t| t.layer());
     base.with(otel)
 }
