@@ -356,3 +356,48 @@ async fn the_worker_applies_updates_and_removals_in_order() {
         .unwrap()
         .is_empty());
 }
+
+// ── Notifications ────────────────────────────────────────────────────────────
+
+/// One notification per transition: repeated failures and recoveries don't
+/// add any, and a target that flaps back to failing within the flap guard
+/// is quiet (its recovery too).
+#[tokio::test]
+async fn transitions_notify_once_and_flapping_is_quiet() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = crate::plugin_fixture::test_state(dir.path(), vec![], None).await;
+    let (url, received) = crate::plugin_fixture::serve_webhook().await;
+    crate::plugin_fixture::enable_notifications(&state, &url).await;
+    spawn_worker(&state);
+
+    let failing = update(
+        Health::Failing,
+        vec![report("db unreachable", EventSeverity::Error)],
+    );
+    let healthy = update(Health::Healthy, vec![]);
+    let t = &state.plugin_telemetry;
+    for u in [
+        &failing, &failing, &failing, &healthy, &healthy, &failing, &healthy,
+    ] {
+        t.report(u.clone());
+    }
+    t.flush().await;
+
+    let received = received.lock().unwrap();
+    let kinds: Vec<&str> = received
+        .iter()
+        .map(|b| b["event_type"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        kinds,
+        vec!["plugin_failing", "plugin_recovered"],
+        "{received:#?}"
+    );
+    let failing = &received[0]["event"];
+    assert_eq!(failing["namespace"], "shop");
+    assert_eq!(failing["application"], "web");
+    assert_eq!(failing["plugin"], "aws");
+    assert_eq!(failing["resource_id"], "rds");
+    assert_eq!(failing["code"], "aws.x");
+    assert_eq!(failing["message"], "db unreachable");
+}
