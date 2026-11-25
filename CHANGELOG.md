@@ -229,6 +229,10 @@ first.
 - **AES-GCM nonces come straight from the OS RNG** (rand 0.10 dropped the
   fork protection of `ThreadRng`), and a failing RNG returns an error instead
   of panicking. The stored ciphertext format is unchanged. (#216)
+- **Releases are published only from `main`.** The release workflow now also
+  refuses a tag whose commit isn't on `main` (the tip of `main` or one of its
+  ancestors), before it builds anything, so a tag on any other branch
+  publishes no image and no GitHub Release.
 
 ### Added
 
