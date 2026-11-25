@@ -28,7 +28,7 @@ use std::sync::{LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
 use axum::http::HeaderMap;
-use mcp_k8s::telemetry::{self, semconv, ActionClass, ClientInfo};
+use mcp_k8s::telemetry::{self, semconv, ActionClass, ClientInfo, W3cTraceContext};
 use serde_json::Value;
 use tracing::Span;
 
@@ -269,6 +269,8 @@ pub struct RequestContext {
     pub session: Option<Session>,
     /// A valid `MCP-Protocol-Version` header.
     pub protocol_version: Option<String>,
+    /// W3C trace context from the `traceparent` and `tracestate` headers.
+    pub http_trace: Option<W3cTraceContext>,
 }
 
 impl RequestContext {
@@ -285,6 +287,8 @@ impl RequestContext {
             protocol_version: header("mcp-protocol-version")
                 .filter(|v| telemetry::valid_protocol_version(v))
                 .map(str::to_string),
+            http_trace: header("traceparent")
+                .and_then(|tp| W3cTraceContext::from_parts(tp, header("tracestate"))),
         }
     }
 }

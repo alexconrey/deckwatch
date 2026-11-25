@@ -49,8 +49,10 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 # events and metric events it emits through `tracing`. Off unless an
 # OTEL_EXPORTER_OTLP_*ENDPOINT is set. No HTTP-client features: export goes
 # through the shared outbound client (src/outbound), so it gets the extra CAs.
+# spec_unstable_metrics_views: the attribute allowlist on the view for
+# mcp-k8s's duration histogram (telemetry::mcp_duration_view).
 opentelemetry = "0.33"
-opentelemetry_sdk = { version = "0.33", default-features = false, features = ["trace", "metrics", "logs", "internal-logs"] }
+opentelemetry_sdk = { version = "0.33", default-features = false, features = ["trace", "metrics", "logs", "internal-logs", "spec_unstable_metrics_views"] }
 opentelemetry-otlp = { version = "0.33", default-features = false, features = ["http-proto", "gzip-http", "trace", "metrics", "logs", "internal-logs"] }
 opentelemetry-http = { version = "0.33", default-features = false }
 opentelemetry-appender-tracing = "0.33"

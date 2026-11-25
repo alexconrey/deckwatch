@@ -12,7 +12,7 @@ use axum::extract::State;
 use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
 use axum::response::IntoResponse;
 use axum::Json;
-use mcp_k8s::telemetry::{self, semconv, ClientInfo, ToolCall};
+use mcp_k8s::telemetry::{self, semconv, ClientInfo, ToolCall, W3cTraceContext};
 use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder, QuerySelect};
 use serde::{Deserialize, Serialize};
 use tracing::{Instrument, Span};
@@ -84,6 +84,16 @@ pub async fn handle_mcp(
         request.id.as_ref(),
         &ctx,
     );
+    // The remote parent must be set before the span is first entered, and
+    // reading the trace id starts the span, so this order matters.
+    crate::telemetry::set_remote_parent(
+        &span,
+        W3cTraceContext::from_meta(&request.params).as_ref(),
+        ctx.http_trace.as_ref(),
+    );
+    if let Some(trace_id) = crate::telemetry::trace_id(&span) {
+        span.record(semconv::TRACE_ID, trace_id.as_str());
+    }
     let request_span = span.clone();
 
     async move {
