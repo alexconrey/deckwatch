@@ -844,6 +844,8 @@ export interface CostSettings {
 export interface TracingSettings {
   query_url: string;
   ui_url: string;
+  // "tempo" | "jaeger": which deep-link template traceUrlFor() uses.
+  backend_kind?: string;
 }
 
 // --- Application types ---
@@ -1310,4 +1312,99 @@ export interface PromoteResponse {
   target_name: string;
   no_op: boolean;
   changes: PromoteFieldChange[];
+}
+
+// --- Audit log (GET /api/audit) ---
+
+// Mirrors src/audit.rs::AuditEntry. MCP rows (source "mcp") also carry the
+// tool, outcome and the client's self-reported name; their `detail` is JSON
+// (McpAuditDetail). API rows have free-text detail and empty MCP fields.
+export interface AuditEntry {
+  id: string;
+  timestamp: string;
+  action: string;
+  resource_type: string;
+  resource_name: string;
+  namespace: string;
+  detail: string;
+  user_identity: string;
+  source: "api" | "mcp" | string;
+  tool: string;
+  outcome: "ok" | "error" | "denied" | "cancelled" | "";
+  // What the MCP client said about itself in `initialize`: a label, never
+  // an identity.
+  client_name: string;
+}
+
+export interface AuditPage {
+  items: AuditEntry[];
+  // Pass as `cursor` for the next page; null on the last page.
+  next_cursor: string | null;
+}
+
+export interface AuditQuery {
+  source?: "api" | "mcp";
+  action?: string;
+  tool?: string;
+  client?: string;
+  outcome?: string;
+  resource_type?: string;
+  namespace?: string;
+  // RFC 3339: only rows at or after this time.
+  since?: string;
+  order?: "asc" | "desc";
+  limit?: number;
+  cursor?: string;
+}
+
+// The JSON `detail` of an MCP audit row (src/handlers/mcp_audit.rs::Detail).
+export interface McpAuditDetail {
+  tool: string;
+  outcome: "ok" | "error" | "denied" | "cancelled";
+  denied_rule?: string;
+  // Top-level argument keys; "?" stands for keys the tool doesn't declare.
+  argument_keys: string[];
+  // Only the values mcp-k8s's allowlist permits (namespace, name, image, ...).
+  arguments: Record<string, string | number | boolean>;
+  api_version?: string;
+  client?: { name?: string; version?: string; self_reported: true };
+  session_id?: string;
+  trace_id?: string;
+  duration_ms: number;
+}
+
+// --- MCP activity metrics (GET /api/prometheus/mcp_activity) ---
+
+export type McpActivityWindow = "1h" | "24h" | "7d";
+
+export interface TimePoint {
+  // Milliseconds since the epoch.
+  t: number;
+  v: number;
+}
+
+export interface LabeledSeries {
+  // The call outcome: "ok", "error" or "denied".
+  label: string;
+  points: TimePoint[];
+}
+
+export interface ToolActivity {
+  tool: string;
+  // Prometheus increase() over the window, so not always a whole number.
+  calls: number;
+  errors: number;
+  denied: number;
+  p95_seconds: number | null;
+}
+
+export interface McpActivityResponse {
+  window_seconds: number;
+  step_seconds: number;
+  calls_per_minute: LabeledSeries[];
+  apply_manifest_per_minute: LabeledSeries[];
+  p95_seconds: TimePoint[];
+  tools: ToolActivity[];
+  // Set when Prometheus isn't configured or a query failed.
+  unavailable_reason?: string;
 }

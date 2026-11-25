@@ -153,6 +153,16 @@ const onNsCreated = (name: string) => {
         Cluster
       </v-btn>
       <v-btn
+        variant="text"
+        size="small"
+        prepend-icon="mdi-robot-outline"
+        class="mr-1"
+        data-testid="mcp-activity-nav"
+        :to="{ name: 'McpActivity' }"
+      >
+        MCP
+      </v-btn>
+      <v-btn
         v-if="pluginProblems.length"
         variant="text"
         size="small"

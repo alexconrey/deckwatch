@@ -1,4 +1,5 @@
 import { apiFetch } from "./client";
+import type { McpActivityResponse, McpActivityWindow } from "@/types/api";
 
 // Curated query keys the backend accepts. Kept in sync with `QueryKind` in
 // src/handlers/prometheus_query.rs -- new entries require both sides to
@@ -79,6 +80,13 @@ export const prometheusQueryApi = {
     });
     return apiFetch<RangeResponse>(`/prometheus/query_range?${qs.toString()}`);
   },
+
+  // deckwatch's own MCP tool call metrics for the MCP activity page: fixed
+  // queries over the window, or `unavailable_reason` without Prometheus.
+  mcpActivity: (window: McpActivityWindow) =>
+    apiFetch<McpActivityResponse>(
+      `/prometheus/mcp_activity?window=${encodeURIComponent(window)}`,
+    ),
 
   // Convenience wrapper for the ring-buffer -> Prometheus fallback path in
   // `useResourceMetrics.ts`. Callers pass the named window; we compute

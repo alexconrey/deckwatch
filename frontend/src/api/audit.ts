@@ -1,23 +1,18 @@
 import { apiFetch } from "./client";
+import type { AuditEntry, AuditPage, AuditQuery } from "@/types/api";
 
-export interface AuditEntry {
-  id: string;
-  timestamp: string;
-  action: string;
-  resource_type: string;
-  resource_name: string;
-  namespace: string;
-  detail: string;
-  user_identity: string;
-}
+export type { AuditEntry, AuditPage, AuditQuery };
 
 export const auditApi = {
-  list: (opts?: { resource_type?: string; namespace?: string; limit?: number }) => {
+  /** One page of audit rows, newest first unless `order: "asc"`. */
+  list: (query: AuditQuery = {}) => {
     const params = new URLSearchParams();
-    if (opts?.resource_type) params.set("resource_type", opts.resource_type);
-    if (opts?.namespace) params.set("namespace", opts.namespace);
-    if (opts?.limit) params.set("limit", String(opts.limit));
+    for (const [key, value] of Object.entries(query)) {
+      if (value !== undefined && value !== null && value !== "") {
+        params.set(key, String(value));
+      }
+    }
     const qs = params.toString();
-    return apiFetch<{ entries: AuditEntry[] }>(`/audit${qs ? "?" + qs : ""}`);
+    return apiFetch<AuditPage>(`/audit${qs ? "?" + qs : ""}`);
   },
 };
