@@ -283,6 +283,16 @@ function onRegistryPicked(imageRef: string) {
   selectedRegistryName.value = CUSTOM_SENTINEL;
 }
 
+/** Look up branches once the user starts typing in the Branch field.
+ *  Vuetify 4 also emits update:search when it copies the selected branch
+ *  into the search text (when the dialog fills in an existing config), so
+ *  skip that: it ran before the token selection was restored and showed
+ *  "Select a Git token…" on a config that has one. */
+function onBranchSearch(search: string | null) {
+  if (search === form.value.branch) return;
+  if (!branchOptions.value.length && !branchLoading.value) fetchBranches();
+}
+
 /** Fires the branch listing API when the user opens/types in the branch
  *  autocomplete. Requires a resolved repo URL + selected managed token. */
 async function fetchBranches() {
@@ -461,9 +471,7 @@ onMounted(() => {
               auto-select-first
               required
               @focus="fetchBranches"
-              @update:search="() => {
-                if (!branchOptions.length && !branchLoading) fetchBranches();
-              }"
+              @update:search="onBranchSearch"
             />
           </v-col>
           <v-col cols="6">
