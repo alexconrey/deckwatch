@@ -42,16 +42,16 @@ export interface GuardrailException {
  */
 export const GUARDRAIL_EXCEPTIONS: readonly GuardrailException[] = [
   { field: "allow_privileged", label: "Privileged containers" },
-  { field: "allow_privilege_escalation", label: "Privilege escalation (allowPrivilegeEscalation)" },
+  { field: "allow_privilege_escalation", label: "Privilege escalation" },
   { field: "allow_host_namespaces", label: "Host network, PID and IPC namespaces" },
   { field: "allow_host_path", label: "hostPath volumes" },
   { field: "allow_host_ports", label: "Host ports" },
-  { field: "allow_unconfined", label: "Unconfined seccomp/AppArmor, unsafe sysctls" },
+  { field: "allow_unconfined", label: "Unconfined profiles, unsafe sysctls" },
   { field: "allow_node_port", label: "NodePort Services" },
   { field: "allow_load_balancer", label: "LoadBalancer Services" },
   { field: "allow_external_services", label: "ExternalName Services and external IPs" },
   { field: "allow_ingress_snippets", label: "Ingress snippet annotations" },
-  { field: "allow_rbac_escalation", label: "RBAC escalation (escalate, bind, impersonate, wildcards)" },
+  { field: "allow_rbac_escalation", label: "RBAC escalation (bind, escalate, wildcards)" },
 ];
 
 /**

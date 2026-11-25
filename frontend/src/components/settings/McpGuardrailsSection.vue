@@ -88,7 +88,7 @@ const groupRules = [
             >
               <template #label>
                 <span>{{ rule.label }}</span>
-                <code class="ml-2 text-caption text-medium-emphasis">{{ rule.field }}</code>
+                <code class="ml-2 text-caption text-medium-emphasis text-no-wrap">{{ rule.field }}</code>
               </template>
             </v-checkbox>
           </v-col>
