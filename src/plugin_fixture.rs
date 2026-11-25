@@ -628,6 +628,7 @@ pub mod fake_events {
                 .map(str::to_string);
             match (method, segments.as_slice()) {
                 ("GET", ["apis", "apps", "v1", "namespaces", ns, "deployments"]) => {
+                    // Full objects: they also read as metadata-only items.
                     let items: Vec<Value> = st
                         .deployments
                         .iter()
@@ -637,24 +638,31 @@ pub mod fake_events {
                                 d["metadata"]["labels"]["deckwatch.io/application"] == app
                             })
                         })
-                        .map(|d| {
-                            json!({
-                                "apiVersion": "meta.k8s.io/v1",
-                                "kind": "PartialObjectMetadata",
-                                "metadata": d["metadata"],
-                            })
-                        })
+                        .cloned()
                         .collect();
                     Some((
                         200,
                         json!({
-                            "apiVersion": "meta.k8s.io/v1",
-                            "kind": "PartialObjectMetadataList",
+                            "apiVersion": "apps/v1",
+                            "kind": "DeploymentList",
                             "metadata": { "resourceVersion": "1" },
                             "items": items,
                         }),
                     ))
                 }
+                // The plugin reconciler's server-side apply.
+                ("PATCH", ["apis", "apps", "v1", "namespaces", ns, "deployments", name]) => st
+                    .deployments
+                    .iter()
+                    .find(|d| d["metadata"]["namespace"] == *ns && d["metadata"]["name"] == *name)
+                    .map(|d| (200, d.clone())),
+                ("GET", ["apis", "batch", "v1", "namespaces", _ns, "cronjobs"]) => Some((
+                    200,
+                    json!({
+                        "apiVersion": "batch/v1", "kind": "CronJobList",
+                        "metadata": { "resourceVersion": "1" }, "items": [],
+                    }),
+                )),
                 ("GET", ["apis", "apps", "v1", "namespaces", ns, "deployments", name]) => st
                     .deployments
                     .iter()
@@ -729,4 +737,41 @@ pub mod fake_events {
         }
         core
     }
+}
+
+/// A webhook receiver on localhost that records every JSON body POSTed to
+/// it. Returns its URL and the bodies received so far.
+pub async fn serve_webhook() -> (String, Arc<std::sync::Mutex<Vec<serde_json::Value>>>) {
+    let received: Arc<std::sync::Mutex<Vec<serde_json::Value>>> = Arc::default();
+    let sink = received.clone();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let app = axum::Router::new().route(
+        "/hook",
+        axum::routing::post(move |axum::Json(body): axum::Json<serde_json::Value>| {
+            let sink = sink.clone();
+            async move {
+                sink.lock().unwrap().push(body);
+                "ok"
+            }
+        }),
+    );
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    (format!("http://{addr}/hook"), received)
+}
+
+/// Save notification settings that send every event to `webhook_url`.
+pub async fn enable_notifications(state: &crate::state::AppState, webhook_url: &str) {
+    let mut settings = crate::handlers::settings::load_settings_from_db(state).await;
+    settings.notifications = Some(crate::handlers::settings::NotificationSettings {
+        enabled: true,
+        webhook_url: webhook_url.to_string(),
+        event_types: vec![],
+        namespaces: vec![],
+    });
+    crate::handlers::settings::upsert_settings_to_db_pub(&state.db, &settings)
+        .await
+        .unwrap();
 }
