@@ -326,6 +326,7 @@ eachTheme(() => {
       await openDeployment(app);
       await page.getByRole("button", { name: "Delete" }).click();
       const dialog = page.getByRole("dialog").filter({ hasText: "Delete Deployment" });
+      await app.autofocused(dialog.getByRole("textbox"));
       await dialog.getByRole("textbox").fill("web");
       await expect(dialog.getByRole("button", { name: "Delete" })).toBeEnabled();
       await app.snap("deployment-detail/delete-confirm");

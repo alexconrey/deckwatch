@@ -118,6 +118,7 @@ eachTheme(() => {
     await app.goto("/applications/default/storefront");
     await page.getByRole("button", { name: "Delete" }).click();
     const dialog = app.dialog("Delete Application");
+    await app.autofocused(dialog.getByRole("textbox"));
     await dialog.getByLabel("Also delete all member resources (deployments and cronjobs)").check();
     await dialog.getByRole("textbox").fill("storefront");
     await expect(dialog.getByText("This will delete all attached deployments and cronjobs.")).toBeVisible();

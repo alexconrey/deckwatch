@@ -84,6 +84,25 @@ export class App {
   }
 
   /**
+   * Let a dialog with an autofocus field finish opening, then make sure that
+   * field has the focus.
+   *
+   * Vuetify 3 focuses an autofocus field as soon as it is visible. Vuetify 4
+   * defers it by 50ms (to wait out the dialog's enter transition) and, when
+   * the page is busy, can lose it because the dialog is still hidden. The
+   * pending timers are run first, so the deferred focus cannot land after
+   * the test has moved on; then the field is focused if it isn't already.
+   */
+  async autofocused(field: Locator): Promise<void> {
+    await this.page.clock.runFor(100);
+    await this.settle();
+    if (!(await field.evaluate((el) => el === document.activeElement))) {
+      await field.focus();
+      await this.settle();
+    }
+  }
+
+  /**
    * Advance the frozen clock's timers by `ms` (polling intervals fire, `Date`
    * stays at FIXED_NOW), then settle. Use it to get a deterministic number of
    * metric samples instead of waiting in real time.
