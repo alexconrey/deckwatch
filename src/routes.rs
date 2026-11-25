@@ -350,6 +350,11 @@ pub fn build_router(
                 .put(monitoring::upsert)
                 .delete(monitoring::delete),
         )
+        // MCP activity page: deckwatch's own MCP metrics (curated PromQL)
+        .route(
+            "/api/prometheus/mcp_activity",
+            get(prometheus_query::mcp_activity),
+        )
         // Prometheus range-query proxy (PromQL via curated query catalog)
         .route(
             "/api/prometheus/query_range",

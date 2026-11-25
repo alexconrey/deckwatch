@@ -117,6 +117,12 @@ const router = createRouter({
             import("@/components/pages/ClusterOverviewPage.vue"),
         },
         {
+          path: "mcp-activity",
+          name: "McpActivity",
+          component: () =>
+            import("@/components/pages/McpActivityPage.vue"),
+        },
+        {
           path: "audit",
           name: "AuditLog",
           component: () =>

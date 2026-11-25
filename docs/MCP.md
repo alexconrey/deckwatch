@@ -385,6 +385,30 @@ Rows are kept for 365 days and up to 100,000 rows, then pruned hourly. Set
 `DECKWATCH_AUDIT_RETENTION_DAYS` and `DECKWATCH_AUDIT_MAX_ROWS` (Helm
 `audit.retentionDays`, `audit.maxRows`; `0` turns a limit off).
 
+### MCP activity page
+
+**MCP** in the top bar opens the MCP activity page. It shows the last hour,
+24 hours or 7 days:
+
+- **Changes and denials**: the MCP audit rows above, newest first, filterable
+  by action, outcome and client. The client column says what the client said
+  about itself (`client says claude-code 2.1.0`), never who made the call. A
+  **View trace** link appears when deckwatch exports traces (the row has a
+  trace id) and a tracing UI is set in Settings → Observability
+  (`tracing.ui_url`).
+- **Tool calls**: calls per minute, the share that failed or were denied, the
+  p95 duration and `apply_manifest` calls per minute over time, and calls,
+  errors, denials and p95 per tool. These come from Prometheus (deckwatch's own
+  `/metrics`, scraped by the `PROMETHEUS_URL` Prometheus) through fixed queries
+  (`GET /api/prometheus/mcp_activity`). Without Prometheus the page says so and
+  shows only the audit rows. Like the bundled Grafana dashboard, it sums every
+  deckwatch instance that Prometheus scrapes.
+
+The audit rows come from `GET /api/audit`, which filters on `source`, `action`,
+`tool`, `client`, `outcome`, `resource_type`, `namespace` and `since`, and
+returns pages newest first (`order=asc` for oldest first) linked by
+`next_cursor`.
+
 Prometheus `/metrics` counts each tool call once:
 `deckwatch_mcp_tool_calls_total{tool,status}` counts the calls deckwatch
 serves itself (and calls a guardrail refused, as `status="denied"`), and

@@ -38,6 +38,8 @@ tags:
   - name: Settings
   - name: Plugins
   - name: Registry
+  - name: Audit
+  - name: MCP
   - name: OCI
 
 paths:
@@ -1020,6 +1022,59 @@ paths:
       responses:
         "200": { description: Registry supports the spec }
 
+  /api/audit:
+    get:
+      tags: [Audit]
+      summary: List audit log rows
+      description: |
+        Changes made through the UI or REST API (`source=api`), and MCP tool calls
+        that wrote, deleted or exec'd, or that a guardrail denied (`source=mcp`).
+        Reads that went through are not recorded. Rows are newest first unless
+        `order=asc`, in pages linked by `next_cursor`. Every filter matches exactly.
+
+        MCP rows never hold argument values outside mcp-k8s's allowlist (namespace,
+        name, kind, image, ...). `client_name` and the client in `detail` are what
+        the MCP client said about itself in `initialize`: a label, not an identity.
+      parameters:
+        - { name: source, in: query, schema: { type: string, enum: [api, mcp] } }
+        - name: action
+          in: query
+          description: "`write`, `delete`, `exec` or `read` for MCP rows; `create`, `update`, `delete`, ... for API rows"
+          schema: { type: string }
+        - { name: tool, in: query, description: MCP rows, the tool called, schema: { type: string } }
+        - { name: client, in: query, description: "MCP rows: the client's self-reported name", schema: { type: string } }
+        - { name: outcome, in: query, schema: { type: string, enum: [ok, error, denied, cancelled] } }
+        - { name: resource_type, in: query, schema: { type: string } }
+        - { name: namespace, in: query, schema: { type: string } }
+        - { name: since, in: query, description: Only rows at or after this time, schema: { type: string, format: date-time } }
+        - { name: order, in: query, schema: { type: string, enum: [desc, asc], default: desc } }
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 200, default: 50 } }
+        - { name: cursor, in: query, description: "`next_cursor` of the previous page", schema: { type: string } }
+      responses:
+        "200":
+          description: One page of audit rows
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AuditResponse" }
+        "400": { description: Invalid order, cursor or since }
+  /api/prometheus/mcp_activity:
+    get:
+      tags: [MCP, Metrics]
+      summary: MCP tool call metrics for the MCP activity page
+      description: |
+        deckwatch's own MCP metrics (`deckwatch_mcp_tool_calls_total`,
+        `mcp_k8s_tool_calls_total` and their duration histograms) from the Prometheus
+        at `PROMETHEUS_URL`, through fixed queries. Without Prometheus, or when a
+        query fails, the response is 200 with `unavailable_reason` set and no data.
+        Sums every deckwatch instance that Prometheus scrapes.
+      parameters:
+        - { name: window, in: query, schema: { type: string, enum: [1h, 24h, 7d], default: 24h } }
+      responses:
+        "200":
+          description: Series and per-tool totals for the window
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/McpActivityResponse" }
   /metrics:
     get:
       tags: [Metrics]
@@ -1047,6 +1102,86 @@ components:
       description: Resource name
 
   schemas:
+    AuditEntry:
+      type: object
+      required: [id, timestamp, action, resource_type, resource_name, namespace, detail, user_identity, source, tool, outcome, client_name]
+      properties:
+        id: { type: string }
+        timestamp: { type: string, format: date-time }
+        action: { type: string, description: "MCP rows: write, delete, exec, or read for a denied read" }
+        resource_type: { type: string }
+        resource_name: { type: string }
+        namespace: { type: string }
+        detail:
+          type: string
+          description: |
+            Free text for API rows. For MCP rows, JSON (see McpAuditDetail).
+        user_identity: { type: string, description: Empty until callers authenticate }
+        source: { type: string, enum: [api, mcp] }
+        tool: { type: string, description: "MCP rows: the tool called; empty otherwise" }
+        outcome: { type: string, description: "MCP rows: ok, error, denied or cancelled; empty otherwise" }
+        client_name: { type: string, description: "MCP rows: the client's self-reported name (not an identity)" }
+    AuditResponse:
+      type: object
+      required: [items]
+      properties:
+        items: { type: array, items: { $ref: "#/components/schemas/AuditEntry" } }
+        next_cursor: { type: string, nullable: true, description: Pass as `cursor` for the next page }
+    McpAuditDetail:
+      type: object
+      description: The JSON in an MCP audit row's `detail`.
+      required: [tool, outcome, argument_keys, arguments, duration_ms]
+      properties:
+        tool: { type: string }
+        outcome: { type: string, enum: [ok, error, denied, cancelled] }
+        denied_rule: { type: string, description: "namespace_allowlist, or an mcp-k8s permission rule" }
+        argument_keys: { type: array, items: { type: string }, description: "Top-level argument keys; `?` for undeclared ones" }
+        arguments:
+          type: object
+          additionalProperties: true
+          description: Only the values mcp-k8s's allowlist permits (namespace, name, kind, image, ...)
+        api_version: { type: string }
+        client:
+          type: object
+          properties:
+            name: { type: string }
+            version: { type: string }
+            self_reported: { type: boolean, enum: [true] }
+        session_id: { type: string }
+        trace_id: { type: string, description: Present when deckwatch exports traces }
+        duration_ms: { type: integer }
+    TimePoint:
+      type: object
+      required: [t, v]
+      properties:
+        t: { type: integer, description: Milliseconds since the epoch }
+        v: { type: number }
+    LabeledSeries:
+      type: object
+      required: [label, points]
+      properties:
+        label: { type: string, description: "The call outcome: ok, error or denied" }
+        points: { type: array, items: { $ref: "#/components/schemas/TimePoint" } }
+    ToolActivity:
+      type: object
+      required: [tool, calls, errors, denied]
+      properties:
+        tool: { type: string }
+        calls: { type: number, description: Calls in the window (Prometheus increase, so not always whole) }
+        errors: { type: number }
+        denied: { type: number }
+        p95_seconds: { type: number, nullable: true }
+    McpActivityResponse:
+      type: object
+      required: [window_seconds, step_seconds, calls_per_minute, apply_manifest_per_minute, p95_seconds, tools]
+      properties:
+        window_seconds: { type: integer }
+        step_seconds: { type: integer }
+        calls_per_minute: { type: array, items: { $ref: "#/components/schemas/LabeledSeries" } }
+        apply_manifest_per_minute: { type: array, items: { $ref: "#/components/schemas/LabeledSeries" } }
+        p95_seconds: { type: array, items: { $ref: "#/components/schemas/TimePoint" } }
+        tools: { type: array, maxItems: 25, items: { $ref: "#/components/schemas/ToolActivity" } }
+        unavailable_reason: { type: string, description: "Set when Prometheus isn't configured or a query failed" }
     Health:
       type: object
       properties:
