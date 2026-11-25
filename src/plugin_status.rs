@@ -315,6 +315,106 @@ fn now_utc() -> DateTimeUtc {
     DateTimeUtc::from_timestamp(d.as_secs() as i64, d.subsec_nanos()).unwrap_or_default()
 }
 
+/// A failing notification for a target is suppressed if one was sent less
+/// than this long ago, so a plugin that flaps between failing and working
+/// can't flood the webhook. The matching recovery is then suppressed too.
+pub const NOTIFY_FLAP_GUARD: std::time::Duration = std::time::Duration::from_secs(600);
+/// Notifications being sent at once; more are dropped.
+const MAX_NOTIFICATIONS_IN_FLIGHT: usize = 8;
+
+/// Sends `plugin_failing` and `plugin_recovered` notifications on
+/// transitions, and only on transitions: the worker computes each
+/// transition exactly once, in order.
+struct TransitionNotifier {
+    client: crate::notifications::NotificationClient,
+    last_failing: std::collections::HashMap<StatusKey, std::time::Instant>,
+    suppressed: std::collections::HashSet<StatusKey>,
+    in_flight: std::sync::Arc<tokio::sync::Semaphore>,
+}
+
+impl TransitionNotifier {
+    fn new(state: &AppState) -> Self {
+        Self {
+            client: crate::notifications::NotificationClient::new(state.clone()),
+            last_failing: Default::default(),
+            suppressed: Default::default(),
+            in_flight: std::sync::Arc::new(tokio::sync::Semaphore::new(
+                MAX_NOTIFICATIONS_IN_FLIGHT,
+            )),
+        }
+    }
+
+    fn on_transition(&mut self, update: &StatusUpdate, transition: Transition) {
+        let key = &update.key;
+        let (namespace, application) = key
+            .application_id
+            .split_once('/')
+            .map(|(ns, app)| (ns.to_string(), app.to_string()))
+            .unwrap_or_default();
+        let event = match transition {
+            Transition::Failing => {
+                let now = std::time::Instant::now();
+                self.last_failing
+                    .retain(|_, at| now.duration_since(*at) < NOTIFY_FLAP_GUARD);
+                if self.last_failing.contains_key(key) {
+                    self.suppressed.insert(key.clone());
+                    tracing::info!(plugin = %key.plugin, "plugin failing again within the flap guard; not notifying");
+                    return;
+                }
+                self.last_failing.insert(key.clone(), now);
+                let first_error = update.events.iter().find(|r| {
+                    crate::plugin_events::effective_severity(r.event.severity)
+                        == crate::plugins::EventSeverity::Error
+                });
+                crate::notifications::NotificationEvent::PluginFailing {
+                    namespace,
+                    application,
+                    plugin: key.plugin.clone(),
+                    resource_id: key.resource_id.clone(),
+                    export: update.export.clone(),
+                    code: first_error
+                        .map(|r| r.event.code.clone())
+                        .unwrap_or_else(|| crate::plugin_events::codes::UNSPECIFIED.into()),
+                    message: first_error
+                        .map(|r| r.event.message.clone())
+                        .unwrap_or_else(|| "failed".into()),
+                }
+            }
+            Transition::Recovered => {
+                if self.suppressed.remove(key) {
+                    return;
+                }
+                crate::notifications::NotificationEvent::PluginRecovered {
+                    namespace,
+                    application,
+                    plugin: key.plugin.clone(),
+                    resource_id: key.resource_id.clone(),
+                    export: update.export.clone(),
+                }
+            }
+        };
+        let Ok(permit) = self.in_flight.clone().try_acquire_owned() else {
+            tracing::warn!(plugin = %key.plugin, "too many plugin notifications in flight; dropped one");
+            return;
+        };
+        let client = self.client.clone();
+        tokio::spawn(async move {
+            if let Err(e) = client.send_now(event).await {
+                tracing::warn!(error = %e, "plugin notification failed");
+            }
+            drop(permit);
+        });
+    }
+
+    /// Wait until every notification being sent has been.
+    async fn idle(&self) {
+        let _ = self
+            .in_flight
+            .acquire_many(MAX_NOTIFICATIONS_IN_FLIGHT as u32)
+            .await;
+    }
+}
+
 /// Start the worker that applies status updates and publishes Kubernetes
 /// Events, and connect it to `state.plugin_telemetry`. Call once, after
 /// `AppState` is built. Until then (and in tests that don't call it),
@@ -335,6 +435,7 @@ pub(crate) fn spawn_worker_with(state: &AppState, kube: KubeEventSink) {
 }
 
 async fn run_worker(state: AppState, mut rx: mpsc::Receiver<SinkMsg>, kube: KubeEventSink) {
+    let mut notifier = TransitionNotifier::new(&state);
     while let Some(msg) = rx.recv().await {
         match msg {
             SinkMsg::Status(update) => {
@@ -357,6 +458,7 @@ async fn run_worker(state: AppState, mut rx: mpsc::Receiver<SinkMsg>, kube: Kube
                         transition = ?transition,
                         "plugin status changed"
                     );
+                    notifier.on_transition(&update, transition);
                 }
                 if let Some(event) = crate::plugin_k8s_events::event_for(&update, transition) {
                     kube.spawn_publish(KubeEventRequest {
@@ -398,6 +500,7 @@ async fn run_worker(state: AppState, mut rx: mpsc::Receiver<SinkMsg>, kube: Kube
             }
             SinkMsg::Flush(done) => {
                 kube.idle().await;
+                notifier.idle().await;
                 let _ = done.send(());
             }
         }

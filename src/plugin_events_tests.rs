@@ -558,3 +558,29 @@ fn only_valid_version_00_traceparents_are_accepted() {
         assert_eq!(trace_id_of(bad), None, "{bad:?}");
     }
 }
+
+/// With an OpenTelemetry layer, a span's traceparent is what plugins get;
+/// without one there is none.
+#[test]
+fn otel_traceparent_reads_the_spans_opentelemetry_context() {
+    use opentelemetry::trace::TracerProvider as _;
+    use tracing_subscriber::layer::SubscriberExt as _;
+
+    assert_eq!(otel_traceparent(&tracing::info_span!("no layer")), None);
+
+    let exporter = opentelemetry_sdk::trace::InMemorySpanExporter::default();
+    let provider = opentelemetry_sdk::trace::SdkTracerProvider::builder()
+        .with_simple_exporter(exporter)
+        .build();
+    let subscriber = tracing_subscriber::registry()
+        .with(tracing_opentelemetry::layer().with_tracer(provider.tracer("test")));
+    let traceparent = tracing::subscriber::with_default(subscriber, || {
+        let span = tracing::info_span!("plugin apply");
+        let _guard = span.enter();
+        otel_traceparent(&span)
+    })
+    .expect("a traceparent");
+    let trace_id = trace_id_of(&traceparent).expect("a valid version-00 traceparent");
+    assert_eq!(trace_id.len(), 32);
+    assert!(traceparent.ends_with("-01"), "sampled: {traceparent}");
+}

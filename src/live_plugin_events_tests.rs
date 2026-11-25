@@ -298,3 +298,111 @@ async fn live_cluster_plugin_failure_is_a_kubernetes_event_on_the_deployment() {
 
     cluster.cleanup().await;
 }
+
+/// The acceptance story against a real API server: a plugin that keeps
+/// failing on the reconcile loop shows up in the status (the application
+/// page), as one Kubernetes Event in `kubectl describe`, in MCP
+/// `get_events`, and as exactly one notification, with its log lines inside
+/// the plugin span; its recovery is reported once too.
+#[tokio::test]
+#[ignore = "needs a throwaway k3d cluster; see the module docs"]
+async fn live_cluster_acceptance_failing_plugin_is_visible_everywhere_and_notifies_once() {
+    use crate::plugin_events_acceptance_tests::{get_events, provisioned, sealed_vault};
+    use crate::plugin_fixture::capture::capture_async;
+    use crate::watcher::{reconcile_application_plugins, PluginFieldSweep};
+
+    let Some(cluster) = live_cluster().await else {
+        return;
+    };
+    let ns = cluster.namespace.clone();
+    cluster.deployment("web", "shop").await;
+
+    let dir = tempfile::tempdir().unwrap();
+    let mut state = crate::plugin_fixture::test_state(
+        dir.path(),
+        vec![sealed_vault()],
+        Some(cluster.deckwatch.clone()),
+    )
+    .await;
+    // Keep the reconciler's sweep inside the test namespace.
+    state.allowed_namespaces = vec![ns.clone()];
+    let (webhook, notifications) = crate::plugin_fixture::serve_webhook().await;
+    crate::plugin_fixture::enable_notifications(&state, &webhook).await;
+    crate::plugin_status::spawn_worker(&state);
+    provisioned(&state, &ns).await;
+    let mut sweep = PluginFieldSweep::default();
+
+    let ((), logs) = capture_async(reconcile_application_plugins(&state, &mut sweep)).await;
+    for _ in 0..4 {
+        reconcile_application_plugins(&state, &mut sweep).await;
+    }
+    state.plugin_telemetry.flush().await;
+
+    let axum::Json(rows) = crate::handlers::plugin_status::for_application(
+        axum::extract::State(state.clone()),
+        axum::extract::Path((ns.clone(), "shop".to_string())),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        rows[0].health,
+        crate::plugin_events::Health::Failing,
+        "{rows:#?}"
+    );
+    assert_eq!(rows[0].consecutive_failures, 5);
+
+    let described = eventually(&cluster, "web", |d| d.contains("PluginApplyFailed")).await;
+    eprintln!("{described}");
+    assert_eq!(
+        described.matches("PluginApplyFailed").count(),
+        1,
+        "{described}"
+    );
+    assert!(described.contains("vault is sealed"), "{described}");
+    assert!(
+        !described.contains("(x"),
+        "repeats within 5 minutes are folded: {described}"
+    );
+
+    let listed = get_events(&state, &ns).await;
+    eprintln!("{listed}");
+    assert!(listed.contains("UNTRUSTED KUBERNETES EVENTS"), "{listed}");
+    assert!(
+        listed.contains("plugin vault: plugin.unspecified: vault is sealed"),
+        "{listed}"
+    );
+
+    assert_eq!(
+        notifications.lock().unwrap().len(),
+        1,
+        "one notification for five failures"
+    );
+
+    let line = logs
+        .iter()
+        .find(|e| e.target == "extism::pdk" && e.message == "unsealing vault for shop/web")
+        .expect("plugin log line");
+    assert_eq!(
+        line.span("plugin apply")
+            .expect("inside the plugin span")
+            .fields["deckwatch.plugin.name"],
+        "vault"
+    );
+
+    *state.plugins.write().await = vec![crate::plugin_fixture::FixturePlugin::new()
+        .export("apply", crate::plugin_fixture::Behavior::output("{}"))
+        .loaded("vault")];
+    reconcile_application_plugins(&state, &mut sweep).await;
+    state.plugin_telemetry.flush().await;
+    let described = eventually(&cluster, "web", |d| d.contains("PluginRecovered")).await;
+    eprintln!("{described}");
+    let kinds: Vec<String> = notifications
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|b| b["event_type"].as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(kinds, vec!["plugin_failing", "plugin_recovered"]);
+
+    cluster.cleanup().await;
+}
